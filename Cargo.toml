@@ -1,0 +1,17 @@
+[package]
+name = "tbamud-rwb"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "circle"
+path = "src/main.rs"
+
+[dependencies]
+# Pin to versions compatible with Rust 1.75 (stable Dec 2023).
+# Newer releases use Cargo edition = "2024" which requires rustc >= 1.85.
+tokio  = { version = "=1.35.1", features = ["full"] }
+anyhow = "=1.0.79"
+bytes  = "=1.5.0"
+tracing            = "=0.1.40"
+tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }

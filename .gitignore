@@ -1,0 +1,100 @@
+Cargo.lock
+*.log
+*.h5
+*.hdf5
+_build
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local run outputs / Claude working dir / large references
+.claude/
+references/
+runs/
+runs_auto/
+
+# Research notes / drafts / refs and internal design docs — local only
+research/
+docs/
+
+# Stray log fragments
+*.log.tail
+
+# Top-level analysis-script output figures (compare_*.py, etc.)
+# Paper figures live under research/**/drafts/ and are unaffected.
+/density_*.png
+/sk_*.png
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+
+# Paper drafts kept locally, not in repo
+papers/
