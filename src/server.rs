@@ -1,34 +1,52 @@
-/// TCP server: bind, listen, and dispatch connections.
+/// TCP server: bind, listen, load shared state, and dispatch connections.
 /// Mirrors init_game() + the accept portion of game_loop() in comm.c.
 
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 
-use crate::{config::Config, descriptor};
+use crate::{
+    config::Config,
+    db,
+    descriptor,
+    login::GameTexts,
+    players::{load_xnames, PlayerDb},
+    world::World,
+};
 
-/// Read greeting text from the data directory and start the accept loop.
-///
-/// Mirrors (in order):
-///   init_game()     — setup before game_loop()
-///   game_loop()     — the accept-new-connection branch
-///   new_descriptor() — delegated to descriptor::handle_connection()
+/// Load shared game state and start the accept loop.
 pub async fn run(config: Config) -> Result<()> {
-    // Load the greeting shown to every new connection.
-    // In the C codebase, GREETINGS is loaded by boot_db() from GREETINGS_FILE
-    // ("text/greetings" relative to lib/).  We read it here before we chdir so
-    // we can use the full relative path; later, when db.rs handles boot_db(),
-    // this will move there.
+    // --- Load greeting -------------------------------------------------------
     let greetings_path = format!("{}/text/greetings", config.dir);
     let greeting = Arc::new(
         std::fs::read_to_string(&greetings_path)
             .with_context(|| format!("Failed to read greeting from {greetings_path}"))?,
     );
 
-    // Bind the listening socket.
-    // Mirrors init_socket() in comm.c: SO_REUSEADDR is set by TcpListener automatically.
+    // --- Load text files (motd, imotd, menu) ---------------------------------
+    // Mirrors the file_to_string_alloc() calls in boot_db() in db.c.
+    let texts = Arc::new(GameTexts::load(&config.dir));
+
+    // --- Load player index ---------------------------------------------------
+    // Mirrors build_player_index() called from boot_db().
+    let players = Arc::new(Mutex::new(
+        PlayerDb::load(&config.dir)
+            .context("Failed to load player index")?,
+    ));
+
+    // --- Load optional xnames ban list ---------------------------------------
+    let xnames = Arc::new(load_xnames(&config.dir));
+
+    // --- Load world (zones + rooms) ------------------------------------------
+    // Mirrors boot_world() in db.c (rooms + zones only — mobs/objs/triggers
+    // are deferred to a later checkpoint).
+    let world: Arc<World> = Arc::new(
+        db::load_world(&config.dir).context("Failed to load world")?,
+    );
+
+    // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr)
         .await
@@ -36,9 +54,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     info!(port = config.port, "Listening for connections");
 
-    // Accept loop — mirrors the FD_ISSET(mother_desc) branch of game_loop().
-    // Each connection is handled in its own Tokio task; there is no shared
-    // descriptor linked-list yet (that will arrive with the game state port).
+    // --- Accept loop ---------------------------------------------------------
     let mut next_id: usize = 1;
     loop {
         let (stream, peer) = listener
@@ -49,14 +65,18 @@ pub async fn run(config: Config) -> Result<()> {
         let id = next_id;
         next_id += 1;
 
-        let greeting = Arc::clone(&greeting);
-
         info!(id, %peer, "Accepted new connection");
 
-        // Spawn an independent task per connection (replaces the descriptor-list
-        // iteration in game_loop(); Tokio's scheduler handles concurrency).
+        let greeting = Arc::clone(&greeting);
+        let players  = Arc::clone(&players);
+        let texts    = Arc::clone(&texts);
+        let xnames   = Arc::clone(&xnames);
+        let world    = Arc::clone(&world);
+
         tokio::spawn(async move {
-            if let Err(e) = descriptor::handle_connection(id, stream, peer, greeting).await {
+            if let Err(e) = descriptor::handle_connection(
+                id, stream, peer, greeting, players, texts, xnames, world,
+            ).await {
                 tracing::warn!(id, error = %e, "Connection task error");
             }
         });

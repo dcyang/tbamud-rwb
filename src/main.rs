@@ -2,9 +2,13 @@
 /// Mirrors main() in comm.c: parse CLI arguments, set up logging, and start the server.
 
 mod config;
+mod db;
 mod descriptor;
+mod login;
+mod players;
 mod server;
 mod telnet;
+mod world;
 
 use anyhow::{bail, Result};
 use config::Config;
