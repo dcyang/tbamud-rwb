@@ -1288,8 +1288,40 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 last_cmd_ok = true;
             }
             'D' => {
-                // Door state — skipped until door-flag handling lands; counts
-                // as success so subsequent if-conditioned commands proceed.
+                // D <if> <room_vnum> <direction> <state>
+                //   state: 0=open, 1=closed, 2=closed+locked.
+                use crate::world::{EX_CLOSED, EX_LOCKED};
+                let room_vnum = cmd.arg1;
+                let dir       = cmd.arg2 as usize;
+                let state     = cmd.arg3;
+                if dir >= 6 { last_cmd_ok = false; continue; }
+                // Apply to the source room.
+                let to_room = if let Some(r) = world.rooms.get_mut(&room_vnum) {
+                    if let Some(ex) = r.exits[dir].as_mut() {
+                        ex.exit_info &= !(EX_CLOSED | EX_LOCKED);
+                        match state {
+                            1 => ex.exit_info |= EX_CLOSED,
+                            2 => ex.exit_info |= EX_CLOSED | EX_LOCKED,
+                            _ => {}
+                        }
+                        ex.to_room
+                    } else { crate::world::NOWHERE }
+                } else { crate::world::NOWHERE };
+                // Mirror the state on the reverse-side exit so both
+                // halves of the door stay consistent.
+                let rev = match dir { 0=>2, 1=>3, 2=>0, 3=>1, 4=>5, 5=>4, _=>0 };
+                if to_room != crate::world::NOWHERE {
+                    if let Some(r) = world.rooms.get_mut(&to_room) {
+                        if let Some(ex) = r.exits[rev].as_mut() {
+                            ex.exit_info &= !(EX_CLOSED | EX_LOCKED);
+                            match state {
+                                1 => ex.exit_info |= EX_CLOSED,
+                                2 => ex.exit_info |= EX_CLOSED | EX_LOCKED,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 last_cmd_ok = true;
             }
             'T' => {
@@ -1417,9 +1449,7 @@ fn parse_room_file(path: &PathBuf, world: &mut World) -> Result<()> {
                     let to_vnum:   i32 = toks[2].parse().unwrap_or(-1);
 
                     // Mirror setup_dir() in db.c
-                    const EX_ISDOOR:    u32 = 1 << 0;
-                    const EX_PICKPROOF: u32 = 1 << 1;
-                    const EX_HIDDEN:    u32 = 1 << 4;
+                    use crate::world::{EX_ISDOOR, EX_PICKPROOF, EX_HIDDEN};
                     let exit_info = match door_type {
                         1 => EX_ISDOOR,
                         2 => EX_ISDOOR | EX_PICKPROOF,

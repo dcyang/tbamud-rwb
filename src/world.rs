@@ -57,6 +57,19 @@ impl Direction {
         }
     }
 
+    /// Compass-reverse — n↔s, e↔w, u↔d.  Used by door commands to
+    /// mirror state changes on the other side of a door.
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::East  => Direction::West,
+            Direction::West  => Direction::East,
+            Direction::Up    => Direction::Down,
+            Direction::Down  => Direction::Up,
+        }
+    }
+
     /// Parse a player-typed direction (e.g. "n", "north", "u")
     pub fn parse(s: &str) -> Option<Direction> {
         match s.to_ascii_lowercase().as_str() {
@@ -80,6 +93,14 @@ pub struct Exit {
     pub key:         i32,       // key vnum or NOTHING (-1)
     pub to_room:     RoomVnum,  // destination vnum (NOWHERE if blocked)
 }
+
+/// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
+/// structs.h.  Only the bits we currently honor are listed.
+pub const EX_ISDOOR:    u32 = 1 << 0;
+pub const EX_CLOSED:    u32 = 1 << 1;
+pub const EX_LOCKED:    u32 = 1 << 2;
+pub const EX_PICKPROOF: u32 = 1 << 3;
+pub const EX_HIDDEN:    u32 = 1 << 4;
 
 /// Extra description (E ... ~ ... ~). Mirrors extra_descr_data.
 #[derive(Debug, Clone, Default)]

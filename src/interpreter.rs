@@ -67,6 +67,7 @@ const COMMANDS: &[&str] = &[
     "quest", "where",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
+    "open", "close", "lock", "unlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -162,6 +163,10 @@ pub async fn dispatch_command(
         Some("save")      => do_save(me, players).await,
         Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, wield, wear, remove, equip, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
         Some("exits")     => do_exits(me, world).await,
+        Some("open")      => do_door(rest, me, world, chars, DoorOp::Open).await,
+        Some("close")     => do_door(rest, me, world, chars, DoorOp::Close).await,
+        Some("lock")      => do_door(rest, me, world, chars, DoorOp::Lock).await,
+        Some("unlock")    => do_door(rest, me, world, chars, DoorOp::Unlock).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2593,6 +2598,166 @@ async fn do_flee(
     CmdOutput::text(format!("\r\nYou flee {}!\r\n{view}", dir.name()))
 }
 
+// ---------------------------------------------------------------------------
+// Door commands (open/close/lock/unlock)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum DoorOp { Open, Close, Lock, Unlock }
+
+/// Resolve a player-supplied target ("north", "n", "door") to the exit
+/// it refers to, returning (direction, exit info, key vnum, keyword,
+/// destination room). Tries direction parsing first, then matches the
+/// arg as a keyword against any door-bearing exit.
+fn find_door_target(world: &World, room: RoomVnum, target: &str)
+    -> Option<(Direction, u32, i32, String, RoomVnum)>
+{
+    let r = world.rooms.get(&room)?;
+    if let Some(dir) = Direction::parse(target) {
+        if let Some(ex) = r.exits[dir as usize].as_ref() {
+            return Some((dir, ex.exit_info, ex.key, ex.keyword.clone(), ex.to_room));
+        }
+    }
+    let tlow = target.to_ascii_lowercase();
+    for (i, ex) in r.exits.iter().enumerate() {
+        if let Some(ex) = ex {
+            if (ex.exit_info & crate::world::EX_ISDOOR) == 0 { continue; }
+            if ex.keyword.split_whitespace().any(|k| k.eq_ignore_ascii_case(&tlow)) {
+                let dir = Direction::from_index(i as u8)?;
+                return Some((dir, ex.exit_info, ex.key, ex.keyword.clone(), ex.to_room));
+            }
+        }
+    }
+    None
+}
+
+/// Toggle EX_* flag bits on both sides of a door under a single world
+/// lock.  `set_mask` are bits to set; `clear_mask` are bits to clear.
+fn mutate_door(world: &mut World, room: RoomVnum, dir: Direction, set_mask: u32, clear_mask: u32) {
+    let to_room = match world.rooms.get_mut(&room)
+        .and_then(|r| r.exits[dir as usize].as_mut())
+    {
+        Some(ex) => {
+            ex.exit_info &= !clear_mask;
+            ex.exit_info |= set_mask;
+            ex.to_room
+        }
+        None => return,
+    };
+    if to_room == crate::world::NOWHERE { return; }
+    let rev = dir.opposite();
+    if let Some(ex) = world.rooms.get_mut(&to_room)
+        .and_then(|r| r.exits[rev as usize].as_mut())
+    {
+        ex.exit_info &= !clear_mask;
+        ex.exit_info |= set_mask;
+    }
+}
+
+async fn do_door(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    op: DoorOp,
+) -> CmdOutput {
+    use crate::world::{EX_ISDOOR, EX_CLOSED, EX_LOCKED};
+    let verb = match op {
+        DoorOp::Open   => "open",
+        DoorOp::Close  => "close",
+        DoorOp::Lock   => "lock",
+        DoorOp::Unlock => "unlock",
+    };
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text(format!("\r\n{} what?\r\n", capitalize_first(verb)));
+    }
+
+    let w = world.lock().await;
+    let Some((dir, info, key_vnum, keyword, _to)) =
+        find_door_target(&w, me.current_room, arg)
+    else {
+        return CmdOutput::text(format!("\r\nYou see no such door here.\r\n"));
+    };
+    drop(w);
+    if (info & EX_ISDOOR) == 0 {
+        return CmdOutput::text(format!("\r\nThat's not a door.\r\n"));
+    }
+    let kw_short = if keyword.is_empty() { "door".to_string() }
+                   else { keyword.split_whitespace().next().unwrap_or("door").to_string() };
+
+    // Op-specific preconditions.
+    let (set_mask, clear_mask, broadcast) = match op {
+        DoorOp::Open => {
+            if (info & EX_CLOSED) == 0 {
+                return CmdOutput::text(format!("\r\nIt's already open.\r\n"));
+            }
+            if (info & EX_LOCKED) != 0 {
+                return CmdOutput::text(format!("\r\nIt seems to be locked.\r\n"));
+            }
+            (0, EX_CLOSED, format!("{} opens the {kw_short}.\r\n", me.name))
+        }
+        DoorOp::Close => {
+            if (info & EX_CLOSED) != 0 {
+                return CmdOutput::text(format!("\r\nIt's already closed.\r\n"));
+            }
+            (EX_CLOSED, 0, format!("{} closes the {kw_short}.\r\n", me.name))
+        }
+        DoorOp::Unlock => {
+            if (info & EX_CLOSED) == 0 {
+                return CmdOutput::text(format!("\r\nIt's not even closed.\r\n"));
+            }
+            if (info & EX_LOCKED) == 0 {
+                return CmdOutput::text(format!("\r\nIt's already unlocked.\r\n"));
+            }
+            if !player_has_key(me, key_vnum, world).await {
+                return CmdOutput::text(format!("\r\nYou don't have the key.\r\n"));
+            }
+            (0, EX_LOCKED, format!("{} unlocks the {kw_short}.\r\n", me.name))
+        }
+        DoorOp::Lock => {
+            if (info & EX_CLOSED) == 0 {
+                return CmdOutput::text(format!("\r\nYou'll need to close it first.\r\n"));
+            }
+            if (info & EX_LOCKED) != 0 {
+                return CmdOutput::text(format!("\r\nIt's already locked.\r\n"));
+            }
+            if !player_has_key(me, key_vnum, world).await {
+                return CmdOutput::text(format!("\r\nYou don't have the key.\r\n"));
+            }
+            (EX_LOCKED, 0, format!("{} locks the {kw_short}.\r\n", me.name))
+        }
+    };
+
+    {
+        let mut w = world.lock().await;
+        mutate_door(&mut w, me.current_room, dir, set_mask, clear_mask);
+    }
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id), &broadcast);
+    CmdOutput::text(format!("\r\nYou {verb} the {kw_short}.\r\n"))
+}
+
+/// True if `key_vnum` is non-negative and the player has an instance of
+/// that vnum in their inventory.
+async fn player_has_key(me: &Character, key_vnum: i32, world: &Arc<Mutex<World>>) -> bool {
+    if key_vnum < 0 { return false; }
+    let w = world.lock().await;
+    me.inventory.iter().any(|&iid| {
+        w.obj_instances.iter().find(|o| o.id == iid)
+            .map(|o| o.vnum == key_vnum)
+            .unwrap_or(false)
+    })
+}
+
+fn capitalize_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None    => String::new(),
+    }
+}
+
 async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     let w = world.lock().await;
     let r = match w.rooms.get(&me.current_room) {
@@ -3241,12 +3406,21 @@ async fn do_move(
         Some(r) => r,
         None    => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
     };
-    let target = match &r.exits[dir as usize] {
+    let (target, closed, door_kw) = match &r.exits[dir as usize] {
         Some(e) if e.to_room != crate::world::NOWHERE
-            && w.rooms.contains_key(&e.to_room) => e.to_room,
+            && w.rooms.contains_key(&e.to_room) =>
+        {
+            let closed = (e.exit_info & crate::world::EX_CLOSED) != 0;
+            let kw = if e.keyword.is_empty() { "door".to_string() }
+                     else { e.keyword.split_whitespace().next().unwrap_or("door").to_string() };
+            (e.to_room, closed, kw)
+        }
         _ => return CmdOutput::text(format!("\r\nAlas, you cannot go that way...\r\n")),
     };
     drop(w);
+    if closed {
+        return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
+    }
 
     let from_room = me.current_room;
     // Fire LEAVE triggers on the source room *before* the player is
