@@ -87,6 +87,30 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
     for intent in mob_intents {
         resolve_mob_attack(intent, world, chars).await;
     }
+
+    // ----- Phase 5: HP/mana regen for non-fighting players ---------------
+    // Regen is gentle (small per-tick) and only applies when out of combat,
+    // so that combat losses feel meaningful.
+    regen_tick(chars).await;
+}
+
+/// Regen HP and mana for players not currently in combat.  Mirrors point_update()
+/// in limits.c, much simplified — fires every combat tick (2s).
+async fn regen_tick(chars: &SharedChars) {
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in handles {
+        let mut c = ph.character.lock().await;
+        if c.fighting.is_some() { continue; }
+        if c.hp < c.max_hp {
+            c.hp = (c.hp + 1 + c.level / 5).min(c.max_hp);
+        }
+        if c.mana < c.max_mana {
+            c.mana = (c.mana + 1 + c.level / 4).min(c.max_mana);
+        }
+    }
 }
 
 struct PlayerIntent {

@@ -19,42 +19,79 @@ use crate::{players::{Class, Sex}, world::RoomVnum};
 // Skills
 // ---------------------------------------------------------------------------
 
-/// A combat skill. Mirrors a tiny slice of the SKILL_* defines in spells.h
-/// (CircleMUD doesn't separate spells and skills; we will eventually).
+/// A combat skill or spell — CircleMUD doesn't separate them, and we
+/// follow that.  Each variant has class restrictions, a mana cost (0 for
+/// pure skills), and a hint at whether it is "magical" (uses `cast`) vs.
+/// "physical" (its own verb).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Skill {
     Kick,
     Bash,
     Backstab,
+    MagicMissile,
+    CureLight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillKind {
+    /// Triggered by its own verb (kick/bash/backstab).
+    Physical,
+    /// Triggered via `cast '<name>'`.
+    Spell,
 }
 
 impl Skill {
-    /// Parse a player-typed skill name (case-insensitive).
+    /// Parse a player-typed skill or spell name (case-insensitive).
+    /// Multi-word spells use lowercase concatenation, e.g. "magic missile"
+    /// → "magic-missile" or "magicmissile".
     pub fn parse(s: &str) -> Option<Skill> {
-        match s.to_ascii_lowercase().as_str() {
-            "kick"     => Some(Skill::Kick),
-            "bash"     => Some(Skill::Bash),
-            "backstab" => Some(Skill::Backstab),
+        let s = s.to_ascii_lowercase();
+        let normalized = s.replace([' ', '-', '_'], "");
+        match normalized.as_str() {
+            "kick"        => Some(Skill::Kick),
+            "bash"        => Some(Skill::Bash),
+            "backstab"    => Some(Skill::Backstab),
+            "magicmissile" => Some(Skill::MagicMissile),
+            "curelight"   => Some(Skill::CureLight),
             _ => None,
         }
     }
 
-    /// Canonical name (lowercase, single word).
+    /// Canonical name (lowercase, may contain spaces for spells).
     pub fn name(self) -> &'static str {
         match self {
-            Skill::Kick     => "kick",
-            Skill::Bash     => "bash",
-            Skill::Backstab => "backstab",
+            Skill::Kick         => "kick",
+            Skill::Bash         => "bash",
+            Skill::Backstab     => "backstab",
+            Skill::MagicMissile => "magic missile",
+            Skill::CureLight    => "cure light",
         }
     }
 
-    /// Which classes can learn this skill. Mirrors the per-class spell_info
-    /// tables in spell_parser.c.
+    pub fn kind(self) -> SkillKind {
+        match self {
+            Skill::Kick | Skill::Bash | Skill::Backstab => SkillKind::Physical,
+            Skill::MagicMissile | Skill::CureLight       => SkillKind::Spell,
+        }
+    }
+
+    /// Mana cost when invoking this skill.  Zero for physical skills.
+    pub fn mana_cost(self) -> i32 {
+        match self {
+            Skill::Kick | Skill::Bash | Skill::Backstab => 0,
+            Skill::MagicMissile => 8,
+            Skill::CureLight    => 6,
+        }
+    }
+
+    /// Which classes can learn this skill.
     pub fn allowed_classes(self) -> &'static [Class] {
         match self {
-            Skill::Kick     => &[Class::Warrior, Class::Thief, Class::Cleric],
-            Skill::Bash     => &[Class::Warrior],
-            Skill::Backstab => &[Class::Thief],
+            Skill::Kick         => &[Class::Warrior, Class::Thief, Class::Cleric],
+            Skill::Bash         => &[Class::Warrior],
+            Skill::Backstab     => &[Class::Thief],
+            Skill::MagicMissile => &[Class::MagicUser],
+            Skill::CureLight    => &[Class::Cleric],
         }
     }
 
@@ -62,8 +99,16 @@ impl Skill {
         self.allowed_classes().contains(&class)
     }
 
-    /// Storage key for serialisation in the player file.
-    pub fn save_key(self) -> &'static str { self.name() }
+    /// Storage key for serialisation in the player file (spaces collapsed).
+    pub fn save_key(self) -> &'static str {
+        match self {
+            Skill::Kick         => "kick",
+            Skill::Bash         => "bash",
+            Skill::Backstab     => "backstab",
+            Skill::MagicMissile => "magic-missile",
+            Skill::CureLight    => "cure-light",
+        }
+    }
 
     /// Inverse of save_key.
     pub fn from_save_key(s: &str) -> Option<Skill> {
@@ -72,7 +117,10 @@ impl Skill {
 }
 
 /// All known skills — iteration order for `skills` command + persistence.
-pub const ALL_SKILLS: &[Skill] = &[Skill::Kick, Skill::Bash, Skill::Backstab];
+pub const ALL_SKILLS: &[Skill] = &[
+    Skill::Kick, Skill::Bash, Skill::Backstab,
+    Skill::MagicMissile, Skill::CureLight,
+];
 
 /// Who/what a character is fighting. Mob instance ids are positive; we use
 /// the same numeric space for player ids (they're both `u32`) — the
@@ -103,6 +151,10 @@ pub struct Character {
     pub exp:          i64,
     pub hp:           i32,
     pub max_hp:       i32,
+    pub mana:         i32,
+    pub max_mana:     i32,
+    /// Unspent practice points. Gained on level-up, spent in `practice`.
+    pub practices:    i32,
     /// Ability scores — rolled at creation (3d6 each), then persisted.
     pub str_:         i32,
     pub int_:         i32,
@@ -255,6 +307,28 @@ impl Character {
         }
     }
 
+    /// Class-specific mana gain per level.  Spellcasters scale faster.
+    pub fn mana_per_level(class: Class) -> i32 {
+        match class {
+            Class::MagicUser => 10,
+            Class::Cleric    =>  8,
+            Class::Thief     =>  2,
+            Class::Warrior   =>  2,
+            Class::Undefined =>  4,
+        }
+    }
+
+    /// Starting mana for a freshly-rolled character.
+    pub fn init_mana_for_class(class: Class, int_or_wis: i32, level: i32) -> i32 {
+        let base = 10;
+        let per_lvl = Self::mana_per_level(class);
+        let stat_bonus = (int_or_wis - 10).max(0) / 2;
+        base + per_lvl * level.max(1) + stat_bonus * level.max(1)
+    }
+
+    /// Practice points granted on each level-up.
+    pub const PRACTICES_PER_LEVEL: i32 = 2;
+
     pub fn init_hp(level: i32) -> i32 {
         // Class-independent default; per-class scaling is applied on
         // level-up.  Mortals start at 50 (+ a small ramp per level), but
@@ -299,10 +373,20 @@ impl Character {
         {
             self.level += 1;
             // Class-specific HP gain + CON bonus, heal to full.
-            let per_lvl = Self::hp_per_level(self.class);
             let con_bonus = (self.con - 10).max(0) / 2;
-            self.max_hp += per_lvl + con_bonus;
+            self.max_hp   += Self::hp_per_level(self.class)   + con_bonus;
             self.hp = self.max_hp;
+            // Mana gain: scales with INT for arcane, WIS for divine.
+            let casting_stat = match self.class {
+                Class::MagicUser => self.int_,
+                Class::Cleric    => self.wis,
+                _                => self.int_,
+            };
+            let stat_bonus = (casting_stat - 10).max(0) / 2;
+            self.max_mana += Self::mana_per_level(self.class) + stat_bonus;
+            self.mana = self.max_mana;
+            // Practice points.
+            self.practices += Self::PRACTICES_PER_LEVEL;
             gained += 1;
         }
         gained

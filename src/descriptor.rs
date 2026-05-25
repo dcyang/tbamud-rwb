@@ -201,6 +201,16 @@ pub async fn handle_connection(
                 let default_hp = Character::init_hp_for_class(cls, con_score, session.level.max(1));
                 let max_hp    = p_ref.map(|p| p.max_hp).filter(|h| *h > 0).unwrap_or(default_hp);
                 let hp        = p_ref.map(|p| p.hp).filter(|h| *h > 0).unwrap_or(max_hp);
+                // Mana: arcane scales with INT, divine with WIS, others use INT.
+                let casting_stat = if cls == crate::players::Class::Cleric {
+                    p_ref.map(|p| p.wis).filter(|v| *v > 0).unwrap_or(12)
+                } else {
+                    p_ref.map(|p| p.int_).filter(|v| *v > 0).unwrap_or(12)
+                };
+                let default_mana = Character::init_mana_for_class(cls, casting_stat, session.level.max(1));
+                let max_mana   = p_ref.map(|p| p.max_mana).filter(|m| *m > 0).unwrap_or(default_mana);
+                let mana       = p_ref.map(|p| p.mana).filter(|m| *m > 0).unwrap_or(max_mana);
+                let practices  = p_ref.map(|p| p.practices).unwrap_or(0);
                 let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
                 let gold      = p_ref.map(|p| p.gold).unwrap_or(0);
                 let immortal  = session.level >= 34;
@@ -218,6 +228,9 @@ pub async fn handle_connection(
                     exp:          p_ref.map(|p| p.exp).unwrap_or(0),
                     hp,
                     max_hp,
+                    mana,
+                    max_mana,
+                    practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
                     wis:          ab(p_ref.map(|p| p.wis ).unwrap_or(0)),
@@ -238,6 +251,11 @@ pub async fn handle_connection(
                         m
                     },
                 };
+
+                // Settle any pending level-ups (e.g. character was offline
+                // when their XP crossed thresholds).  This always runs on
+                // login; it's a no-op for characters with consistent state.
+                let _ = me.check_level_up();
 
                 // Restore persisted inventory + equipment by spawning fresh
                 // ObjInstances of the saved vnums.  For containers, also
@@ -429,13 +447,16 @@ async fn run_game_session(
         let me = character.lock().await;
         let players_guard = players.lock().await;
         if let Ok(mut rec) = players_guard.load_player(&my_name) {
-            rec.hp     = me.hp;
-            rec.max_hp = me.max_hp;
-            rec.room   = me.current_room;
-            rec.gold   = me.gold;
-            rec.exp    = me.exp;
-            rec.level  = me.level;
-            rec.str_   = me.str_;
+            rec.hp        = me.hp;
+            rec.max_hp    = me.max_hp;
+            rec.mana      = me.mana;
+            rec.max_mana  = me.max_mana;
+            rec.practices = me.practices;
+            rec.room      = me.current_room;
+            rec.gold      = me.gold;
+            rec.exp       = me.exp;
+            rec.level     = me.level;
+            rec.str_      = me.str_;
             rec.int_   = me.int_;
             rec.wis    = me.wis;
             rec.dex    = me.dex;

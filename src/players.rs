@@ -115,6 +115,9 @@ pub struct PlayerRecord {
     /// proper init.
     pub hp:            i32,
     pub max_hp:        i32,
+    pub mana:          i32,
+    pub max_mana:      i32,
+    pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
     pub exp:           i64,
@@ -281,6 +284,12 @@ impl PlayerDb {
                     if let Some(p) = parts.next() { rec.hp     = p.trim().parse().unwrap_or(0); }
                     if let Some(p) = parts.next() { rec.max_hp = p.trim().parse().unwrap_or(0); }
                 }
+                "Mana" => {
+                    let mut parts = val.split('/');
+                    if let Some(p) = parts.next() { rec.mana     = p.trim().parse().unwrap_or(0); }
+                    if let Some(p) = parts.next() { rec.max_mana = p.trim().parse().unwrap_or(0); }
+                }
+                "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
                 "Exp"  => rec.exp  = val.parse().unwrap_or(0),
@@ -339,6 +348,12 @@ impl PlayerDb {
         writeln!(f, "Pref: 0 0 0 0")?;
         if rec.max_hp > 0 {
             writeln!(f, "Hit : {}/{}", rec.hp, rec.max_hp)?;
+        }
+        if rec.max_mana > 0 {
+            writeln!(f, "Mana: {}/{}", rec.mana, rec.max_mana)?;
+        }
+        if rec.practices != 0 {
+            writeln!(f, "Prac: {}", rec.practices)?;
         }
         if rec.room != 0 {
             writeln!(f, "Room: {}", rec.room)?;

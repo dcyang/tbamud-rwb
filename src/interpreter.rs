@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "examine",
     "list", "buy", "sell",
     "kick", "bash", "backstab",
+    "cast",
     "skills", "practice",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
@@ -117,6 +118,7 @@ pub async fn dispatch_command(
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("cast")      => do_cast(rest, me, world, chars).await,
         Some("skills")    => do_skills(me),
         Some("practice")  => do_practice(rest, me),
         Some("give")      => do_give(rest, me, world, chars).await,
@@ -534,9 +536,10 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         format!("{} ({} to next)", me.exp, to_next)
     };
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\n\
+        "\r\nName:  {}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\n\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
-        me.name, me.level, me.hp, me.max_hp, me.class, me.sex, me.gold, me.current_room, ac,
+        me.name, me.level, me.hp, me.max_hp, me.mana, me.max_mana,
+        me.class, me.sex, me.gold, me.current_room, ac, me.practices,
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
     CmdOutput::text(s)
@@ -560,7 +563,10 @@ fn do_skills(me: &Character) -> CmdOutput {
 
 fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
     if arg.is_empty() {
-        return do_skills(me);
+        // Show skills + remaining practices budget.
+        let mut out = do_skills(me).text;
+        out.push_str(&format!("\r\nYou have {} practice point(s).\r\n", me.practices));
+        return CmdOutput::text(out);
     }
     let Some(skill) = crate::character::Skill::parse(arg) else {
         return CmdOutput::text(format!("\r\nThere is no skill called '{arg}'.\r\n"));
@@ -570,9 +576,11 @@ fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
             "\r\n{} is not a {:?} skill.\r\n", uppercase_first(skill.name()), me.class,
         ));
     }
-    // Each practice yields a fixed +10% (cap 90%).  In CircleMUD this also
-    // costs a practice point (cleared on level-up); we ignore the budget for
-    // now — first pass at a working skill loop.
+    if me.practices <= 0 {
+        return CmdOutput::text(
+            "\r\nYou have no practice points left. Level up to gain more.\r\n".to_string()
+        );
+    }
     let pct = me.skills.entry(skill).or_insert(0);
     if *pct >= 90 {
         return CmdOutput::text(format!(
@@ -580,8 +588,10 @@ fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
         ));
     }
     *pct = (*pct + 10).min(90);
+    me.practices -= 1;
     CmdOutput::text(format!(
-        "\r\nYou practice {} a bit. ({}%)\r\n", skill.name(), pct,
+        "\r\nYou practice {} a bit. ({}%, {} practice(s) left)\r\n",
+        skill.name(), pct, me.practices,
     ))
 }
 
@@ -763,6 +773,7 @@ async fn do_skill(
             Skill::Kick     => 60,
             Skill::Bash     => 30,
             Skill::Backstab => 40,
+            _ => return CmdOutput::text("\r\nThat isn't a physical skill.\r\n"),
         };
         let hit_chance = (base_hit + learned as i32 / 2).min(95);
         let hit = rng.gen_range(0..100) < hit_chance;
@@ -770,6 +781,7 @@ async fn do_skill(
             Skill::Kick     => dice(1, 6) + me.level / 2 + str_b,
             Skill::Bash     => dice(2, 4) + me.level + str_b,
             Skill::Backstab => dice(3, 6) + me.level * 2 + str_b,
+            _ => 0,
         };
         (hit, dmg.max(1))
     };
@@ -878,6 +890,256 @@ async fn do_skill(
     }
 
     CmdOutput::text(to_me)
+}
+
+// ---------------------------------------------------------------------------
+// Spell casting
+// ---------------------------------------------------------------------------
+
+async fn do_cast(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nCast which spell? Try `cast magic-missile fido` or `cast cure-light`.\r\n");
+    }
+
+    // Accept either `cast '<spell name>' target` or `cast <hyphenated-spell> target`.
+    let (spell_str, target) = if let Some(stripped) = arg.strip_prefix('\'') {
+        match stripped.find('\'') {
+            Some(end) => (&stripped[..end], stripped[end+1..].trim_start()),
+            None      => return CmdOutput::text("\r\nUnclosed spell name (missing ').\r\n"),
+        }
+    } else {
+        match arg.find(char::is_whitespace) {
+            Some(i) => (&arg[..i], arg[i..].trim_start()),
+            None    => (arg, ""),
+        }
+    };
+
+    let Some(spell) = crate::character::Skill::parse(spell_str) else {
+        return CmdOutput::text(format!("\r\nThere is no spell '{spell_str}'.\r\n"));
+    };
+    if spell.kind() != crate::character::SkillKind::Spell {
+        return CmdOutput::text(format!(
+            "\r\n{} is a skill, not a spell. Use `{}` directly.\r\n",
+            uppercase_first(spell.name()), spell.save_key(),
+        ));
+    }
+    if !spell.is_class_allowed(me.class) {
+        return CmdOutput::text(format!(
+            "\r\nYou cannot cast {}.\r\n", spell.name(),
+        ));
+    }
+    let learned = *me.skills.get(&spell).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(format!(
+            "\r\nYou haven't learned the spell '{}'. Try `practice {}`.\r\n",
+            spell.name(), spell.save_key(),
+        ));
+    }
+    let cost = spell.mana_cost();
+    if me.mana < cost {
+        return CmdOutput::text(format!(
+            "\r\nYou lack the mana to cast {} (need {}, have {}).\r\n",
+            spell.name(), cost, me.mana,
+        ));
+    }
+
+    // Dispatch.
+    match spell {
+        crate::character::Skill::MagicMissile => cast_magic_missile(target, me, world, chars, learned).await,
+        crate::character::Skill::CureLight    => cast_cure_light(target, me, chars, learned).await,
+        _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
+    }
+}
+
+async fn cast_magic_missile(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    // Target lookup: mob in room, falling back to current fighting target.
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    // Hit chance: 70 base + half of learned %. Magic missile rarely misses.
+    let hit_chance = (70 + learned as i32 / 2).min(99);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_);
+    me.mana -= crate::character::Skill::MagicMissile.mana_cost();
+
+    let (mob_name, mob_dead, mob_room) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let mob_name = w.mob_protos.get(&m.vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        // Engage combat.
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, dead, mob_room)
+    };
+
+    let (to_me, to_room) = if hit {
+        (
+            format!("\r\nA glowing dart of force streaks from your hand and strikes {mob_name} for {dmg} damage!\r\n"),
+            format!("A glowing dart of force streaks from {}'s hand and strikes {mob_name}.\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour magic missile misses {mob_name}.\r\n"),
+            format!("{}'s magic missile streaks past {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(|m| m.inventory.clone()).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+async fn cast_cure_light(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    // Cure light: target self if no arg, or another player in the same
+    // room by name.  No PvP healing concerns since combat is mob-only.
+    let target_handle: Option<crate::character::PlayerHandle> = if target_kw.is_empty() {
+        None
+    } else {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| {
+            p.current_room == me.current_room
+                && p.name.eq_ignore_ascii_case(target_kw)
+        }).cloned();
+        h
+    };
+
+    let heal = crate::db::dice(1, 8) + me.level
+        + (me.wis - 10).max(0) / 2;
+    let hit_chance = (90 + learned as i32 / 5).min(99);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    me.mana -= crate::character::Skill::CureLight.mana_cost();
+
+    if !hit {
+        return CmdOutput::text("\r\nYou lose your concentration and the spell fizzles.\r\n");
+    }
+
+    if let Some(ph) = target_handle {
+        // Heal another player.
+        let (new_hp, max) = {
+            let mut c = ph.character.lock().await;
+            c.hp = (c.hp + heal).min(c.max_hp);
+            (c.hp, c.max_hp)
+        };
+        let _ = ph.send.send(format!(
+            "\r\n{} weaves a soothing prayer over you. You feel better. ({}/{} HP)\r\n",
+            me.name, new_hp, max,
+        ));
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} weaves a soothing prayer over {}.\r\n", me.name, ph.name));
+        CmdOutput::text(format!(
+            "\r\nYou weave a soothing prayer over {} ({} HP restored).\r\n",
+            ph.name, heal,
+        ))
+    } else {
+        // Heal self.
+        me.hp = (me.hp + heal).min(me.max_hp);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} weaves a soothing prayer over themself.\r\n", me.name));
+        CmdOutput::text(format!(
+            "\r\nA warm glow flows through you. ({}/{} HP)\r\n",
+            me.hp, me.max_hp,
+        ))
+    }
 }
 
 async fn do_flee(
@@ -1371,13 +1633,16 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
     let pl = players.lock().await;
     let rec = match pl.load_player(&me.name) {
         Ok(mut r) => {
-            r.hp     = me.hp;
-            r.max_hp = me.max_hp;
-            r.room   = me.current_room;
-            r.gold   = me.gold;
-            r.exp    = me.exp;
-            r.level  = me.level;
-            r.str_   = me.str_;
+            r.hp        = me.hp;
+            r.max_hp    = me.max_hp;
+            r.mana      = me.mana;
+            r.max_mana  = me.max_mana;
+            r.practices = me.practices;
+            r.room      = me.current_room;
+            r.gold      = me.gold;
+            r.exp       = me.exp;
+            r.level     = me.level;
+            r.str_      = me.str_;
             r.int_   = me.int_;
             r.wis    = me.wis;
             r.dex    = me.dex;
