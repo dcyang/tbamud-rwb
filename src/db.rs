@@ -787,6 +787,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     let id = next_obj_id; next_obj_id += 1;
                     world.obj_instances.push(ObjInstance {
                         id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                        contents: Vec::new(),
                     });
                     last_cmd_ok = true;
                 } else if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
@@ -794,6 +795,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     room.objects.push(id);
                     world.obj_instances.push(ObjInstance {
                         id, vnum: cmd.arg1, in_room: cmd.arg3,
+                        contents: Vec::new(),
                     });
                     last_cmd_ok = true;
                 } else {
@@ -820,6 +822,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 let id = next_obj_id; next_obj_id += 1;
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                    contents: Vec::new(),
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -827,8 +830,10 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 last_cmd_ok = true;
             }
             'P' => {
-                // Put obj-in-obj — we don't model containers yet; just spawn
-                // the inner object in limbo so the count_obj cap still works.
+                // Put obj-in-obj — spawn the inner object and push it into
+                // the most-recently-loaded container's `contents`. arg3 is
+                // the target container vnum; we find the latest live
+                // instance of that vnum (typically the most-recent O cmd).
                 if !world.obj_protos.contains_key(&cmd.arg1) {
                     last_cmd_ok = false;
                     continue;
@@ -837,10 +842,20 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     last_cmd_ok = false;
                     continue;
                 }
+                // Find the most recently-created instance with the target vnum.
+                let target_iid = world.obj_instances.iter().rev()
+                    .find(|o| o.vnum == cmd.arg3)
+                    .map(|o| o.id);
                 let id = next_obj_id; next_obj_id += 1;
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                    contents: Vec::new(),
                 });
+                if let Some(tid) = target_iid {
+                    if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {
+                        t.contents.push(id);
+                    }
+                }
                 last_cmd_ok = true;
             }
             'R' => {

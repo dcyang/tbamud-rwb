@@ -173,9 +173,18 @@ pub struct ObjProto {
 pub struct ObjInstance {
     pub id:    u32,
     pub vnum:  ObjVnum,
-    pub in_room: RoomVnum,   // NOWHERE if not in a room
-    // Future: in_obj (container), carried_by, worn_by/worn_on
+    pub in_room: RoomVnum,   // NOWHERE if not in a room (carried/in container/equipped)
+    /// Instance ids of objects this container holds.  Always empty for
+    /// non-container item types.
+    pub contents: Vec<u32>,
 }
+
+/// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
+/// gameplay (containers, weapons, armor).
+pub const ITEM_LIGHT:     i32 = 1;
+pub const ITEM_WEAPON:    i32 = 5;
+pub const ITEM_ARMOR:     i32 = 9;
+pub const ITEM_CONTAINER: i32 = 15;
 
 // ---------------------------------------------------------------------------
 // Mob prototypes & instances
@@ -301,6 +310,7 @@ impl World {
         let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
         self.obj_instances.push(ObjInstance {
             id, vnum, in_room: NOWHERE,
+            contents: Vec::new(),
         });
         Some(id)
     }

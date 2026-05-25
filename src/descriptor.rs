@@ -224,7 +224,8 @@ pub async fn handle_connection(
                 };
 
                 // Restore persisted inventory + equipment by spawning fresh
-                // ObjInstances of the saved vnums. Lives in lib/plrobjs/.
+                // ObjInstances of the saved vnums.  For containers, also
+                // spawn each content vnum and link it into the container.
                 let data_dir = players.lock().await.data_dir().to_string();
                 {
                     let entries = crate::players::load_objs(&data_dir, &pname);
@@ -232,6 +233,16 @@ pub async fn handle_connection(
                         let mut w = world.lock().await;
                         for e in entries {
                             if let Some(iid) = w.spawn_obj(e.vnum) {
+                                // Spawn any container contents and link them.
+                                for &cvnum in &e.contents {
+                                    if let Some(cid) = w.spawn_obj(cvnum) {
+                                        if let Some(container) = w.obj_instances
+                                            .iter_mut().find(|o| o.id == iid)
+                                        {
+                                            container.contents.push(cid);
+                                        }
+                                    }
+                                }
                                 match e.slot {
                                     crate::players::SavedObjSlot::Inv => {
                                         me.inventory.push(iid);
@@ -418,32 +429,47 @@ async fn run_game_session(
         }
     }
 
-    // Persist + extract inventory & equipment. We walk both lists, look up
-    // each instance's vnum to write a SavedObj entry, then drop the
-    // ObjInstance so its vnum count drops back below the reset cap.
+    // Persist + extract inventory & equipment. We walk both lists; for
+    // each instance, capture its vnum + (for containers) the vnums it
+    // holds, then drop those ObjInstances so the world reset can refill.
     {
         let me = character.lock().await;
         let mut entries: Vec<crate::players::SavedObj> = Vec::new();
         let mut to_remove: Vec<u32> = Vec::new();
 
+        let collect = |w: &World, iid: u32, slot: crate::players::SavedObjSlot|
+            -> Option<(crate::players::SavedObj, Vec<u32>)>
+        {
+            let o = w.obj_instances.iter().find(|o| o.id == iid)?;
+            // Pull the content vnums from instance.contents.
+            let mut content_vnums = Vec::new();
+            let mut to_remove_local = vec![iid];
+            for &cid in &o.contents {
+                if let Some(c) = w.obj_instances.iter().find(|o| o.id == cid) {
+                    content_vnums.push(c.vnum);
+                    to_remove_local.push(cid);
+                }
+            }
+            Some((
+                crate::players::SavedObj { vnum: o.vnum, slot, contents: content_vnums },
+                to_remove_local,
+            ))
+        };
+
         let w = world.lock().await;
         for &iid in &me.inventory {
-            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
-                entries.push(crate::players::SavedObj {
-                    vnum: o.vnum,
-                    slot: crate::players::SavedObjSlot::Inv,
-                });
-                to_remove.push(iid);
+            if let Some((e, rms)) = collect(&w, iid, crate::players::SavedObjSlot::Inv) {
+                entries.push(e);
+                to_remove.extend(rms);
             }
         }
         for (slot_idx, slot) in me.equipment.iter().enumerate() {
             if let Some(iid) = slot {
-                if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
-                    entries.push(crate::players::SavedObj {
-                        vnum: o.vnum,
-                        slot: crate::players::SavedObjSlot::Wear(slot_idx as u8),
-                    });
-                    to_remove.push(*iid);
+                if let Some((e, rms)) = collect(
+                    &w, *iid, crate::players::SavedObjSlot::Wear(slot_idx as u8),
+                ) {
+                    entries.push(e);
+                    to_remove.extend(rms);
                 }
             }
         }

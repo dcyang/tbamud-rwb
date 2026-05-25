@@ -23,7 +23,7 @@ use crate::{
         ITEM_WEAR_WIELD, NUM_WEARS, WEAR_WIELD,
     },
     players::PlayerDb,
-    world::{Direction, ObjVnum, RoomVnum, World},
+    world::{Direction, ObjVnum, RoomVnum, World, ITEM_ARMOR},
 };
 
 // ---------------------------------------------------------------------------
@@ -37,9 +37,10 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "give", "wield", "wear", "remove",
+    "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell",
+    "kick", "bash",
     "say", "tell", "who",
     "score", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
@@ -105,11 +106,14 @@ pub async fn dispatch_command(
         Some("inventory") => do_inventory(me, world).await,
         Some("get")       => do_get(rest, me, world, chars).await,
         Some("drop")      => do_drop(rest, me, world, chars).await,
+        Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say(rest, me, chars).await,
         Some("tell")      => do_tell(rest, me, chars).await,
         Some("who")       => do_who(me, chars).await,
-        Some("score")     => do_score(me),
+        Some("score")     => do_score(me, world).await,
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
+        Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
+        Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("give")      => do_give(rest, me, world, chars).await,
         Some("examine")   => do_examine(rest, me, world, chars).await,
         Some("list")      => do_list(me, world).await,
@@ -158,14 +162,7 @@ async fn do_look(
     for &iid in &me.inventory {
         if let Some(obj) = find_obj_by_id(&w, iid) {
             if obj_keyword_matches(&w, obj.vnum, &key) {
-                if let Some(p) = w.obj_protos.get(&obj.vnum) {
-                    let body = if p.action_description.is_empty() {
-                        &p.short_description
-                    } else {
-                        &p.action_description
-                    };
-                    return CmdOutput::text(format!("\r\n{}\r\n", body));
-                }
+                return CmdOutput::text(format!("\r\n{}", describe_obj(&w, iid)));
             }
         }
     }
@@ -175,14 +172,7 @@ async fn do_look(
         for &iid in &r.objects {
             if let Some(obj) = find_obj_by_id(&w, iid) {
                 if obj_keyword_matches(&w, obj.vnum, &key) {
-                    if let Some(p) = w.obj_protos.get(&obj.vnum) {
-                        let body = if p.action_description.is_empty() {
-                            &p.short_description
-                        } else {
-                            &p.action_description
-                        };
-                        return CmdOutput::text(format!("\r\n{}\r\n", body));
-                    }
+                    return CmdOutput::text(format!("\r\n{}", describe_obj(&w, iid)));
                 }
             }
         }
@@ -249,6 +239,19 @@ async fn do_get(
     if arg.is_empty() {
         return CmdOutput::text("\r\nGet what?\r\n");
     }
+
+    // "get <obj> <container>" — pull from container; otherwise pull from room.
+    let parts: Vec<&str> = arg.splitn(3, ' ').collect();
+    let from_container = parts.len() >= 2
+        && !parts[0].eq_ignore_ascii_case("from")
+        && (parts.len() == 2 ||
+            (parts.len() >= 3 && parts[1].eq_ignore_ascii_case("from")));
+    if from_container {
+        let obj_kw = parts[0];
+        let cont_kw = if parts.len() == 2 { parts[1] } else { parts[2] };
+        return do_get_from_container(obj_kw, cont_kw, me, world, chars).await;
+    }
+
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
 
@@ -294,6 +297,135 @@ async fn do_get(
     );
 
     CmdOutput::text(format!("\r\nYou get {}.\r\n", name))
+}
+
+/// Find a container (in inventory or in the current room) by keyword.
+/// Returns the container's instance id and a brief identifier for messages.
+fn find_container(
+    w: &World,
+    me: &Character,
+    cont_kw: &str,
+) -> Option<(u32, String)> {
+    let key = cont_kw.to_ascii_lowercase();
+    // Inventory containers first.
+    for &iid in &me.inventory {
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue };
+        let Some(p) = w.obj_protos.get(&o.vnum) else { continue };
+        if p.item_type == crate::world::ITEM_CONTAINER
+            && p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+            return Some((iid, p.short_description.clone()));
+        }
+    }
+    // Then room containers.
+    if let Some(r) = w.rooms.get(&me.current_room) {
+        for &iid in &r.objects {
+            let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue };
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue };
+            if p.item_type == crate::world::ITEM_CONTAINER
+                && p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                return Some((iid, p.short_description.clone()));
+            }
+        }
+    }
+    None
+}
+
+async fn do_get_from_container(
+    obj_kw: &str,
+    cont_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let key = obj_kw.to_ascii_lowercase();
+    let mut w = world.lock().await;
+
+    let (container_iid, container_name) = match find_container(&w, me, cont_kw) {
+        Some(t) => t,
+        None => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
+    };
+
+    // Find a matching item inside.
+    let (idx_in_container, child_iid, child_short) = {
+        let container = w.obj_instances.iter().find(|o| o.id == container_iid).unwrap();
+        let mut found = None;
+        for (i, &cid) in container.contents.iter().enumerate() {
+            if let Some(child) = w.obj_instances.iter().find(|o| o.id == cid) {
+                if let Some(p) = w.obj_protos.get(&child.vnum) {
+                    if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                        found = Some((i, cid, p.short_description.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+        match found {
+            Some(t) => t,
+            None => return CmdOutput::text(format!(
+                "\r\nThere is no {obj_kw} in {container_name}.\r\n"
+            )),
+        }
+    };
+
+    // Remove from container, add to player's inventory.
+    if let Some(container) = w.obj_instances.iter_mut().find(|o| o.id == container_iid) {
+        container.contents.remove(idx_in_container);
+    }
+    me.inventory.push(child_iid);
+    drop(w);
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} gets {} from {}.\r\n", me.name, child_short, container_name),
+    );
+
+    CmdOutput::text(format!("\r\nYou get {} from {}.\r\n", child_short, container_name))
+}
+
+async fn do_put(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    // "put <obj> <container>" or "put <obj> in <container>"
+    let parts: Vec<&str> = arg.splitn(3, ' ').collect();
+    let (obj_kw, cont_kw) = match parts.as_slice() {
+        [_, _, _] if parts[1].eq_ignore_ascii_case("in") => (parts[0], parts[2]),
+        [_, _]     => (parts[0], parts[1]),
+        _          => return CmdOutput::text("\r\nPut what in what?\r\n"),
+    };
+
+    let mut w = world.lock().await;
+
+    let (idx, iid, short) = match find_inv_match(&w, &me.inventory, &obj_kw.to_ascii_lowercase()) {
+        Some(t) => t,
+        None    => return CmdOutput::text(format!("\r\nYou do not have a {obj_kw}.\r\n")),
+    };
+
+    let (container_iid, container_name) = match find_container(&w, me, cont_kw) {
+        Some(t) => t,
+        None    => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
+    };
+
+    if container_iid == iid {
+        return CmdOutput::text("\r\nYou can't put something inside itself.\r\n");
+    }
+
+    me.inventory.remove(idx);
+    if let Some(container) = w.obj_instances.iter_mut().find(|o| o.id == container_iid) {
+        container.contents.push(iid);
+    }
+    drop(w);
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} puts {} in {}.\r\n", me.name, short, container_name),
+    );
+
+    CmdOutput::text(format!("\r\nYou put {} in {}.\r\n", short, container_name))
 }
 
 async fn do_drop(
@@ -388,14 +520,34 @@ async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
     CmdOutput::text(s)
 }
 
-fn do_score(me: &Character) -> CmdOutput {
+async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let ac = total_ac(me, world).await;
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\n\
+        "\r\nName:  {}\r\nLevel: {}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\n\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
-        me.name, me.level, me.hp, me.max_hp, me.class, me.sex, me.gold, me.current_room,
+        me.name, me.level, me.hp, me.max_hp, me.class, me.sex, me.gold, me.current_room, ac,
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
     CmdOutput::text(s)
+}
+
+/// Total AC = sum of worn ITEM_ARMOR value[0] + DEX defensive bonus.
+/// Higher is better.
+pub async fn total_ac(me: &Character, world: &Arc<Mutex<World>>) -> i32 {
+    let w = world.lock().await;
+    let mut total = crate::character::dex_ac_bonus(me.dex);
+    for slot in me.equipment.iter() {
+        if let Some(iid) = slot {
+            if let Some(obj) = w.obj_instances.iter().find(|o| o.id == *iid) {
+                if let Some(p) = w.obj_protos.get(&obj.vnum) {
+                    if p.item_type == ITEM_ARMOR {
+                        total += p.value[0];
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 async fn do_kill(
@@ -457,6 +609,155 @@ async fn do_kill(
     );
 
     CmdOutput::text(format!("\r\nYou attack {mob_name}!\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Combat skills (kick, bash)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum Skill { Kick, Bash }
+
+async fn do_skill(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    skill: Skill,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::db::dice;
+
+    // Choose target: either the explicit arg, or our current fighting target.
+    let target_mob_id: Option<u32> = if !arg.is_empty() {
+        let key = arg.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text(match skill {
+            Skill::Kick => "\r\nKick whom?\r\n",
+            Skill::Bash => "\r\nBash whom?\r\n",
+        }.to_string());
+    };
+
+    // Bash needs a shield; kick has no requirement.
+    if let Skill::Bash = skill {
+        if me.equipment[crate::character::WEAR_SHIELD].is_none() {
+            return CmdOutput::text("\r\nYou need a shield to bash effectively.\r\n");
+        }
+    }
+
+    // Roll damage and to-hit.
+    let (hit, dmg) = {
+        let mut rng = rand::thread_rng();
+        match skill {
+            Skill::Kick => {
+                // 80% hit, 1d6 + level/2 + str bonus
+                let hit = rng.gen_range(0..100) < 80;
+                let dmg = dice(1, 6) + me.level / 2
+                    + crate::character::str_damage_bonus(me.str_);
+                (hit, dmg.max(1))
+            }
+            Skill::Bash => {
+                // 50% hit, 2d4 + level + str bonus
+                let hit = rng.gen_range(0..100) < 50;
+                let dmg = dice(2, 4) + me.level
+                    + crate::character::str_damage_bonus(me.str_);
+                (hit, dmg.max(1))
+            }
+        }
+    };
+
+    let verb = match skill { Skill::Kick => "kick", Skill::Bash => "bash" };
+
+    // Apply.
+    let (mob_name, mob_dead, mob_room) = {
+        let mut w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
+            return CmdOutput::text("\r\nYour target is gone.\r\n");
+        };
+        let mob_name = w.mob_protos.get(&m.vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+
+        let dead = if hit {
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            m.hp -= dmg;
+            // Engage if we weren't already.
+            if me.fighting.is_none() {
+                me.fighting = Some(Target { id: mob_id, is_player: false });
+                m.fighting = Some(Target { id: me.id, is_player: true });
+            }
+            m.hp <= 0
+        } else {
+            false
+        };
+        (mob_name, dead, mob_room)
+    };
+
+    // Broadcast + reply.
+    let (to_me, to_room) = if hit {
+        (
+            format!("\r\nYou {verb} {mob_name} for {dmg} damage!\r\n"),
+            format!("{} {verb}s {mob_name}.\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYou {verb} at {mob_name}, but miss!\r\n"),
+            format!("{} {verb}s at {mob_name}, but misses.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        // Reuse combat::kill flow by clearing fighting; the actual mob
+        // extraction happens in the next combat tick. For an immediate
+        // death we duplicate the cleanup here.
+        let mut w = world.lock().await;
+        // Drop mob's inventory to the floor.
+        let dropped: Vec<u32> = w.mob_instances.iter()
+            .find(|m| m.id == mob_id).map(|m| m.inventory.clone()).unwrap_or_default();
+        if let Some(r) = w.rooms.get_mut(&mob_room) {
+            for &iid in &dropped { r.objects.push(iid); }
+        }
+        for &iid in &dropped {
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.in_room = mob_room;
+            }
+        }
+        if let Some(r) = w.rooms.get_mut(&mob_room) {
+            r.mobs.retain(|&id| id != mob_id);
+        }
+        w.mob_instances.retain(|m| m.id != mob_id);
+        drop(w);
+        me.fighting = None;
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            mob_room, None,
+            &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+        );
+        return CmdOutput::text(format!("{to_me}\r\nYou have slain {mob_name}!\r\n"));
+    }
+
+    CmdOutput::text(to_me)
 }
 
 async fn do_flee(
@@ -1124,6 +1425,36 @@ pub async fn render_room(
 
 fn find_obj_by_id(w: &World, iid: u32) -> Option<&crate::world::ObjInstance> {
     w.obj_instances.iter().find(|o| o.id == iid)
+}
+
+/// Produce a descriptive blob for one object, with container contents
+/// listed inline if any. Used by look/examine on inventory + room items.
+fn describe_obj(w: &World, iid: u32) -> String {
+    let Some(obj) = find_obj_by_id(w, iid) else { return String::new(); };
+    let Some(p)   = w.obj_protos.get(&obj.vnum) else { return String::new(); };
+
+    let body = if p.action_description.is_empty() {
+        &p.short_description
+    } else {
+        &p.action_description
+    };
+    let mut s = format!("{body}\r\n");
+
+    if p.item_type == crate::world::ITEM_CONTAINER {
+        if obj.contents.is_empty() {
+            s.push_str("It is empty.\r\n");
+        } else {
+            s.push_str("It contains:\r\n");
+            for &cid in &obj.contents {
+                if let Some(c) = w.obj_instances.iter().find(|o| o.id == cid) {
+                    if let Some(cp) = w.obj_protos.get(&c.vnum) {
+                        s.push_str(&format!("  {}\r\n", cp.short_description));
+                    }
+                }
+            }
+        }
+    }
+    s
 }
 
 fn obj_keyword_matches(w: &World, vnum: ObjVnum, key: &str) -> bool {

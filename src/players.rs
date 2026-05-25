@@ -383,11 +383,16 @@ pub enum SavedObjSlot {
     Wear(u8),
 }
 
-/// One entry in a saved object file: the prototype vnum and its slot.
-#[derive(Debug, Clone, Copy)]
+/// One entry in a saved object file: the prototype vnum, its slot, and
+/// (for containers) the vnums it holds.
+#[derive(Debug, Clone)]
 pub struct SavedObj {
-    pub vnum: i32,
-    pub slot: SavedObjSlot,
+    pub vnum:     i32,
+    pub slot:     SavedObjSlot,
+    /// Vnums of objects this container holds.  Empty for non-containers
+    /// and empty containers.  Format on disk: appended as space-separated
+    /// integers after the slot field, e.g. "3105 inv 100 200 300".
+    pub contents: Vec<i32>,
 }
 
 /// Read `<lib>/plrobjs/<bucket>/<name>.objs`.  Returns an empty Vec if the
@@ -410,7 +415,7 @@ pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
     for line in content.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') { continue; }
-        // "<vnum> <slot>"  — slot is "inv" or integer 0..17
+        // "<vnum> <slot> [<content_vnum> …]"
         let parts: Vec<&str> = t.split_ascii_whitespace().collect();
         if parts.len() < 2 { continue; }
         let Ok(vnum) = parts[0].parse::<i32>() else { continue };
@@ -421,7 +426,10 @@ pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
                 Err(_) => continue,
             },
         };
-        out.push(SavedObj { vnum, slot });
+        let contents: Vec<i32> = parts[2..].iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        out.push(SavedObj { vnum, slot, contents });
     }
     out
 }
@@ -444,11 +452,17 @@ pub fn save_objs(data_dir: &str, name: &str, entries: &[SavedObj]) -> Result<()>
     }
     let mut f = fs::File::create(&path)
         .with_context(|| format!("Cannot write objs file {path}"))?;
-    writeln!(f, "# tbamud-rwb plrobjs v1 — <vnum> <slot>")?;
+    writeln!(f, "# tbamud-rwb plrobjs v1 — <vnum> <slot> [<content_vnum> ...]")?;
     for e in entries {
-        match e.slot {
-            SavedObjSlot::Inv     => writeln!(f, "{} inv", e.vnum)?,
-            SavedObjSlot::Wear(n) => writeln!(f, "{} {}",  e.vnum, n)?,
+        let slot_str: String = match e.slot {
+            SavedObjSlot::Inv     => "inv".into(),
+            SavedObjSlot::Wear(n) => n.to_string(),
+        };
+        if e.contents.is_empty() {
+            writeln!(f, "{} {slot_str}", e.vnum)?;
+        } else {
+            let inner: Vec<String> = e.contents.iter().map(|v| v.to_string()).collect();
+            writeln!(f, "{} {slot_str} {}", e.vnum, inner.join(" "))?;
         }
     }
     Ok(())

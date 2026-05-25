@@ -52,11 +52,38 @@ pub struct Character {
     pub fighting:     Option<Target>,
 }
 
-/// STR-based damage modifier. Roughly mirrors the str_app[].todam table in
-/// constants.c, scaled down: every 2 points above 10 gives +1, every 2
-/// below gives −1.  Clamped to [-5, +8].
+/// STR-based damage modifier — mirrors str_app[].todam in constants.c
+/// (the second column of the strength table).
 pub fn str_damage_bonus(str_score: i32) -> i32 {
-    ((str_score - 10) / 2).clamp(-5, 8)
+    // Index 0..=25 in CircleMUD's table; higher strengths (18/01..18/00)
+    // collapse to the str=18..25 entries here.
+    static TODAM: &[i32] = &[
+        // 0  1  2  3  4  5  6  7  8  9
+          -4,-4,-2,-2,-1,-1, 0, 0, 0, 0,
+        // 10 11 12 13 14 15 16 17 18 19
+           0, 0, 0, 0, 0, 0, 1, 1, 2, 3,
+        // 20 21 22 23 24 25
+           3, 4, 5, 6, 6, 7,
+    ];
+    let i = str_score.clamp(0, (TODAM.len() - 1) as i32) as usize;
+    TODAM[i]
+}
+
+/// DEX-based AC bonus — mirrors dex_app[].defensive in constants.c.
+/// Negative values reduce AC (better defense).  Returned with the same
+/// sign convention as armor: more positive = better.  So we negate the
+/// CircleMUD column to match.
+pub fn dex_ac_bonus(dex_score: i32) -> i32 {
+    static DEFENSIVE: &[i32] = &[
+        // 0  1  2  3  4  5  6  7  8  9
+           5, 5, 5, 4, 3, 2, 1, 1, 0, 0,
+        // 10 11 12 13 14 15 16 17 18 19
+           0, 0, 0, 0, 0, 0,-1,-1,-2,-3,
+        // 20 21 22 23 24 25
+          -4,-4,-4,-5,-5,-6,
+    ];
+    let i = dex_score.clamp(0, (DEFENSIVE.len() - 1) as i32) as usize;
+    -DEFENSIVE[i]   // tbamud-rwb AC is "higher = better"
 }
 
 // ---------------------------------------------------------------------------

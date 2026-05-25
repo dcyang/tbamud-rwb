@@ -194,16 +194,6 @@ async fn resolve_mob_attack(
         return; // mob vs mob not supported
     }
 
-    // Roll mob damage from its prototype dice (dam_dice d dam_size + damroll).
-    let dmg: i32 = {
-        let w = world.lock().await;
-        let proto = w.mob_protos.get(&m.attacker_vnum);
-        match proto {
-            Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
-            None    => 1,
-        }
-    };
-
     let target_handle = {
         let cl = chars.lock().await;
         let h = cl.iter().find(|p| p.id == m.target.id).cloned();
@@ -216,6 +206,23 @@ async fn resolve_mob_attack(
             mob.fighting = None;
         }
         return;
+    };
+
+    // Roll mob damage from its prototype dice (dam_dice d dam_size + damroll).
+    // Then subtract player AC/3 as damage reduction (clamped >= 1).
+    let dmg: i32 = {
+        let raw = {
+            let w = world.lock().await;
+            match w.mob_protos.get(&m.attacker_vnum) {
+                Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
+                None    => 1,
+            }
+        };
+        let ac = {
+            let me = ph.character.lock().await;
+            crate::interpreter::total_ac(&me, world).await
+        };
+        (raw - ac / 3).max(1)
     };
 
     // Apply damage to the player; check death.
