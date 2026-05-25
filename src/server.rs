@@ -69,6 +69,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn per-object timer tick (OTRIG_TIMER) -------------------------
     db::spawn_obj_timer_tick(Arc::clone(&world), Arc::clone(&chars));
 
+    // --- Spawn periodic random-trigger tick (WTRIG_RANDOM/MTRIG_RANDOM) ---
+    db::spawn_random_trigger_tick(Arc::clone(&world), Arc::clone(&chars));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

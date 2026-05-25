@@ -610,6 +610,53 @@ pub fn spawn_obj_timer_tick(
     });
 }
 
+/// Background task that rolls every mob's and room's RANDOM ('b')
+/// triggers on a fixed cadence — roughly the CircleMUD PULSE_MOBILE
+/// cadence (~13s), but we use 30s to keep the per-tick cost reasonable
+/// against the ~12700 rooms / ~7282 mobs of stock data.  Each fire is
+/// gated on `trigger.narg` percent, so most rolls no-op.
+pub fn spawn_random_trigger_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const TICK_SECONDS: u64 = 30;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;       // skip the immediate first fire
+        loop {
+            interval.tick().await;
+            // Snapshot the ids of entities holding any 'b' trigger so
+            // we don't hold the world lock across each fire (each fire
+            // re-locks the world via apply_script_outputs).
+            let (mob_ids, room_vnums): (Vec<u32>, Vec<i32>) = {
+                let w = world.lock().await;
+                let mids: Vec<u32> = w.mob_instances.iter()
+                    .filter(|m| m.triggers.iter().any(|tv| {
+                        w.triggers.get(tv).map(|t| t.trigger_type == 'b').unwrap_or(false)
+                    }))
+                    .map(|m| m.id).collect();
+                let rvs: Vec<i32> = w.rooms.values()
+                    .filter(|r| r.triggers.iter().any(|tv| {
+                        w.triggers.get(tv).map(|t| t.trigger_type == 'b').unwrap_or(false)
+                    }))
+                    .map(|r| r.vnum).collect();
+                (mids, rvs)
+            };
+            for mid in mob_ids {
+                crate::interpreter::fire_mob_random_tick(mid, &world, &chars).await;
+            }
+            for rv in room_vnums {
+                crate::interpreter::fire_room_random_tick(rv, &world, &chars).await;
+            }
+        }
+    });
+}
+
 /// Background task that re-runs reset_zone() for every zone on a fixed
 /// interval.  reset_zone respects each command's `max_existing` cap, so
 /// rooms whose mobs/objects are already populated stay unchanged — only

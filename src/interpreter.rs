@@ -5060,6 +5060,72 @@ pub async fn fire_mob_entry_triggers(
     apply_script_outputs(outputs, room, world, chars).await;
 }
 
+/// Roll the mob's RANDOM ('b') triggers once. Each matching trigger
+/// rolls `narg`% independently — those that pass run.  Caller is the
+/// random-trigger tick (`db::spawn_random_trigger_tick`).  No-op if the
+/// mob isn't in a room (NOWHERE) since broadcasts won't reach anyone.
+pub async fn fire_mob_random_tick(
+    mob_id: u32,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    use rand::Rng;
+    let (outputs, room) = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { return; };
+        if m.in_room == crate::world::NOWHERE { return; }
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let inputs = ScriptInputs {
+            self_mob_id: Some(m.id),
+            self_hp: m.hp, self_max_hp: m.max_hp,
+            self_level: proto.level,
+            ..Default::default()
+        };
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'b' { continue; }
+            // narg is "% chance to fire per tick" (1..100).
+            let chance = t.narg.clamp(0, 100);
+            if chance <= 0 { continue; }
+            // Re-acquire thread_rng per check — its handle is !Send so it
+            // can't live across the .lock().await above.
+            if rand::thread_rng().gen_range(0..100) >= chance { continue; }
+            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, &inputs, world, chars));
+        }
+        (acc, mob_room)
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Roll a room's RANDOM ('b') triggers (attach=ROOM) once. Mirrors
+/// `fire_mob_random_tick` but for room-attached scripts.
+pub async fn fire_room_random_tick(
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    use rand::Rng;
+    let outputs: Vec<ScriptOut> = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&room) else { return; };
+        let room_name = r.name.clone();
+        let mut acc: Vec<ScriptOut> = Vec::new();
+        for &tvnum in &r.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'b' { continue; }
+            let chance = t.narg.clamp(0, 100);
+            if chance <= 0 { continue; }
+            if rand::thread_rng().gen_range(0..100) >= chance { continue; }
+            acc.extend(execute_script(t, &room_name, &room_name, room, &ScriptInputs::default(), world, chars));
+        }
+        acc
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
 /// Run BRIBE (type 'l') triggers when a mob receives gold from a player.
 /// `gold_amount` is passed in via `%actor.gold%` (overrides default).
 pub async fn fire_mob_bribe_triggers(
