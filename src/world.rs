@@ -226,8 +226,10 @@ pub const CORPSE_DECAY_SECS: i32 = 300;
 /// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
 /// gameplay (containers, weapons, armor).
 pub const ITEM_LIGHT:     i32 = 1;
+pub const ITEM_SCROLL:    i32 = 2;
 pub const ITEM_WEAPON:    i32 = 5;
 pub const ITEM_ARMOR:     i32 = 9;
+pub const ITEM_POTION:    i32 = 10;
 pub const ITEM_CONTAINER: i32 = 15;
 
 /// MOB_* bitflag positions in `MobProto.mob_flags[0]`.  Mirrors the

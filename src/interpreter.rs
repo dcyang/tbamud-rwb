@@ -67,7 +67,8 @@ const COMMANDS: &[&str] = &[
     "quest", "where",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
-    "open", "close", "lock", "unlock",
+    "open", "close", "lock", "unlock", "pick",
+    "drink", "recite",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -167,6 +168,9 @@ pub async fn dispatch_command(
         Some("close")     => do_door(rest, me, world, chars, DoorOp::Close).await,
         Some("lock")      => do_door(rest, me, world, chars, DoorOp::Lock).await,
         Some("unlock")    => do_door(rest, me, world, chars, DoorOp::Unlock).await,
+        Some("pick")      => do_pick(rest, me, world, chars).await,
+        Some("drink")     => do_drink(rest, me, world, chars).await,
+        Some("recite")    => do_recite(rest, me, world, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2738,6 +2742,68 @@ async fn do_door(
     CmdOutput::text(format!("\r\nYou {verb} the {kw_short}.\r\n"))
 }
 
+async fn do_pick(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::{EX_ISDOOR, EX_CLOSED, EX_LOCKED, EX_PICKPROOF};
+    use rand::Rng;
+
+    me.reveal();
+    let skill = Skill::PickLock;
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou know nothing about picking locks.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&skill).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text("\r\nYou'd need to practice 'pick lock' first.\r\n".to_string());
+    }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nPick what?\r\n".to_string());
+    }
+
+    let w = world.lock().await;
+    let Some((dir, info, _key, keyword, _to)) = find_door_target(&w, me.current_room, arg) else {
+        return CmdOutput::text("\r\nYou see no such door here.\r\n".to_string());
+    };
+    drop(w);
+    if (info & EX_ISDOOR) == 0 {
+        return CmdOutput::text("\r\nThat's not a door.\r\n".to_string());
+    }
+    if (info & EX_CLOSED) == 0 {
+        return CmdOutput::text("\r\nIt's not even closed.\r\n".to_string());
+    }
+    if (info & EX_LOCKED) == 0 {
+        return CmdOutput::text("\r\nOh, it wasn't locked after all.\r\n".to_string());
+    }
+    if (info & EX_PICKPROOF) != 0 {
+        return CmdOutput::text("\r\nIt resists your attempts to pick it.\r\n".to_string());
+    }
+    let kw_short = if keyword.is_empty() { "door".to_string() }
+                   else { keyword.split_whitespace().next().unwrap_or("door").to_string() };
+
+    // Roll: chance scales linearly with learned (0..100).
+    let roll = rand::thread_rng().gen_range(0..100);
+    if roll >= learned as i32 {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} fumbles at the {kw_short} with a set of picks.\r\n", me.name));
+        return CmdOutput::text(format!("\r\nYou fumble at the {kw_short}.\r\n"));
+    }
+
+    {
+        let mut w = world.lock().await;
+        mutate_door(&mut w, me.current_room, dir, 0, EX_LOCKED);
+    }
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} picks the lock on the {kw_short}.\r\n", me.name));
+    CmdOutput::text(format!("\r\nThe lock clicks open.\r\n"))
+}
+
 /// True if `key_vnum` is non-negative and the player has an instance of
 /// that vnum in their inventory.
 async fn player_has_key(me: &Character, key_vnum: i32, world: &Arc<Mutex<World>>) -> bool {
@@ -2748,6 +2814,138 @@ async fn player_has_key(me: &Character, key_vnum: i32, world: &Arc<Mutex<World>>
             .map(|o| o.vnum == key_vnum)
             .unwrap_or(false)
     })
+}
+
+// ---------------------------------------------------------------------------
+// Potions & scrolls
+// ---------------------------------------------------------------------------
+
+/// Cast a spell identified by its CircleMUD spell vnum at `target_kw`,
+/// returning the spell's text output.  Used by drink/recite (and a
+/// natural extension point if we ever add wand/staff later).  Saves and
+/// restores `me.mana` so consumable casts don't drain it.
+async fn apply_item_spell(
+    spell_vnum: i32,
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> String {
+    let saved_mana = me.mana;
+    // Pretend the potion/scroll is fully learned.
+    let learned: u8 = 100;
+    let out = match spell_vnum {
+        3  => cast_bless(target_kw, me, chars, learned).await,
+        5  => cast_burning_hands(me, world, chars, learned).await,
+        16 => cast_cure_light(target_kw, me, chars, learned).await,
+        19 => cast_detect_invis(me),
+        20 => cast_detect_magic(me, world).await,
+        27 => cast_harm(target_kw, me, world, chars, learned).await,
+        32 => cast_magic_missile(target_kw, me, world, chars, learned).await,
+        36 => cast_sanctuary(target_kw, me, chars, learned).await,
+        42 => cast_word_of_recall(me, world, chars).await,
+        52 => cast_identify(target_kw, me, world).await,
+        // 0 or -1 in value[1..3] means "no spell in this slot" — skip
+        // silently (matches stock potion data).
+        n if n <= 0 => return String::new(),
+        _  => return "\r\nThe magic fizzles harmlessly.\r\n".to_string(),
+    };
+    me.mana = saved_mana;
+    out.text
+}
+
+/// Locate a consumable in inventory matching `keyword` whose item_type
+/// is `expected_type`.  Returns (instance_id, short_descr, [v0,v1,v2,v3]).
+async fn find_consumable(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    keyword: &str,
+    expected_type: i32,
+) -> Option<(u32, String, [i32; 4])> {
+    let kw = keyword.to_ascii_lowercase();
+    let w = world.lock().await;
+    for &iid in &me.inventory {
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+        let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+        if p.item_type != expected_type { continue; }
+        if !p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) { continue; }
+        return Some((iid, p.short_description.clone(), p.value));
+    }
+    None
+}
+
+async fn do_drink(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_POTION;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nDrink what?\r\n".to_string());
+    }
+    let Some((iid, short, value)) = find_consumable(me, world, arg, ITEM_POTION).await else {
+        return CmdOutput::text("\r\nYou have nothing like that to drink.\r\n".to_string());
+    };
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} quaffs {}.\r\n", me.name, short));
+    drop(cl);
+
+    let mut text = format!("\r\nYou quaff {}.\r\n", short);
+    // value[0] = level, value[1..3] = up to three spell vnums to cast on
+    // the drinker.
+    for slot in 1..4 {
+        let s = apply_item_spell(value[slot], "", me, world, chars).await;
+        text.push_str(&s);
+    }
+    // Consume the potion.
+    me.inventory.retain(|&i| i != iid);
+    {
+        let mut w = world.lock().await;
+        w.obj_instances.retain(|o| o.id != iid);
+    }
+    CmdOutput::text(text)
+}
+
+async fn do_recite(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_SCROLL;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nRecite what?\r\n".to_string());
+    }
+    // First token is the scroll keyword; rest (if any) is the target.
+    let (scroll_kw, target) = match arg.find(char::is_whitespace) {
+        Some(i) => (&arg[..i], arg[i..].trim()),
+        None    => (arg, ""),
+    };
+    let Some((iid, short, value)) = find_consumable(me, world, scroll_kw, ITEM_SCROLL).await else {
+        return CmdOutput::text("\r\nYou have no such scroll.\r\n".to_string());
+    };
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} recites {}.\r\n", me.name, short));
+    drop(cl);
+
+    let mut text = format!("\r\nYou recite {} which dissolves.\r\n", short);
+    for slot in 1..4 {
+        let s = apply_item_spell(value[slot], target, me, world, chars).await;
+        text.push_str(&s);
+    }
+    me.inventory.retain(|&i| i != iid);
+    {
+        let mut w = world.lock().await;
+        w.obj_instances.retain(|o| o.id != iid);
+    }
+    CmdOutput::text(text)
 }
 
 fn capitalize_first(s: &str) -> String {

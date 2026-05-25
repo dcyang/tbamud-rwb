@@ -28,6 +28,7 @@ pub enum Skill {
     Kick,
     Bash,
     Backstab,
+    PickLock,
     MagicMissile,
     CureLight,
     Bless,
@@ -62,6 +63,7 @@ impl Skill {
             "kick"         => Some(Skill::Kick),
             "bash"         => Some(Skill::Bash),
             "backstab"     => Some(Skill::Backstab),
+            "picklock" | "pick" => Some(Skill::PickLock),
             "magicmissile" => Some(Skill::MagicMissile),
             "curelight"    => Some(Skill::CureLight),
             "bless"        => Some(Skill::Bless),
@@ -85,6 +87,7 @@ impl Skill {
             Skill::Kick         => "kick",
             Skill::Bash         => "bash",
             Skill::Backstab     => "backstab",
+            Skill::PickLock     => "pick lock",
             Skill::MagicMissile => "magic missile",
             Skill::CureLight    => "cure light",
             Skill::Bless        => "bless",
@@ -103,7 +106,7 @@ impl Skill {
 
     pub fn kind(self) -> SkillKind {
         match self {
-            Skill::Kick | Skill::Bash | Skill::Backstab
+            Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
@@ -116,7 +119,7 @@ impl Skill {
     /// Mana cost when invoking this skill.  Zero for physical skills.
     pub fn mana_cost(self) -> i32 {
         match self {
-            Skill::Kick | Skill::Bash | Skill::Backstab
+            Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
@@ -137,6 +140,7 @@ impl Skill {
             Skill::Kick         => &[Class::Warrior, Class::Thief, Class::Cleric],
             Skill::Bash         => &[Class::Warrior],
             Skill::Backstab     => &[Class::Thief],
+            Skill::PickLock     => &[Class::Thief],
             Skill::MagicMissile => &[Class::MagicUser],
             Skill::CureLight    => &[Class::Cleric],
             Skill::Bless        => &[Class::Cleric],
@@ -166,6 +170,7 @@ impl Skill {
             Skill::Kick         => "kick",
             Skill::Bash         => "bash",
             Skill::Backstab     => "backstab",
+            Skill::PickLock     => "pick-lock",
             Skill::MagicMissile => "magic-missile",
             Skill::CureLight    => "cure-light",
             Skill::Bless        => "bless",
@@ -190,7 +195,7 @@ impl Skill {
 
 /// All known skills — iteration order for `skills` command + persistence.
 pub const ALL_SKILLS: &[Skill] = &[
-    Skill::Kick, Skill::Bash, Skill::Backstab,
+    Skill::Kick, Skill::Bash, Skill::Backstab, Skill::PickLock,
     Skill::Sneak, Skill::Hide, Skill::Steal,
     Skill::MagicMissile, Skill::CureLight,
     Skill::Bless, Skill::BurningHands,
