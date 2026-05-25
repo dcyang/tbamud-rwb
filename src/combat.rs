@@ -179,9 +179,49 @@ async fn resolve_player_attack(
     }
 
     if target_dead {
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == p.target.id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|mp| mp.exp as i64)
+                .unwrap_or(0)
+        };
         kill_mob(p.target.id, target_room, &target_name, &p.attacker_name, world, chars).await;
         // Clear the player's fighting state since the mob is gone.
         clear_player_fighting(p.attacker_id, chars).await;
+        // Award XP and check for level-up.
+        award_xp(p.attacker_id, xp, chars).await;
+    }
+}
+
+/// Award `xp` experience points to the player handle with `id`. Sends the
+/// gain message + any level-up notification through the player's mpsc.
+async fn award_xp(player_id: u32, xp: i64, chars: &SharedChars) {
+    if xp <= 0 { return; }
+    let handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == player_id).cloned();
+        h
+    };
+    let Some(ph) = handle else { return; };
+
+    let (msg, levels) = {
+        let mut c = ph.character.lock().await;
+        c.exp += xp;
+        let levels = c.check_level_up();
+        let msg = format!("\r\nYou gain {xp} experience.\r\n");
+        (msg, levels)
+    };
+    let _ = ph.send.send(msg);
+    if levels > 0 {
+        // Snapshot the new level/maxhp for the message.
+        let (level, max_hp) = {
+            let c = ph.character.lock().await;
+            (c.level, c.max_hp)
+        };
+        let _ = ph.send.send(format!(
+            "\r\n*** You feel more powerful!  You are now level {level}.  Max HP: {max_hp} ***\r\n"
+        ));
     }
 }
 
@@ -270,8 +310,8 @@ async fn clear_player_fighting(player_id: u32, chars: &SharedChars) {
     }
 }
 
-/// Remove a dead mob from the world. Drops the mob's inventory onto the
-/// floor as ground items so the killer can collect them.
+/// Remove a dead mob from the world. Spawns a corpse container in the room
+/// holding the mob's former inventory.
 async fn kill_mob(
     mob_id: u32,
     room: crate::world::RoomVnum,
@@ -280,24 +320,13 @@ async fn kill_mob(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
-    let dropped: Vec<u32> = {
+    {
         let mut w = world.lock().await;
-        // Take the mob's inventory before extracting.
         let inv: Vec<u32> = w.mob_instances.iter()
             .find(|m| m.id == mob_id)
             .map(|m| m.inventory.clone())
             .unwrap_or_default();
-        // Move objects to the room.
-        if let Some(r) = w.rooms.get_mut(&room) {
-            for &iid in &inv {
-                r.objects.push(iid);
-            }
-        }
-        for &iid in &inv {
-            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
-                o.in_room = room;
-            }
-        }
+
         // Clear any other mob/player fighting state targeting this mob.
         for other in w.mob_instances.iter_mut() {
             if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
@@ -309,23 +338,20 @@ async fn kill_mob(
             r.mobs.retain(|&id| id != mob_id);
         }
         w.mob_instances.retain(|m| m.id != mob_id);
-        inv
-    };
 
-    // Broadcast the death.
-    {
-        let cl = chars.lock().await;
-        cl.broadcast_room(
-            room, None,
-            &format!("\r\n{killer_name} has slain {mob_name}!\r\n"),
-        );
-        if !dropped.is_empty() {
-            cl.broadcast_room(
-                room, None,
-                &format!("{mob_name}'s belongings tumble to the floor.\r\n"),
-            );
-        }
+        // Spawn the corpse holding the mob's inventory.
+        w.create_corpse(mob_name, inv, room);
     }
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        room, None,
+        &format!("\r\n{killer_name} has slain {mob_name}!\r\n"),
+    );
+    cl.broadcast_room(
+        room, None,
+        &format!("{mob_name} collapses to the floor, dead.\r\n"),
+    );
 }
 
 /// Player has dropped to 0 HP.  Heal to full and respawn at the mortal

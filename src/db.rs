@@ -788,6 +788,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     world.obj_instances.push(ObjInstance {
                         id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                         contents: Vec::new(),
+                        corpse_of: None,
                     });
                     last_cmd_ok = true;
                 } else if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
@@ -796,6 +797,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     world.obj_instances.push(ObjInstance {
                         id, vnum: cmd.arg1, in_room: cmd.arg3,
                         contents: Vec::new(),
+                        corpse_of: None,
                     });
                     last_cmd_ok = true;
                 } else {
@@ -823,6 +825,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
+                        corpse_of: None,
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -850,6 +853,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
+                        corpse_of: None,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {

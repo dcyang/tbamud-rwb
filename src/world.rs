@@ -177,7 +177,15 @@ pub struct ObjInstance {
     /// Instance ids of objects this container holds.  Always empty for
     /// non-container item types.
     pub contents: Vec<u32>,
+    /// If Some, this instance is a *corpse* — a synthetic container that
+    /// has no prototype.  The string is the mob's short_descr (e.g.
+    /// "the gelatinous blob"), used in rendering and keyword matching.
+    pub corpse_of: Option<String>,
 }
+
+/// Reserved vnum used for corpses (and other synthetic objects that have
+/// no prototype). Always checked alongside `corpse_of`.
+pub const CORPSE_VNUM: ObjVnum = -1;
 
 /// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
 /// gameplay (containers, weapons, armor).
@@ -302,6 +310,36 @@ impl World {
         None
     }
 
+    /// Create a synthetic corpse object containing the given vector of
+    /// child instance ids.  Places the corpse in `room` and returns the
+    /// new instance id.  `mob_short` becomes the corpse's identifying
+    /// string (e.g. "the green gelatinous blob").
+    pub fn create_corpse(
+        &mut self,
+        mob_short: &str,
+        contents: Vec<u32>,
+        room: RoomVnum,
+    ) -> u32 {
+        let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
+        // Reparent the contained objects to no-room (they live inside the corpse).
+        for &cid in &contents {
+            if let Some(o) = self.obj_instances.iter_mut().find(|o| o.id == cid) {
+                o.in_room = NOWHERE;
+            }
+        }
+        self.obj_instances.push(ObjInstance {
+            id,
+            vnum: CORPSE_VNUM,
+            in_room: room,
+            contents,
+            corpse_of: Some(mob_short.to_string()),
+        });
+        if let Some(r) = self.rooms.get_mut(&room) {
+            r.objects.push(id);
+        }
+        id
+    }
+
     /// Materialize a fresh instance of the given object prototype, parked
     /// in limbo (`NOWHERE`).  Returns the instance id, or None if the vnum
     /// has no prototype.  Used by login to restore persisted inventories.
@@ -311,6 +349,7 @@ impl World {
         self.obj_instances.push(ObjInstance {
             id, vnum, in_room: NOWHERE,
             contents: Vec::new(),
+                        corpse_of: None,
         });
         Some(id)
     }

@@ -117,6 +117,7 @@ pub struct PlayerRecord {
     pub max_hp:        i32,
     pub room:          i32,
     pub gold:          i64,
+    pub exp:           i64,
     pub str_:          i32,
     pub int_:          i32,
     pub wis:           i32,
@@ -280,6 +281,7 @@ impl PlayerDb {
                 }
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
+                "Exp"  => rec.exp  = val.parse().unwrap_or(0),
                 "Str"  => rec.str_ = val.parse().unwrap_or(0),
                 "Int"  => rec.int_ = val.parse().unwrap_or(0),
                 "Wis"  => rec.wis  = val.parse().unwrap_or(0),
@@ -332,6 +334,9 @@ impl PlayerDb {
         }
         if rec.gold != 0 {
             writeln!(f, "Gold: {}", rec.gold)?;
+        }
+        if rec.exp != 0 {
+            writeln!(f, "Exp : {}", rec.exp)?;
         }
         if rec.str_ != 0 { writeln!(f, "Str : {}", rec.str_)?; }
         if rec.int_ != 0 { writeln!(f, "Int : {}", rec.int_)?; }

@@ -212,6 +212,7 @@ pub async fn handle_connection(
                     inventory:    Vec::new(),
                     equipment:    Default::default(),
                     gold,
+                    exp:          p_ref.map(|p| p.exp).unwrap_or(0),
                     hp,
                     max_hp,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
@@ -417,6 +418,8 @@ async fn run_game_session(
             rec.max_hp = me.max_hp;
             rec.room   = me.current_room;
             rec.gold   = me.gold;
+            rec.exp    = me.exp;
+            rec.level  = me.level;
             rec.str_   = me.str_;
             rec.int_   = me.int_;
             rec.wis    = me.wis;

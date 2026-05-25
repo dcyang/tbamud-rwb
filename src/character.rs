@@ -39,6 +39,7 @@ pub struct Character {
     pub equipment:    [Option<u32>; NUM_WEARS],
     /// Gold pieces.
     pub gold:         i64,
+    pub exp:          i64,
     pub hp:           i32,
     pub max_hp:       i32,
     /// Ability scores — rolled at creation (3d6 each), then persisted.
@@ -183,6 +184,40 @@ impl Character {
         // a sparring match in the temple courtyard.  Subsequent sessions
         // restore from the saved value (Hit: cur/max in the player file).
         if level >= 34 { 1000 } else { 50 + level * 10 }
+    }
+
+    /// Max mortal level. Above this you're an immortal (LVL_IMMORT = 34 in
+    /// CircleMUD).  Mortal progression stops here.
+    pub const MAX_MORTAL_LEVEL: i32 = 30;
+
+    /// XP needed to advance from `cur_level` → `cur_level + 1`.  Simple
+    /// linear-ish ramp; CircleMUD uses class-specific tables that we'll
+    /// inherit once the class system arrives.
+    pub fn exp_for_level(cur_level: i32) -> i64 {
+        if cur_level >= Self::MAX_MORTAL_LEVEL {
+            i64::MAX  // can't level past the cap
+        } else {
+            // Triangle-style: 1000, 3000, 6000, 10000, ...
+            let n = (cur_level as i64) + 1;
+            n * (n + 1) / 2 * 1000
+        }
+    }
+
+    /// Apply level-up effects if the character has enough XP. Returns the
+    /// number of levels gained (0 if none).
+    pub fn check_level_up(&mut self) -> i32 {
+        let mut gained = 0;
+        while self.level < Self::MAX_MORTAL_LEVEL
+            && self.exp >= Self::exp_for_level(self.level)
+        {
+            self.level += 1;
+            // +HP, heal to full.
+            let hp_gain = 10 + self.con / 2;
+            self.max_hp += hp_gain;
+            self.hp = self.max_hp;
+            gained += 1;
+        }
+        gained
     }
 
     /// Roll a fresh ability score: 3d6, immortals get a +6 bonus so they
