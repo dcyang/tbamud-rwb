@@ -35,6 +35,8 @@ pub struct Character {
     pub current_room: RoomVnum,
     /// Object instance ids carried by this character.
     pub inventory:    Vec<u32>,
+    /// Worn/wielded equipment, keyed by WearPos.
+    pub equipment:    [Option<u32>; NUM_WEARS],
     /// Gold pieces.
     pub gold:         i64,
     pub hp:           i32,
@@ -43,15 +45,103 @@ pub struct Character {
     pub fighting:     Option<Target>,
 }
 
+// ---------------------------------------------------------------------------
+// Wear positions — mirror the WEAR_* defines in structs.h.
+// ---------------------------------------------------------------------------
+
+pub const WEAR_LIGHT:    usize = 0;
+pub const WEAR_FINGER_R: usize = 1;
+pub const WEAR_FINGER_L: usize = 2;
+pub const WEAR_NECK_1:   usize = 3;
+pub const WEAR_NECK_2:   usize = 4;
+pub const WEAR_BODY:     usize = 5;
+pub const WEAR_HEAD:     usize = 6;
+pub const WEAR_LEGS:     usize = 7;
+pub const WEAR_FEET:     usize = 8;
+pub const WEAR_HANDS:    usize = 9;
+pub const WEAR_ARMS:     usize = 10;
+pub const WEAR_SHIELD:   usize = 11;
+pub const WEAR_ABOUT:    usize = 12;
+pub const WEAR_WAIST:    usize = 13;
+pub const WEAR_WRIST_R:  usize = 14;
+pub const WEAR_WRIST_L:  usize = 15;
+pub const WEAR_WIELD:    usize = 16;
+pub const WEAR_HOLD:     usize = 17;
+pub const NUM_WEARS:     usize = 18;
+
+/// ITEM_WEAR_* bit flags (from values stored in `ObjProto.wear_flags[0]`).
+/// Bit 0 is `ITEM_WEAR_TAKE` (means takeable, no slot).
+pub const ITEM_WEAR_TAKE:   u32 = 1 << 0;
+pub const ITEM_WEAR_FINGER: u32 = 1 << 1;
+pub const ITEM_WEAR_NECK:   u32 = 1 << 2;
+pub const ITEM_WEAR_BODY:   u32 = 1 << 3;
+pub const ITEM_WEAR_HEAD:   u32 = 1 << 4;
+pub const ITEM_WEAR_LEGS:   u32 = 1 << 5;
+pub const ITEM_WEAR_FEET:   u32 = 1 << 6;
+pub const ITEM_WEAR_HANDS:  u32 = 1 << 7;
+pub const ITEM_WEAR_ARMS:   u32 = 1 << 8;
+pub const ITEM_WEAR_SHIELD: u32 = 1 << 9;
+pub const ITEM_WEAR_ABOUT:  u32 = 1 << 10;
+pub const ITEM_WEAR_WAIST:  u32 = 1 << 11;
+pub const ITEM_WEAR_WRIST:  u32 = 1 << 12;
+pub const ITEM_WEAR_WIELD:  u32 = 1 << 13;
+pub const ITEM_WEAR_HOLD:   u32 = 1 << 14;
+
+/// Map a `wear_flags[0]` bitmask to a preferred slot (the position
+/// `do_wear` would assign automatically).  Returns `None` for items that
+/// cannot be worn (only TAKE or no wear bits beyond TAKE).
+pub fn auto_wear_slot(wear_flags: u32) -> Option<usize> {
+    // Check in the same order as CircleMUD's wear_bits[] traversal.
+    if wear_flags & ITEM_WEAR_FINGER != 0 { return Some(WEAR_FINGER_R); }
+    if wear_flags & ITEM_WEAR_NECK   != 0 { return Some(WEAR_NECK_1); }
+    if wear_flags & ITEM_WEAR_BODY   != 0 { return Some(WEAR_BODY); }
+    if wear_flags & ITEM_WEAR_HEAD   != 0 { return Some(WEAR_HEAD); }
+    if wear_flags & ITEM_WEAR_LEGS   != 0 { return Some(WEAR_LEGS); }
+    if wear_flags & ITEM_WEAR_FEET   != 0 { return Some(WEAR_FEET); }
+    if wear_flags & ITEM_WEAR_HANDS  != 0 { return Some(WEAR_HANDS); }
+    if wear_flags & ITEM_WEAR_ARMS   != 0 { return Some(WEAR_ARMS); }
+    if wear_flags & ITEM_WEAR_SHIELD != 0 { return Some(WEAR_SHIELD); }
+    if wear_flags & ITEM_WEAR_ABOUT  != 0 { return Some(WEAR_ABOUT); }
+    if wear_flags & ITEM_WEAR_WAIST  != 0 { return Some(WEAR_WAIST); }
+    if wear_flags & ITEM_WEAR_WRIST  != 0 { return Some(WEAR_WRIST_R); }
+    if wear_flags & ITEM_WEAR_HOLD   != 0 { return Some(WEAR_HOLD); }
+    // WIELD is intentionally NOT in `wear`; player uses `wield` instead.
+    None
+}
+
+pub fn wear_pos_name(pos: usize) -> &'static str {
+    match pos {
+        WEAR_LIGHT    => "as a light",
+        WEAR_FINGER_R => "on the right finger",
+        WEAR_FINGER_L => "on the left finger",
+        WEAR_NECK_1   => "around the neck",
+        WEAR_NECK_2   => "around the neck",
+        WEAR_BODY     => "on the body",
+        WEAR_HEAD     => "on the head",
+        WEAR_LEGS     => "on the legs",
+        WEAR_FEET     => "on the feet",
+        WEAR_HANDS    => "on the hands",
+        WEAR_ARMS     => "on the arms",
+        WEAR_SHIELD   => "as a shield",
+        WEAR_ABOUT    => "about the body",
+        WEAR_WAIST    => "about the waist",
+        WEAR_WRIST_R  => "around the right wrist",
+        WEAR_WRIST_L  => "around the left wrist",
+        WEAR_WIELD    => "wielded",
+        WEAR_HOLD     => "held",
+        _             => "somewhere",
+    }
+}
+
 impl Character {
     /// Derive starting HP for a brand-new mortal. Immortals (lvl >= 34) get
     /// a much higher pool. Mirrors very loosely what CircleMUD does in
     /// new-character init — exact constants will come with the stat system.
     pub fn init_hp(level: i32) -> i32 {
-        // Generous default while combat balance is still placeholder — gives
-        // a level-0 mortal enough HP to actually kill something before being
-        // pulped by Midgaard's high-level guards.
-        if level >= 34 { 1000 } else { 200 + level * 8 }
+        // Starting HP for a brand-new mortal.  Generous enough to survive
+        // a sparring match in the temple courtyard.  Subsequent sessions
+        // restore from the saved value (Hit: cur/max in the player file).
+        if level >= 34 { 1000 } else { 50 + level * 10 }
     }
 }
 

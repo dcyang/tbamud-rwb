@@ -17,7 +17,12 @@ use tokio::sync::Mutex;
 use rand::seq::SliceRandom;
 
 use crate::{
-    character::{Character, CharacterList, SharedChars, Target},
+    character::{
+        auto_wear_slot, wear_pos_name,
+        Character, CharacterList, SharedChars, Target,
+        ITEM_WEAR_WIELD, NUM_WEARS, WEAR_WIELD,
+    },
+    players::PlayerDb,
     world::{Direction, ObjVnum, RoomVnum, World},
 };
 
@@ -32,7 +37,8 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "say", "tell", "who",
+    "get", "drop", "wield", "wear", "remove",
+    "say", "tell", "who",
     "score", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -73,6 +79,7 @@ pub async fn dispatch_command(
     me: &mut Character,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
 ) -> CmdOutput {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -102,9 +109,12 @@ pub async fn dispatch_command(
         Some("score")     => do_score(me),
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
         Some("flee")      => do_flee(me, world, chars).await,
-        Some("equipment") => CmdOutput::text("\r\nYou are not wearing anything yet.\r\n"),
-        Some("save")      => CmdOutput::text("\r\nSave is not yet implemented.\r\n"),
-        Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
+        Some("wield")     => do_wield(rest, me, world).await,
+        Some("wear")      => do_wear(rest, me, world).await,
+        Some("remove")    => do_remove(rest, me, world).await,
+        Some("equipment") => do_equipment(me, world).await,
+        Some("save")      => do_save(me, players).await,
+        Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, wield, wear, remove, equip, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
         Some("exits")     => do_exits(me, world).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
@@ -519,6 +529,164 @@ async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         s.push_str(" None.\r\n");
     }
     CmdOutput::text(s)
+}
+
+// ---------------------------------------------------------------------------
+// Equipment commands
+// ---------------------------------------------------------------------------
+
+async fn do_wield(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nWield what?\r\n");
+    }
+    let w = world.lock().await;
+    let key = arg.to_ascii_lowercase();
+
+    let (idx, iid, short) = match find_inv_match(&w, &me.inventory, &key) {
+        Some(t) => t,
+        None => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
+    };
+
+    // Item must have ITEM_WEAR_WIELD bit set.
+    let wear_flags = w.obj_protos.iter()
+        .find(|(_, p)| w.obj_instances.iter().any(|o| o.id == iid && o.vnum == p.vnum))
+        .map(|(_, p)| p.wear_flags[0])
+        .unwrap_or(0);
+    drop(w);
+
+    if wear_flags & ITEM_WEAR_WIELD == 0 {
+        return CmdOutput::text(format!("\r\nYou cannot wield {short}.\r\n"));
+    }
+    if me.equipment[WEAR_WIELD].is_some() {
+        return CmdOutput::text("\r\nYou are already wielding something.\r\n");
+    }
+
+    me.inventory.remove(idx);
+    me.equipment[WEAR_WIELD] = Some(iid);
+    CmdOutput::text(format!("\r\nYou wield {short}.\r\n"))
+}
+
+async fn do_wear(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nWear what?\r\n");
+    }
+    let w = world.lock().await;
+    let key = arg.to_ascii_lowercase();
+
+    let (idx, iid, short) = match find_inv_match(&w, &me.inventory, &key) {
+        Some(t) => t,
+        None => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
+    };
+
+    // Look up the object's wear flags.
+    let wear_flags = {
+        let obj = w.obj_instances.iter().find(|o| o.id == iid);
+        obj.and_then(|o| w.obj_protos.get(&o.vnum))
+            .map(|p| p.wear_flags[0])
+            .unwrap_or(0)
+    };
+    drop(w);
+
+    let slot = match auto_wear_slot(wear_flags) {
+        Some(s) => s,
+        None => return CmdOutput::text(format!("\r\nYou cannot wear {short}.\r\n")),
+    };
+
+    if me.equipment[slot].is_some() {
+        return CmdOutput::text(format!(
+            "\r\nYou are already wearing something {}.\r\n",
+            wear_pos_name(slot)
+        ));
+    }
+
+    me.inventory.remove(idx);
+    me.equipment[slot] = Some(iid);
+    CmdOutput::text(format!("\r\nYou wear {short} {}.\r\n", wear_pos_name(slot)))
+}
+
+async fn do_remove(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nRemove what?\r\n");
+    }
+    let w = world.lock().await;
+    let key = arg.to_ascii_lowercase();
+
+    // Find a worn item matching the keyword.
+    let found = (0..NUM_WEARS).find_map(|i| {
+        let iid = me.equipment[i]?;
+        let obj = w.obj_instances.iter().find(|o| o.id == iid)?;
+        let p   = w.obj_protos.get(&obj.vnum)?;
+        if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+            Some((i, iid, p.short_description.clone()))
+        } else {
+            None
+        }
+    });
+    drop(w);
+
+    let (slot, iid, short) = match found {
+        Some(t) => t,
+        None => return CmdOutput::text(format!("\r\nYou are not wearing a {key}.\r\n")),
+    };
+
+    me.equipment[slot] = None;
+    me.inventory.push(iid);
+    CmdOutput::text(format!("\r\nYou stop using {short}.\r\n"))
+}
+
+async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
+    let pl = players.lock().await;
+    let rec = match pl.load_player(&me.name) {
+        Ok(mut r) => {
+            r.hp     = me.hp;
+            r.max_hp = me.max_hp;
+            r.room   = me.current_room;
+            r.gold   = me.gold;
+            r
+        }
+        Err(e) => {
+            return CmdOutput::text(format!("\r\nSave failed: {e}\r\n"));
+        }
+    };
+    match pl.save_player(&rec) {
+        Ok(()) => CmdOutput::text("\r\nSaving Testperson.\r\nYou have been saved.\r\n"
+            .replace("Testperson", &me.name)),
+        Err(e) => CmdOutput::text(format!("\r\nSave failed: {e}\r\n")),
+    }
+}
+
+async fn do_equipment(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let any = me.equipment.iter().any(|s| s.is_some());
+    if !any {
+        return CmdOutput::text("\r\nYou are not using anything.\r\n");
+    }
+    let w = world.lock().await;
+    let mut s = String::from("\r\nYou are using:\r\n");
+    for slot in 0..NUM_WEARS {
+        if let Some(iid) = me.equipment[slot] {
+            let short = w.obj_instances.iter().find(|o| o.id == iid)
+                .and_then(|o| w.obj_protos.get(&o.vnum))
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "(something)".into());
+            s.push_str(&format!("  <{:^22}>  {}\r\n", wear_pos_name(slot), short));
+        }
+    }
+    CmdOutput::text(s)
+}
+
+/// Locate a keyword match within an inventory list.  Returns
+/// (vec_index, instance_id, short_description) of the first match.
+fn find_inv_match(w: &World, inv: &[u32], key: &str) -> Option<(usize, u32, String)> {
+    for (i, &iid) in inv.iter().enumerate() {
+        if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+            if let Some(p) = w.obj_protos.get(&obj.vnum) {
+                if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(key)) {
+                    return Some((i, iid, p.short_description.clone()));
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn do_move(

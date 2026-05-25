@@ -191,26 +191,30 @@ pub async fn handle_connection(
                     .unwrap_or_else(|| "Someone".to_string());
 
                 // Build the character. id reuses the connection id for now.
-                let hp = Character::init_hp(session.level);
+                // If the player file has saved HP/Room/Gold, use those;
+                // otherwise initialise defaults.
+                let p_ref     = session.player.as_ref();
+                let default_hp = Character::init_hp(session.level);
+                let max_hp    = p_ref.map(|p| p.max_hp).filter(|h| *h > 0).unwrap_or(default_hp);
+                let hp        = p_ref.map(|p| p.hp).filter(|h| *h > 0).unwrap_or(max_hp);
+                let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
+                let gold      = p_ref.map(|p| p.gold).unwrap_or(0);
                 let me = Character {
                     id:           id as u32,
                     name:         pname.clone(),
                     level:        session.level,
-                    sex:          session.player.as_ref()
-                                    .map(|p| p.sex)
-                                    .unwrap_or(crate::players::Sex::Neutral),
-                    class:        session.player.as_ref()
-                                    .map(|p| p.class)
-                                    .unwrap_or(crate::players::Class::Undefined),
-                    current_room: start,
+                    sex:          p_ref.map(|p| p.sex).unwrap_or(crate::players::Sex::Neutral),
+                    class:        p_ref.map(|p| p.class).unwrap_or(crate::players::Class::Undefined),
+                    current_room: room,
                     inventory:    Vec::new(),
-                    gold:         0,
+                    equipment:    Default::default(),
+                    gold,
                     hp,
-                    max_hp:       hp,
+                    max_hp,
                     fighting:     None,
                 };
 
-                run_game_session(id, host.clone(), stream, me, world, chars).await?;
+                run_game_session(id, host.clone(), stream, me, world, chars, Arc::clone(&players)).await?;
                 return Ok(());
             }
         }
@@ -234,6 +238,7 @@ async fn run_game_session(
     me: Character,
     world: Arc<Mutex<World>>,
     chars: SharedChars,
+    players: Arc<Mutex<PlayerDb>>,
 ) -> Result<()> {
     // Split TCP for concurrent read/write
     let (mut read_half, mut write_half) = stream.into_split();
@@ -338,7 +343,7 @@ async fn run_game_session(
             debug!(id, name = %my_name, cmd = %line, "command");
             let out = {
                 let mut me = character.lock().await;
-                interpreter::dispatch_command(line, &mut me, &world, &chars).await
+                interpreter::dispatch_command(line, &mut me, &world, &chars, &players).await
             };
             if !out.text.is_empty() {
                 let _ = tx.send(out.text);
@@ -354,6 +359,39 @@ async fn run_game_session(
     // Tear down: remove from registry, broadcast departure, drop sender so
     // the writer task exits naturally.
     let from_room = character.lock().await.current_room;
+
+    // Auto-save on quit or disconnect (best-effort).
+    {
+        let me = character.lock().await;
+        let players_guard = players.lock().await;
+        if let Ok(mut rec) = players_guard.load_player(&my_name) {
+            rec.hp     = me.hp;
+            rec.max_hp = me.max_hp;
+            rec.room   = me.current_room;
+            rec.gold   = me.gold;
+            if let Err(e) = players_guard.save_player(&rec) {
+                warn!(name = %my_name, error = %e, "auto-save failed at session end");
+            }
+        }
+    }
+
+    // Extract the player's carried + worn objects from the world. We don't
+    // persist inventory yet (no plrobjs file), so leaving the instances
+    // around would block zone resets from restocking their vnums.
+    {
+        let me = character.lock().await;
+        let mut to_remove: Vec<u32> = me.inventory.clone();
+        for slot in me.equipment.iter() {
+            if let Some(iid) = slot {
+                to_remove.push(*iid);
+            }
+        }
+        if !to_remove.is_empty() {
+            let mut w = world.lock().await;
+            w.obj_instances.retain(|o| !to_remove.contains(&o.id));
+        }
+    }
+
     {
         let mut cl = chars.lock().await;
         cl.remove(my_id);

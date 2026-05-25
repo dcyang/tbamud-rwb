@@ -15,7 +15,8 @@ use rand::Rng;
 use tokio::{sync::Mutex, time::{Duration, MissedTickBehavior}};
 
 use crate::{
-    character::{Character, SharedChars, Target},
+    character::{Character, SharedChars, Target, WEAR_WIELD},
+    db::dice,
     world::World,
 };
 
@@ -53,6 +54,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     level:         me.level,
                     room:          me.current_room,
                     target:        tgt,
+                    weapon_iid:    me.equipment[WEAR_WIELD],
                 });
             }
         }
@@ -92,6 +94,7 @@ struct PlayerIntent {
     level:         i32,
     room:          crate::world::RoomVnum,
     target:        Target,
+    weapon_iid:    Option<u32>,
 }
 
 struct MobIntent {
@@ -111,8 +114,21 @@ async fn resolve_player_attack(
         return; // PvP not supported in this checkpoint
     }
 
-    // Roll damage: 1..(level+2). Crude but functional.
-    let dmg: i32 = rand::thread_rng().gen_range(1..=(p.level + 2).max(2));
+    // Roll damage. If the player is wielding a weapon, use its dice
+    // (value[1] = dice count, value[2] = dice size — matches CircleMUD's
+    // ITEM_WEAPON layout in structs.h). Otherwise barehand 1d4.
+    let dmg: i32 = {
+        let w = world.lock().await;
+        let weapon = p.weapon_iid.and_then(|iid|
+            w.obj_instances.iter().find(|o| o.id == iid)
+                .and_then(|o| w.obj_protos.get(&o.vnum)));
+        let base = if let Some(wp) = weapon {
+            dice(wp.value[1], wp.value[2])
+        } else {
+            dice(1, 4)
+        };
+        base.max(1) + p.level / 4  // small level scaling
+    };
 
     let (target_name, target_dead, target_room) = {
         let mut w = world.lock().await;
@@ -176,7 +192,15 @@ async fn resolve_mob_attack(
         return; // mob vs mob not supported
     }
 
-    let dmg: i32 = rand::thread_rng().gen_range(1..=(m.level + 2).max(2));
+    // Roll mob damage from its prototype dice (dam_dice d dam_size + damroll).
+    let dmg: i32 = {
+        let w = world.lock().await;
+        let proto = w.mob_protos.get(&m.attacker_vnum);
+        match proto {
+            Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
+            None    => 1,
+        }
+    };
 
     let target_handle = {
         let cl = chars.lock().await;

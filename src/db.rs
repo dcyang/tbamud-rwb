@@ -12,6 +12,8 @@ use std::{
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use rand::Rng;
+
 use crate::{
     players::asciiflag_conv,
     world::{
@@ -19,6 +21,18 @@ use crate::{
         ResetCmd, Room, World, Zone,
     },
 };
+
+/// Roll `count` dice of `size` sides. Mirrors dice() in utils.c.
+/// Returns 0 if either arg is non-positive.
+pub fn dice(count: i32, size: i32) -> i32 {
+    if count <= 0 || size <= 0 { return 0; }
+    let mut total = 0;
+    let mut rng = rand::thread_rng();
+    for _ in 0..count {
+        total += rng.gen_range(1..=size);
+    }
+    total
+}
 
 /// Read the world: walk lib/world/zon/index → load zones, then
 /// lib/world/wld/index → load rooms.
@@ -64,8 +78,7 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 
     // --- Run zone resets ---------------------------------------------------
     // Mirrors the initial reset_zone() pass that boot_db() performs over all
-    // zones. We do this synchronously at boot; periodic resets (driven by
-    // zone_update() / reset_mode) are deferred.
+    // zones. Periodic resets are scheduled by spawn_zone_reset_tick().
     let zone_vnums: Vec<i32> = world.zones.keys().copied().collect();
     for zv in zone_vnums {
         reset_zone(&mut world, zv);
@@ -77,6 +90,56 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     );
 
     Ok(world)
+}
+
+// ---------------------------------------------------------------------------
+// Periodic zone reset tick
+// ---------------------------------------------------------------------------
+
+/// Background task that re-runs reset_zone() for every zone on a fixed
+/// interval.  reset_zone respects each command's `max_existing` cap, so
+/// rooms whose mobs/objects are already populated stay unchanged — only
+/// missing entities (e.g. mobs the players killed) are restocked.
+///
+/// Mirrors zone_update() in db.c, simplified: in tbaMUD each zone has its
+/// own `lifespan` (minutes between resets), but a single shared cadence is
+/// fine for now.
+pub fn spawn_zone_reset_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
+    // Two-minute cadence — short enough for testing without spamming logs.
+    const RESET_SECONDS: u64 = 120;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(RESET_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        // First tick fires immediately; skip it so we don't double-reset on boot.
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            let mut w = world.lock().await;
+            let zone_vnums: Vec<i32> = w.zones.keys().copied().collect();
+            let mobs_before = w.mob_instances.len();
+            let objs_before = w.obj_instances.len();
+            for zv in zone_vnums {
+                reset_zone(&mut w, zv);
+            }
+            let mobs_after = w.mob_instances.len();
+            let objs_after = w.obj_instances.len();
+            if mobs_after != mobs_before || objs_after != objs_before {
+                tracing::info!(
+                    mobs_added = mobs_after.saturating_sub(mobs_before),
+                    objs_added = objs_after.saturating_sub(objs_before),
+                    total_mobs = mobs_after,
+                    total_objs = objs_after,
+                    "Periodic zone reset",
+                );
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -442,14 +505,19 @@ fn parse_mob_file(path: &PathBuf, world: &mut World) -> Result<()> {
         // Line A: "<level> <thac0> <ac> <hp_d>d<hp_s>+<hp_a> <dam_d>d<dam_s>+<dam_a>"
         let l1 = s.next_line()
             .ok_or_else(|| anyhow!("mob {vnum}: missing stat line 1"))?;
-        let (lvl, thac0, ac, hp, _hp_s, _hp_a, _dd, _ds, _da) = parse_mob_stats(&l1)
+        let (lvl, thac0, ac, hp_d, hp_s, hp_a, dd, ds, da) = parse_mob_stats(&l1)
             .with_context(|| format!("mob {vnum}: parsing stat line 1"))?;
-        m.level = lvl;
-        m.hitroll = 20 - thac0;
-        m.ac      = 10 * ac;
-        m.hit     = hp;
-        m.mana    = 10;
-        m.mv      = 50;
+        m.level    = lvl;
+        m.hitroll  = 20 - thac0;
+        m.ac       = 10 * ac;
+        m.hp_dice  = hp_d;
+        m.hp_size  = hp_s;
+        m.hp_add   = hp_a;
+        m.dam_dice = dd;
+        m.dam_size = ds;
+        m.damroll  = da;
+        m.mana     = 10;
+        m.mv       = 50;
 
         let l2 = s.next_line()
             .ok_or_else(|| anyhow!("mob {vnum}: missing gold/exp line"))?;
@@ -556,12 +624,12 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     continue;
                 }
                 if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
-                    // HP: prototype stores "hit" as a starting roll; we use
-                    // it directly as max_hp for simple mobs. Mirrors the
-                    // GET_HIT/GET_MAX_HIT initialization in db.c (the full
-                    // version is xdy+z; here we just take the constant).
-                    let proto = world.mob_protos.get(&cmd.arg1);
-                    let hp = proto.map(|p| p.hit.max(1)).unwrap_or(10);
+                    // Roll HP from "<d>d<s>+<a>" dice on each spawn (mirrors
+                    // dice() in db.c that initializes mob_proto[i] hit total).
+                    let hp = world.mob_protos.get(&cmd.arg1)
+                        .map(|p| dice(p.hp_dice, p.hp_size) + p.hp_add)
+                        .unwrap_or(10)
+                        .max(1);
                     let id = next_mob_id; next_mob_id += 1;
                     room.mobs.push(id);
                     world.mob_instances.push(MobInstance {

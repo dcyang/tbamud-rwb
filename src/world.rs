@@ -195,7 +195,14 @@ pub struct MobProto {
     pub level:       i32,
     pub hitroll:     i32,
     pub ac:          i32,
-    pub hit:         i32,        // hp dice "d"
+    /// HP dice: rolls hp_dice d hp_size + hp_add to set max HP.
+    pub hp_dice:     i32,
+    pub hp_size:     i32,
+    pub hp_add:      i32,
+    /// Damage dice: dam_dice d dam_size + dam_roll (barehand attack).
+    pub dam_dice:    i32,
+    pub dam_size:    i32,
+    pub damroll:     i32,
     pub mana:        i32,
     pub mv:          i32,
     pub gold:        i32,

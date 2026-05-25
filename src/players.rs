@@ -110,6 +110,13 @@ pub struct PlayerRecord {
     pub class:         Class,
     pub plr_flags:     u32,    // PLR_FLAGS[0]
     pub id:            i64,
+    /// Persisted gameplay state. Zero values are treated as "use defaults"
+    /// during login so brand-new characters with all-zero records still get
+    /// proper init.
+    pub hp:            i32,
+    pub max_hp:        i32,
+    pub room:          i32,
+    pub gold:          i64,
 }
 
 impl PlayerRecord {
@@ -256,6 +263,14 @@ impl PlayerDb {
                     let first = val.split_ascii_whitespace().next().unwrap_or("0");
                     rec.plr_flags = asciiflag_conv(first);
                 }
+                "Hit"  => {
+                    // Stored as "<cur>/<max>"
+                    let mut parts = val.split('/');
+                    if let Some(p) = parts.next() { rec.hp     = p.trim().parse().unwrap_or(0); }
+                    if let Some(p) = parts.next() { rec.max_hp = p.trim().parse().unwrap_or(0); }
+                }
+                "Room" => rec.room = val.parse().unwrap_or(0),
+                "Gold" => rec.gold = val.parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -294,6 +309,15 @@ impl PlayerDb {
         writeln!(f, "Act : {} 0 0 0", sprintascii(rec.plr_flags))?;
         writeln!(f, "Aff : 0 0 0 0")?;
         writeln!(f, "Pref: 0 0 0 0")?;
+        if rec.max_hp > 0 {
+            writeln!(f, "Hit : {}/{}", rec.hp, rec.max_hp)?;
+        }
+        if rec.room != 0 {
+            writeln!(f, "Room: {}", rec.room)?;
+        }
+        if rec.gold != 0 {
+            writeln!(f, "Gold: {}", rec.gold)?;
+        }
 
         Ok(())
     }

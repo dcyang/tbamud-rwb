@@ -53,6 +53,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn background combat tick ---------------------------------------
     combat::spawn(Arc::clone(&world), Arc::clone(&chars));
 
+    // --- Spawn periodic zone reset tick -------------------------------------
+    db::spawn_zone_reset_tick(Arc::clone(&world));
+
     // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr)
