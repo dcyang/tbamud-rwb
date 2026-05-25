@@ -37,6 +37,13 @@ pub async fn run(config: Config) -> Result<()> {
         PlayerDb::load(&config.dir)
             .context("Failed to load player index")?,
     ));
+    // Stash a global handle so script side-effects (mforce) can dispatch
+    // commands without threading `players` through every trigger path.
+    let _ = crate::interpreter::PLAYERS_HANDLE.set(Arc::clone(&players));
+    // Set up the forced-command channel + runner.
+    let (force_tx, force_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _ = crate::interpreter::FORCE_CMD_TX.set(force_tx);
+    tokio::spawn(crate::interpreter::force_command_runner(force_rx));
 
     // --- Load optional xnames ban list ---------------------------------------
     let xnames = Arc::new(load_xnames(&config.dir));

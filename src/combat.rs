@@ -414,6 +414,9 @@ async fn notify_quest_kill(
     if let Some(qmsg) = crate::interpreter::quest_check_kill(&mut c, killed_vnum, world).await {
         let _ = ph.send.send(qmsg);
     }
+    if let Some(qmsg) = crate::interpreter::quest_check_save(&mut c, world).await {
+        let _ = ph.send.send(qmsg);
+    }
 }
 
 /// Award `xp` experience points to the player handle with `id`. Sends the

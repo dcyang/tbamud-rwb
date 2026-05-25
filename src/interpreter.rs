@@ -10,7 +10,7 @@
 /// Single-letter aliases (`l`, `n`, …) come first so they win over longer
 /// commands that share the prefix.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
@@ -25,6 +25,26 @@ use crate::{
     players::PlayerDb,
     world::{Direction, ObjVnum, RoomVnum, World, ITEM_ARMOR},
 };
+
+/// Globally-accessible handle to the PlayerDb, populated by `server::run`
+/// at boot. Used by script side-effects (`mforce`) that need to dispatch
+/// real player commands without threading `players` through every
+/// trigger firing path.
+pub static PLAYERS_HANDLE: OnceLock<Arc<Mutex<PlayerDb>>> = OnceLock::new();
+
+/// `mforce` work item — broken out of `apply_script_outputs` and posted
+/// to a long-lived runner task so the recursion (force_cmd → dispatch →
+/// script → force_cmd) crosses an mpsc boundary instead of an async-fn
+/// call site. Without this indirection rustc cannot resolve the opaque
+/// return-type cycle between `apply_script_outputs` and
+/// `dispatch_command`.
+pub struct ForceCmdMsg {
+    pub player:  String,
+    pub command: String,
+    pub world:   Arc<Mutex<World>>,
+    pub chars:   SharedChars,
+}
+pub static FORCE_CMD_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<ForceCmdMsg>> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Command table
@@ -559,6 +579,7 @@ async fn do_say_with_triggers(
     let out = do_say(arg, me, chars).await;
     if !arg.is_empty() {
         fire_mob_triggers(&me.name, me.current_room, 'd', Some(arg), world, chars).await;
+        fire_room_speech_triggers(&me.name, me.current_room, arg, world, chars).await;
     }
     out
 }
@@ -949,6 +970,43 @@ pub async fn quest_check_kill(
         }
     }
     None
+}
+
+/// AQ_MOB_SAVE: after the player kills any mob, completes when the
+/// target rescue-mob is still alive in the player's current room AND no
+/// other non-charmed NPCs remain in that room.  Mirrors tbaMUD's
+/// quest.c:400 — the target survives because all attackers were
+/// dispatched.
+pub async fn quest_check_save(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+) -> Option<String> {
+    let qv = me.active_quest?;
+    let w = world.lock().await;
+    let q = w.quests.get(&qv)?;
+    if q.kind != crate::world::AQ_MOB_SAVE { return None; }
+    if me.quest_progress >= 1 { return None; }
+    let target_vnum = q.target;
+    let r = w.rooms.get(&me.current_room)?;
+    // The target mob must be present in the room.  We treat any mob
+    // instance with the target vnum as alive — extracted mobs aren't in
+    // r.mobs anymore.
+    let target_present = r.mobs.iter()
+        .filter_map(|&id| w.mob_instances.iter().find(|m| m.id == id))
+        .any(|m| m.vnum == target_vnum);
+    if !target_present { return None; }
+    // No other mobs (i.e., the target's attackers) may remain.
+    let intruder = r.mobs.iter()
+        .filter_map(|&id| w.mob_instances.iter().find(|m| m.id == id))
+        .any(|m| m.vnum != target_vnum);
+    if intruder { return None; }
+    me.quest_progress = 1;
+    let mob_name = w.mob_protos.get(&target_vnum)
+        .map(|p| p.short_descr.clone())
+        .unwrap_or_else(|| "the target".to_string());
+    Some(format!(
+        "\r\n*** Quest objective complete: {mob_name} is safe! Return to the questmaster. ***\r\n",
+    ))
 }
 
 /// AQ_OBJ_FIND: completes when the player picks up an object matching the
@@ -1437,6 +1495,9 @@ async fn do_skill(
         if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
             msg.push_str(&qmsg);
         }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
         return CmdOutput::text(msg);
     }
 
@@ -1721,6 +1782,9 @@ async fn cast_magic_missile(
             }
         }
         if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
             msg.push_str(&qmsg);
         }
         return CmdOutput::text(msg);
@@ -2030,6 +2094,9 @@ async fn cast_harm(
             }
         }
         if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
             msg.push_str(&qmsg);
         }
         return CmdOutput::text(msg);
@@ -3182,6 +3249,9 @@ async fn do_move(
     drop(w);
 
     let from_room = me.current_room;
+    // Fire LEAVE triggers on the source room *before* the player is
+    // gone — the script can still see them in the room via %actor.*%.
+    fire_room_leave_triggers(&me.name, from_room, world, chars).await;
     // Hide drops on any movement. Sneak persists across movements but
     // suppresses the broadcasts.
     let was_sneaking = me.sneaking;
@@ -3213,11 +3283,12 @@ async fn do_move(
 /// One output line from an executed trigger script.  Different DG
 /// command verbs map to different presentation styles.
 enum ScriptOut {
-    /// "mob_name says, '...'"
-    Say { mob_name: String, text: String },
+    /// "mob_name says, '...'" broadcast in `room`.
+    Say { mob_name: String, text: String, room: RoomVnum },
     /// "mob_name <text>" — used by both `memote` and `mecho` (mecho is raw
     /// room broadcast, treated identically here for simplicity).
-    Echo { text: String },
+    /// `room` defaults to ctx.self_room but `mat` may override it.
+    Echo { text: String, room: RoomVnum },
     /// Spawn an object of this vnum into the mob's room.
     Load { vnum: i32, room: RoomVnum },
     /// Move the self mob to the given room (`mgoto`).
@@ -3230,6 +3301,9 @@ enum ScriptOut {
     /// either a player (matched against PlayerHandle.name) or a mob in
     /// the script's `self_room` (matched against mob_proto.name keywords).
     Damage { target: String, amount: i32, mob_name: String, room: RoomVnum },
+    /// Force a named player to execute a command (`mforce`).  Dispatched
+    /// via the global PlayerDb handle established by `server::run`.
+    ForceCommand { player: String, command: String },
 }
 
 /// Per-script-execution context carrying mutable variables and the
@@ -3505,64 +3579,126 @@ fn execute_script_chunk(
             }
             continue;
         }
-        if let Some(rest) = line.strip_prefix("say ") {
-            out.push(ScriptOut::Say {
-                mob_name: ctx.mob_name.to_string(),
-                text:     substitute(&ctx, rest),
+        // `mat <room> <cmd>` — retarget a single inner command at a
+        // different room.  Only supports the simple-command verbs (no
+        // nested if/while/wait).
+        if let Some(rest) = line.strip_prefix("mat ") {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let (Some(room_str), Some(inner)) = (parts.next(), parts.next()) {
+                if let Ok(new_room) = substitute(&ctx, room_str.trim()).parse::<i32>() {
+                    let saved = ctx.self_room;
+                    ctx.self_room = new_room;
+                    exec_simple_command(&mut ctx, inner.trim(), &mut out);
+                    ctx.self_room = saved;
+                }
+            }
+            continue;
+        }
+
+        exec_simple_command(&mut ctx, line, &mut out);
+    }
+    ScriptResult::Done(out)
+}
+
+/// Match `line` against the simple-command verbs (say/memote/mecho/mload/
+/// mgoto/mteleport/mdamage/mpurge/mforce) and push the corresponding
+/// `ScriptOut`. Returns true if the line was a known verb (even if no
+/// output was produced because of bad arguments).  Used both inline and
+/// as the body of `mat <room> <cmd>` so the latter doesn't need to
+/// re-implement command parsing.
+fn exec_simple_command(ctx: &mut ScriptCtx, line: &str, out: &mut Vec<ScriptOut>) -> bool {
+    if let Some(rest) = line.strip_prefix("say ") {
+        out.push(ScriptOut::Say {
+            mob_name: ctx.mob_name.to_string(),
+            text:     substitute(ctx, rest),
+            room:     ctx.self_room,
+        });
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("memote ") {
+        let body = substitute(ctx, rest);
+        out.push(ScriptOut::Echo {
+            text: format!("{} {body}\r\n", ctx.mob_name),
+            room: ctx.self_room,
+        });
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mecho ") {
+        out.push(ScriptOut::Echo {
+            text: format!("{}\r\n", substitute(ctx, rest)),
+            room: ctx.self_room,
+        });
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mload obj ") {
+        if let Ok(vnum) = substitute(ctx, rest.trim()).parse::<i32>() {
+            out.push(ScriptOut::Load { vnum, room: ctx.self_room });
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mload ") {
+        if let Ok(vnum) = substitute(ctx, rest.trim()).parse::<i32>() {
+            out.push(ScriptOut::Load { vnum, room: ctx.self_room });
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mgoto ") {
+        if let (Some(mid), Ok(to)) = (ctx.self_mob_id,
+            substitute(ctx, rest.trim()).parse::<i32>())
+        {
+            out.push(ScriptOut::MobGoto {
+                mob_id: mid, mob_name: ctx.mob_name.to_string(), to,
             });
-        } else if let Some(rest) = line.strip_prefix("memote ") {
-            let body = substitute(&ctx, rest);
-            out.push(ScriptOut::Echo { text: format!("{} {body}\r\n", ctx.mob_name) });
-        } else if let Some(rest) = line.strip_prefix("mecho ") {
-            out.push(ScriptOut::Echo { text: format!("{}\r\n", substitute(&ctx, rest)) });
-        } else if let Some(rest) = line.strip_prefix("mload obj ") {
-            if let Ok(vnum) = substitute(&ctx, rest.trim()).parse::<i32>() {
-                out.push(ScriptOut::Load { vnum, room: ctx.self_room });
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mteleport ") {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        if let (Some(name), Some(room_str)) = (parts.next(), parts.next()) {
+            let n = substitute(ctx, name.trim());
+            if let Ok(to) = substitute(ctx, room_str.trim()).parse::<i32>() {
+                out.push(ScriptOut::PlayerTeleport { name: n, to });
             }
-        } else if let Some(rest) = line.strip_prefix("mload ") {
-            if let Ok(vnum) = substitute(&ctx, rest.trim()).parse::<i32>() {
-                out.push(ScriptOut::Load { vnum, room: ctx.self_room });
-            }
-        } else if let Some(rest) = line.strip_prefix("mgoto ") {
-            if let (Some(mid), Ok(to)) = (ctx.self_mob_id,
-                substitute(&ctx, rest.trim()).parse::<i32>())
-            {
-                out.push(ScriptOut::MobGoto {
-                    mob_id: mid, mob_name: ctx.mob_name.to_string(), to,
-                });
-            }
-        } else if let Some(rest) = line.strip_prefix("mteleport ") {
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            if let (Some(name), Some(room_str)) = (parts.next(), parts.next()) {
-                let n = substitute(&ctx, name.trim());
-                if let Ok(to) = substitute(&ctx, room_str.trim()).parse::<i32>() {
-                    out.push(ScriptOut::PlayerTeleport { name: n, to });
-                }
-            }
-        } else if let Some(rest) = line.strip_prefix("mdamage ") {
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            if let (Some(target), Some(amt_str)) = (parts.next(), parts.next()) {
-                let t = substitute(&ctx, target.trim());
-                if let Ok(a) = substitute(&ctx, amt_str.trim()).parse::<i32>() {
-                    out.push(ScriptOut::Damage {
-                        target: t,
-                        amount: a,
-                        mob_name: ctx.mob_name.to_string(),
-                        room:   ctx.self_room,
-                    });
-                }
-            }
-        } else if line == "mpurge" || line.starts_with("mpurge ") {
-            if let Some(mid) = ctx.self_mob_id {
-                out.push(ScriptOut::Purge {
-                    mob_id: mid,
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mdamage ") {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        if let (Some(target), Some(amt_str)) = (parts.next(), parts.next()) {
+            let t = substitute(ctx, target.trim());
+            if let Ok(a) = substitute(ctx, amt_str.trim()).parse::<i32>() {
+                out.push(ScriptOut::Damage {
+                    target: t,
+                    amount: a,
                     mob_name: ctx.mob_name.to_string(),
-                    room: ctx.self_room,
+                    room:   ctx.self_room,
                 });
             }
         }
+        return true;
     }
-    ScriptResult::Done(out)
+    if line == "mpurge" || line.starts_with("mpurge ") {
+        if let Some(mid) = ctx.self_mob_id {
+            out.push(ScriptOut::Purge {
+                mob_id:   mid,
+                mob_name: ctx.mob_name.to_string(),
+                room:     ctx.self_room,
+            });
+        }
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("mforce ") {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        if let (Some(name), Some(cmd)) = (parts.next(), parts.next()) {
+            let n = substitute(ctx, name.trim());
+            let c = substitute(ctx, cmd.trim());
+            if !n.is_empty() && !c.is_empty() {
+                out.push(ScriptOut::ForceCommand { player: n, command: c });
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// Parse the number-of-seconds operand from a `wait` line.  Accepts
@@ -3685,7 +3821,7 @@ fn eval_condition(cond: &str, ctx: &ScriptCtx) -> bool {
 /// and spawns any loaded objects into their target rooms.
 async fn apply_script_outputs(
     outputs: Vec<ScriptOut>,
-    room: RoomVnum,
+    _room: RoomVnum,    // each ScriptOut now carries its own target room
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
@@ -3697,15 +3833,16 @@ async fn apply_script_outputs(
     let mut purges:    Vec<(u32, String, RoomVnum)> = Vec::new();
     let mut teleports: Vec<(String, RoomVnum)>      = Vec::new();
     let mut damages:   Vec<(String, i32, String, RoomVnum)> = Vec::new();
+    let mut forces:    Vec<(String, String)>        = Vec::new();
     {
         let cl = chars.lock().await;
         for out in outputs {
             match out {
-                ScriptOut::Say { mob_name, text } => {
-                    cl.broadcast_room(room, None, &format!("{mob_name} says, '{text}'\r\n"));
+                ScriptOut::Say { mob_name, text, room: r } => {
+                    cl.broadcast_room(r, None, &format!("{mob_name} says, '{text}'\r\n"));
                 }
-                ScriptOut::Echo { text } => {
-                    cl.broadcast_room(room, None, &text);
+                ScriptOut::Echo { text, room: r } => {
+                    cl.broadcast_room(r, None, &text);
                 }
                 ScriptOut::Load { vnum, room } => {
                     load_queue.push((vnum, room));
@@ -3721,6 +3858,9 @@ async fn apply_script_outputs(
                 }
                 ScriptOut::Damage { target, amount, mob_name, room } => {
                     damages.push((target, amount, mob_name, room));
+                }
+                ScriptOut::ForceCommand { player, command } => {
+                    forces.push((player, command));
                 }
             }
         }
@@ -3843,6 +3983,48 @@ async fn apply_script_outputs(
     // fire_obj_triggers -> apply).  Callers that spawn objects via
     // do_buy / do_quest_complete fire LOAD triggers themselves.
     let _ = loaded_iids;
+
+    // `mforce` — post to the global runner so the recursion (script ->
+    // force -> dispatch -> script) crosses an mpsc boundary instead of
+    // a direct async-fn call (which would form an opaque-type cycle).
+    if !forces.is_empty() {
+        if let Some(tx) = FORCE_CMD_TX.get() {
+            for (player, command) in forces {
+                let _ = tx.send(ForceCmdMsg {
+                    player,
+                    command,
+                    world: Arc::clone(world),
+                    chars: Arc::clone(chars),
+                });
+            }
+        }
+    }
+}
+
+/// Long-lived consumer of `FORCE_CMD_TX`. Spawned once by `server::run`.
+/// Drains forced-command messages and dispatches each via
+/// `dispatch_command` against the named player.
+pub async fn force_command_runner(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<ForceCmdMsg>,
+) {
+    while let Some(msg) = rx.recv().await {
+        let Some(players_arc) = PLAYERS_HANDLE.get().cloned() else { continue; };
+        let ForceCmdMsg { player, command, world, chars } = msg;
+        let ph_opt: Option<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(&player)).cloned();
+            h
+        };
+        let Some(ph) = ph_opt else { continue; };
+        let _ = ph.send.send(format!("\r\n{}\r\n", command));
+        let result = {
+            let mut c = ph.character.lock().await;
+            dispatch_command(&command, &mut c, &world, &chars, &players_arc).await
+        };
+        if !result.text.is_empty() {
+            let _ = ph.send.send(result.text);
+        }
+    }
 }
 
 /// Fire all triggers of the given type attached to mobs in `room`.
@@ -3898,6 +4080,7 @@ async fn fire_room_triggers(
     actor_name: &str,
     room: RoomVnum,
     trigger_type: char,
+    keyword_filter: Option<&str>,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
@@ -3909,11 +4092,43 @@ async fn fire_room_triggers(
         for &tvnum in &r.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != trigger_type { continue; }
+            if let Some(kw) = keyword_filter {
+                let arg_low  = t.arg.to_ascii_lowercase();
+                let text_low = kw.to_ascii_lowercase();
+                let any_match = arg_low.split_whitespace()
+                    .any(|w| text_low.split_whitespace().any(|t| t == w));
+                if !any_match { continue; }
+            }
             acc.extend(execute_script(t, actor_name, &room_name, room, &ScriptInputs::default(), world, chars));
         }
         acc
     };
     apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Public wrapper for room SPEECH triggers ('d' on attach=ROOM). Fired
+/// from `do_say` with the spoken text as the keyword filter, mirroring
+/// the mob-SPEECH ('d' on MOB) semantics.
+pub async fn fire_room_speech_triggers(
+    actor_name: &str,
+    room: RoomVnum,
+    text: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_room_triggers(actor_name, room, 'd', Some(text), world, chars).await;
+}
+
+/// Public wrapper for room LEAVE triggers ('q' on attach=ROOM). Fired
+/// from `do_move` against the room a player is exiting, before the
+/// world state is updated.
+pub async fn fire_room_leave_triggers(
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_room_triggers(actor_name, room, 'q', None, world, chars).await;
 }
 
 /// Fire one of the object-trigger types (GET/DROP/WEAR/REMOVE/GIVE) on
@@ -4216,7 +4431,7 @@ async fn fire_greet_triggers(
     chars: &SharedChars,
 ) {
     fire_mob_triggers(&me.name, room, 'g', None, world, chars).await;
-    fire_room_triggers(&me.name, room, 'g', world, chars).await;
+    fire_room_triggers(&me.name, room, 'g', None, world, chars).await;
 }
 
 /// Minimal trigger-language variable substitution: replaces `%actor.name%`
