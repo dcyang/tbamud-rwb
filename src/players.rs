@@ -117,6 +117,12 @@ pub struct PlayerRecord {
     pub max_hp:        i32,
     pub room:          i32,
     pub gold:          i64,
+    pub str_:          i32,
+    pub int_:          i32,
+    pub wis:           i32,
+    pub dex:           i32,
+    pub con:           i32,
+    pub cha:           i32,
 }
 
 impl PlayerRecord {
@@ -136,6 +142,9 @@ pub struct PlayerDb {
 }
 
 impl PlayerDb {
+    /// The data directory this DB was loaded from (e.g. "lib").
+    pub fn data_dir(&self) -> &str { &self.data_dir }
+
     /// Load the player index from `<data_dir>/plrfiles/index`.
     /// Mirrors build_player_index() in players.c.
     pub fn load(data_dir: &str) -> Result<Self> {
@@ -271,6 +280,12 @@ impl PlayerDb {
                 }
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
+                "Str"  => rec.str_ = val.parse().unwrap_or(0),
+                "Int"  => rec.int_ = val.parse().unwrap_or(0),
+                "Wis"  => rec.wis  = val.parse().unwrap_or(0),
+                "Dex"  => rec.dex  = val.parse().unwrap_or(0),
+                "Con"  => rec.con  = val.parse().unwrap_or(0),
+                "Cha"  => rec.cha  = val.parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -318,6 +333,12 @@ impl PlayerDb {
         if rec.gold != 0 {
             writeln!(f, "Gold: {}", rec.gold)?;
         }
+        if rec.str_ != 0 { writeln!(f, "Str : {}", rec.str_)?; }
+        if rec.int_ != 0 { writeln!(f, "Int : {}", rec.int_)?; }
+        if rec.wis  != 0 { writeln!(f, "Wis : {}", rec.wis)?;  }
+        if rec.dex  != 0 { writeln!(f, "Dex : {}", rec.dex)?;  }
+        if rec.con  != 0 { writeln!(f, "Con : {}", rec.con)?;  }
+        if rec.cha  != 0 { writeln!(f, "Cha : {}", rec.cha)?;  }
 
         Ok(())
     }
@@ -328,15 +349,109 @@ impl PlayerDb {
 
     fn player_path(&self, name: &str) -> String {
         let lower = name.to_lowercase();
-        let bucket = match lower.chars().next().unwrap_or('a') {
+        let bucket = self.bucket(&lower);
+        format!("{}/plrfiles/{}/{}.plr", self.data_dir, bucket, lower)
+    }
+
+    /// Path to this player's persisted object file (lib/plrobjs/<B>/<name>.objs).
+    pub fn objs_path(&self, name: &str) -> String {
+        let lower = name.to_lowercase();
+        let bucket = self.bucket(&lower);
+        format!("{}/plrobjs/{}/{}.objs", self.data_dir, bucket, lower)
+    }
+
+    fn bucket(&self, lower: &str) -> &'static str {
+        match lower.chars().next().unwrap_or('a') {
             'a'..='e' => "A-E",
             'f'..='j' => "F-J",
             'k'..='o' => "K-O",
             'p'..='t' => "P-T",
             _         => "U-Z",
-        };
-        format!("{}/plrfiles/{}/{}.plr", self.data_dir, bucket, lower)
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Persisted object I/O (plrobjs)
+// ---------------------------------------------------------------------------
+
+/// Where the saved object lived on the character.  Mirrors the wear-slot
+/// number from structs.h; `Inv` is the carried (inventory) list.
+#[derive(Debug, Clone, Copy)]
+pub enum SavedObjSlot {
+    Inv,
+    Wear(u8),
+}
+
+/// One entry in a saved object file: the prototype vnum and its slot.
+#[derive(Debug, Clone, Copy)]
+pub struct SavedObj {
+    pub vnum: i32,
+    pub slot: SavedObjSlot,
+}
+
+/// Read `<lib>/plrobjs/<bucket>/<name>.objs`.  Returns an empty Vec if the
+/// file is missing — that's what a brand-new character looks like.
+pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
+    let lower = name.to_lowercase();
+    let bucket = match lower.chars().next().unwrap_or('a') {
+        'a'..='e' => "A-E",
+        'f'..='j' => "F-J",
+        'k'..='o' => "K-O",
+        'p'..='t' => "P-T",
+        _         => "U-Z",
+    };
+    let path = format!("{data_dir}/plrobjs/{bucket}/{lower}.objs");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') { continue; }
+        // "<vnum> <slot>"  — slot is "inv" or integer 0..17
+        let parts: Vec<&str> = t.split_ascii_whitespace().collect();
+        if parts.len() < 2 { continue; }
+        let Ok(vnum) = parts[0].parse::<i32>() else { continue };
+        let slot = match parts[1] {
+            "inv" => SavedObjSlot::Inv,
+            s => match s.parse::<u8>() {
+                Ok(n) => SavedObjSlot::Wear(n),
+                Err(_) => continue,
+            },
+        };
+        out.push(SavedObj { vnum, slot });
+    }
+    out
+}
+
+/// Write the saved-objects file for `name`. Pass `entries` in the order
+/// you want them serialised (typically inventory first, then equipment by
+/// wear position).
+pub fn save_objs(data_dir: &str, name: &str, entries: &[SavedObj]) -> Result<()> {
+    let lower = name.to_lowercase();
+    let bucket = match lower.chars().next().unwrap_or('a') {
+        'a'..='e' => "A-E",
+        'f'..='j' => "F-J",
+        'k'..='o' => "K-O",
+        'p'..='t' => "P-T",
+        _         => "U-Z",
+    };
+    let path = format!("{data_dir}/plrobjs/{bucket}/{lower}.objs");
+    if let Some(parent) = PathBuf::from(&path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::File::create(&path)
+        .with_context(|| format!("Cannot write objs file {path}"))?;
+    writeln!(f, "# tbamud-rwb plrobjs v1 — <vnum> <slot>")?;
+    for e in entries {
+        match e.slot {
+            SavedObjSlot::Inv     => writeln!(f, "{} inv", e.vnum)?,
+            SavedObjSlot::Wear(n) => writeln!(f, "{} {}",  e.vnum, n)?,
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

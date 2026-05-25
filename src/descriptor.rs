@@ -192,14 +192,17 @@ pub async fn handle_connection(
 
                 // Build the character. id reuses the connection id for now.
                 // If the player file has saved HP/Room/Gold, use those;
-                // otherwise initialise defaults.
+                // otherwise initialise defaults.  Same for ability scores —
+                // any zero scores get freshly rolled (3d6) on this login.
                 let p_ref     = session.player.as_ref();
                 let default_hp = Character::init_hp(session.level);
                 let max_hp    = p_ref.map(|p| p.max_hp).filter(|h| *h > 0).unwrap_or(default_hp);
                 let hp        = p_ref.map(|p| p.hp).filter(|h| *h > 0).unwrap_or(max_hp);
                 let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
                 let gold      = p_ref.map(|p| p.gold).unwrap_or(0);
-                let me = Character {
+                let immortal  = session.level >= 34;
+                let ab        = |v: i32| if v > 0 { v } else { Character::roll_ability(immortal) };
+                let mut me = Character {
                     id:           id as u32,
                     name:         pname.clone(),
                     level:        session.level,
@@ -211,10 +214,43 @@ pub async fn handle_connection(
                     gold,
                     hp,
                     max_hp,
+                    str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
+                    int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
+                    wis:          ab(p_ref.map(|p| p.wis ).unwrap_or(0)),
+                    dex:          ab(p_ref.map(|p| p.dex ).unwrap_or(0)),
+                    con:          ab(p_ref.map(|p| p.con ).unwrap_or(0)),
+                    cha:          ab(p_ref.map(|p| p.cha ).unwrap_or(0)),
                     fighting:     None,
                 };
 
-                run_game_session(id, host.clone(), stream, me, world, chars, Arc::clone(&players)).await?;
+                // Restore persisted inventory + equipment by spawning fresh
+                // ObjInstances of the saved vnums. Lives in lib/plrobjs/.
+                let data_dir = players.lock().await.data_dir().to_string();
+                {
+                    let entries = crate::players::load_objs(&data_dir, &pname);
+                    if !entries.is_empty() {
+                        let mut w = world.lock().await;
+                        for e in entries {
+                            if let Some(iid) = w.spawn_obj(e.vnum) {
+                                match e.slot {
+                                    crate::players::SavedObjSlot::Inv => {
+                                        me.inventory.push(iid);
+                                    }
+                                    crate::players::SavedObjSlot::Wear(n) => {
+                                        let n = n as usize;
+                                        if n < crate::character::NUM_WEARS {
+                                            me.equipment[n] = Some(iid);
+                                        } else {
+                                            me.inventory.push(iid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                run_game_session(id, host.clone(), stream, me, world, chars, Arc::clone(&players), data_dir).await?;
                 return Ok(());
             }
         }
@@ -239,6 +275,7 @@ async fn run_game_session(
     world: Arc<Mutex<World>>,
     chars: SharedChars,
     players: Arc<Mutex<PlayerDb>>,
+    data_dir: String,
 ) -> Result<()> {
     // Split TCP for concurrent read/write
     let (mut read_half, mut write_half) = stream.into_split();
@@ -369,23 +406,53 @@ async fn run_game_session(
             rec.max_hp = me.max_hp;
             rec.room   = me.current_room;
             rec.gold   = me.gold;
+            rec.str_   = me.str_;
+            rec.int_   = me.int_;
+            rec.wis    = me.wis;
+            rec.dex    = me.dex;
+            rec.con    = me.con;
+            rec.cha    = me.cha;
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }
         }
     }
 
-    // Extract the player's carried + worn objects from the world. We don't
-    // persist inventory yet (no plrobjs file), so leaving the instances
-    // around would block zone resets from restocking their vnums.
+    // Persist + extract inventory & equipment. We walk both lists, look up
+    // each instance's vnum to write a SavedObj entry, then drop the
+    // ObjInstance so its vnum count drops back below the reset cap.
     {
         let me = character.lock().await;
-        let mut to_remove: Vec<u32> = me.inventory.clone();
-        for slot in me.equipment.iter() {
-            if let Some(iid) = slot {
-                to_remove.push(*iid);
+        let mut entries: Vec<crate::players::SavedObj> = Vec::new();
+        let mut to_remove: Vec<u32> = Vec::new();
+
+        let w = world.lock().await;
+        for &iid in &me.inventory {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                entries.push(crate::players::SavedObj {
+                    vnum: o.vnum,
+                    slot: crate::players::SavedObjSlot::Inv,
+                });
+                to_remove.push(iid);
             }
         }
+        for (slot_idx, slot) in me.equipment.iter().enumerate() {
+            if let Some(iid) = slot {
+                if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
+                    entries.push(crate::players::SavedObj {
+                        vnum: o.vnum,
+                        slot: crate::players::SavedObjSlot::Wear(slot_idx as u8),
+                    });
+                    to_remove.push(*iid);
+                }
+            }
+        }
+        drop(w);
+
+        if let Err(e) = crate::players::save_objs(&data_dir, &my_name, &entries) {
+            warn!(name = %my_name, error = %e, "objs save failed");
+        }
+
         if !to_remove.is_empty() {
             let mut w = world.lock().await;
             w.obj_instances.retain(|o| !to_remove.contains(&o.id));

@@ -212,6 +212,24 @@ pub struct MobProto {
     pub sex:         i32,
 }
 
+// ---------------------------------------------------------------------------
+// Shops
+// ---------------------------------------------------------------------------
+
+/// A shop — mirrors shop_data in shop.h (minimal subset). One shopkeeper
+/// (mob_vnum) sells a list of object vnums and buys back items of given
+/// item types.  Price multipliers come from the .shp file.
+#[derive(Debug, Clone)]
+pub struct Shop {
+    pub vnum:           i32,
+    pub keeper_vnum:    MobVnum,
+    pub rooms:          Vec<RoomVnum>,
+    pub sells:          Vec<ObjVnum>,
+    pub buys_types:     Vec<i32>,
+    pub profit_buy:     f32,    // multiplier when player buys (e.g. 1.15)
+    pub profit_sell:    f32,    // multiplier when player sells (e.g. 0.15)
+}
+
 /// A live mob instance in the world.
 #[derive(Debug, Clone, Default)]
 pub struct MobInstance {
@@ -238,6 +256,7 @@ pub struct World {
     pub mob_protos: BTreeMap<MobVnum, MobProto>,
     pub obj_instances: Vec<ObjInstance>,
     pub mob_instances: Vec<MobInstance>,
+    pub shops:         Vec<Shop>,
 }
 
 impl World {
@@ -254,6 +273,36 @@ impl World {
     /// Count live instances of a given mob vnum currently in the world.
     pub fn count_mob(&self, vnum: MobVnum) -> i32 {
         self.mob_instances.iter().filter(|m| m.vnum == vnum).count() as i32
+    }
+
+    /// Find a shop whose keeper is in `room` (or that lists `room` in its
+    /// `rooms` list).  Returns the first match.
+    pub fn shop_in_room(&self, room: RoomVnum) -> Option<&Shop> {
+        // Direct room match first.
+        if let Some(s) = self.shops.iter().find(|s| s.rooms.contains(&room)) {
+            return Some(s);
+        }
+        // Else: keeper standing in this room?
+        for m in &self.mob_instances {
+            if m.in_room == room {
+                if let Some(s) = self.shops.iter().find(|s| s.keeper_vnum == m.vnum) {
+                    return Some(s);
+                }
+            }
+        }
+        None
+    }
+
+    /// Materialize a fresh instance of the given object prototype, parked
+    /// in limbo (`NOWHERE`).  Returns the instance id, or None if the vnum
+    /// has no prototype.  Used by login to restore persisted inventories.
+    pub fn spawn_obj(&mut self, vnum: ObjVnum) -> Option<u32> {
+        if !self.obj_protos.contains_key(&vnum) { return None; }
+        let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
+        self.obj_instances.push(ObjInstance {
+            id, vnum, in_room: NOWHERE,
+        });
+        Some(id)
     }
 
     /// Pick a start room: prefer the configured mortal start, fall back to

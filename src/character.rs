@@ -41,8 +41,22 @@ pub struct Character {
     pub gold:         i64,
     pub hp:           i32,
     pub max_hp:       i32,
+    /// Ability scores — rolled at creation (3d6 each), then persisted.
+    pub str_:         i32,
+    pub int_:         i32,
+    pub wis:          i32,
+    pub dex:          i32,
+    pub con:          i32,
+    pub cha:          i32,
     /// Current opponent, if any.
     pub fighting:     Option<Target>,
+}
+
+/// STR-based damage modifier. Roughly mirrors the str_app[].todam table in
+/// constants.c, scaled down: every 2 points above 10 gives +1, every 2
+/// below gives −1.  Clamped to [-5, +8].
+pub fn str_damage_bonus(str_score: i32) -> i32 {
+    ((str_score - 10) / 2).clamp(-5, 8)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +156,16 @@ impl Character {
         // a sparring match in the temple courtyard.  Subsequent sessions
         // restore from the saved value (Hit: cur/max in the player file).
         if level >= 34 { 1000 } else { 50 + level * 10 }
+    }
+
+    /// Roll a fresh ability score: 3d6, immortals get a +6 bonus so they
+    /// never sit at average mortal stats.
+    pub fn roll_ability(immortal: bool) -> i32 {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut total = 0;
+        for _ in 0..3 { total += rng.gen_range(1..=6); }
+        if immortal { total + 6 } else { total }
     }
 }
 

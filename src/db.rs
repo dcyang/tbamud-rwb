@@ -18,9 +18,125 @@ use crate::{
     players::asciiflag_conv,
     world::{
         Direction, Exit, ExtraDescr, MobInstance, MobProto, ObjInstance, ObjProto,
-        ResetCmd, Room, World, Zone,
+        ResetCmd, Room, Shop, World, Zone,
     },
 };
+
+// ---------------------------------------------------------------------------
+// Shop file parser
+// ---------------------------------------------------------------------------
+
+/// Parse a .shp file. The format (per CircleMUD v3.0) is a sequence of
+/// shop records separated by `#<vnum>~` headers and terminated by `$~`.
+/// Each record has:
+///     <obj_vnum>       (list, terminated by -1)        — items sold
+///     <profit_buy>     (float, e.g. 1.15)
+///     <profit_sell>    (float, e.g. 0.15)
+///     <obj_type>       (list, terminated by -1)        — types bought
+///     7×~-strings       (messages, ignored here)
+///     <temper>          (int, ignored)
+///     <bitvector>       (int, ignored)
+///     <keeper_vnum>     (mob vnum)
+///     <with_who>        (int, ignored)
+///     <room_vnum>      (list, terminated by -1)        — shop rooms
+///     <open1> <close1> <open2> <close2>                (ignored)
+fn parse_shop_file(path: &PathBuf, world: &mut World) -> Result<()> {
+    let mut s = Stream::from_file(path)?;
+    // First line is the "CircleMUD v3.0 Shop File~" header — skip it.
+    s.skip_blanks();
+    let first = match s.peek() {
+        Some(l) => l.trim().to_string(),
+        None => return Ok(()),
+    };
+    if first.contains('~') && !first.starts_with('#') {
+        let _ = s.next_line();
+        s.skip_blanks();
+    }
+
+    loop {
+        s.skip_blanks();
+        let header = match s.next_line() {
+            Some(h) => h.trim().to_string(),
+            None => return Ok(()),
+        };
+        if header == "$" || header == "$~" { return Ok(()); }
+        let vnum: i32 = header.trim_start_matches('#').trim_end_matches('~').trim()
+            .parse().with_context(|| format!("bad shop header: {header:?}"))?;
+
+        // Items sold (vnums, terminated by -1)
+        let sells = read_int_list(&mut s)?;
+
+        // profit_buy, profit_sell
+        let profit_buy:  f32 = s.next_line()
+            .ok_or_else(|| anyhow!("shop {vnum}: missing profit_buy"))?
+            .trim().parse().unwrap_or(1.0);
+        let profit_sell: f32 = s.next_line()
+            .ok_or_else(|| anyhow!("shop {vnum}: missing profit_sell"))?
+            .trim().parse().unwrap_or(1.0);
+
+        // Item types bought (terminated by -1)
+        let buys_types = read_int_list(&mut s)?;
+
+        // 7 ~-terminated messages — read and discard.
+        for _ in 0..7 {
+            let _ = s.read_tilde_string()?;
+        }
+
+        // temper, bitvector, keeper, with_who
+        let _temper:    i32 = s.next_line().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+        let _bitvector: i32 = s.next_line().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+        let keeper:     i32 = s.next_line().and_then(|l| l.trim().parse().ok()).unwrap_or(-1);
+        let _with_who:  i32 = s.next_line().and_then(|l| l.trim().parse().ok()).unwrap_or(0);
+
+        // Rooms (terminated by -1)
+        let rooms = read_int_list(&mut s)?;
+
+        // open1, close1, open2, close2 — read and discard.
+        for _ in 0..4 {
+            let _ = s.next_line();
+        }
+
+        world.shops.push(Shop {
+            vnum,
+            keeper_vnum: keeper,
+            rooms,
+            sells,
+            buys_types,
+            profit_buy,
+            profit_sell,
+        });
+    }
+}
+
+/// Read a list of integers terminated by -1.  Tolerant of formatting
+/// quirks: a value like "5lifecutter" (no separator before the keyword
+/// annotation) is read as 5.
+fn read_int_list(s: &mut Stream) -> Result<Vec<i32>> {
+    let mut out = Vec::new();
+    loop {
+        let line = s.next_line()
+            .ok_or_else(|| anyhow!("EOF reading int list"))?;
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        let tok = t.split_ascii_whitespace().next().unwrap_or("");
+        // Extract the leading numeric prefix (allow `-`).
+        let mut end = 0;
+        for (i, c) in tok.char_indices() {
+            if (i == 0 && c == '-') || c.is_ascii_digit() {
+                end = i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            bail!("expected integer in list, got {tok:?}");
+        }
+        let n: i32 = tok[..end].parse()
+            .with_context(|| format!("bad integer in list: {tok:?}"))?;
+        if n == -1 { return Ok(out); }
+        out.push(n);
+    }
+}
 
 /// Roll `count` dice of `size` sides. Mirrors dice() in utils.c.
 /// Returns 0 if either arg is non-positive.
@@ -75,6 +191,18 @@ pub fn load_world(data_dir: &str) -> Result<World> {
             .with_context(|| format!("Parsing mob file {}", path.display()))?;
     }
     tracing::info!(count = world.mob_protos.len(), "Loaded mob prototypes");
+
+    // --- Shops -------------------------------------------------------------
+    let shp_dir = format!("{data_dir}/world/shp");
+    if std::path::Path::new(&format!("{shp_dir}/index")).exists() {
+        for fname in read_index(&shp_dir)? {
+            let path = PathBuf::from(&shp_dir).join(&fname);
+            if let Err(e) = parse_shop_file(&path, &mut world) {
+                tracing::warn!(path = %path.display(), error = %e, "Shop parse error, skipping");
+            }
+        }
+        tracing::info!(count = world.shops.len(), "Loaded shops");
+    }
 
     // --- Run zone resets ---------------------------------------------------
     // Mirrors the initial reset_zone() pass that boot_db() performs over all

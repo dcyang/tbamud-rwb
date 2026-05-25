@@ -15,7 +15,7 @@ use rand::Rng;
 use tokio::{sync::Mutex, time::{Duration, MissedTickBehavior}};
 
 use crate::{
-    character::{Character, SharedChars, Target, WEAR_WIELD},
+    character::{str_damage_bonus, Character, SharedChars, Target, WEAR_WIELD},
     db::dice,
     world::World,
 };
@@ -55,6 +55,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     room:          me.current_room,
                     target:        tgt,
                     weapon_iid:    me.equipment[WEAR_WIELD],
+                    str_score:     me.str_,
                 });
             }
         }
@@ -95,6 +96,7 @@ struct PlayerIntent {
     room:          crate::world::RoomVnum,
     target:        Target,
     weapon_iid:    Option<u32>,
+    str_score:     i32,
 }
 
 struct MobIntent {
@@ -127,7 +129,7 @@ async fn resolve_player_attack(
         } else {
             dice(1, 4)
         };
-        base.max(1) + p.level / 4  // small level scaling
+        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score)).max(1)
     };
 
     let (target_name, target_dead, target_room) = {

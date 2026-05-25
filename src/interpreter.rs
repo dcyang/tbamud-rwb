@@ -37,7 +37,9 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "wield", "wear", "remove",
+    "get", "drop", "give", "wield", "wear", "remove",
+    "examine",
+    "list", "buy", "sell",
     "say", "tell", "who",
     "score", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
@@ -108,6 +110,11 @@ pub async fn dispatch_command(
         Some("who")       => do_who(me, chars).await,
         Some("score")     => do_score(me),
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
+        Some("give")      => do_give(rest, me, world, chars).await,
+        Some("examine")   => do_examine(rest, me, world, chars).await,
+        Some("list")      => do_list(me, world).await,
+        Some("buy")       => do_buy(rest, me, world, chars).await,
+        Some("sell")      => do_sell(rest, me, world, chars).await,
         Some("flee")      => do_flee(me, world, chars).await,
         Some("wield")     => do_wield(rest, me, world).await,
         Some("wear")      => do_wear(rest, me, world).await,
@@ -383,8 +390,10 @@ async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
 
 fn do_score(me: &Character) -> CmdOutput {
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\n",
+        "\r\nName:  {}\r\nLevel: {}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\n\
+         Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.name, me.level, me.hp, me.max_hp, me.class, me.sex, me.gold, me.current_room,
+        me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
     CmdOutput::text(s)
 }
@@ -634,6 +643,309 @@ async fn do_remove(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> 
     CmdOutput::text(format!("\r\nYou stop using {short}.\r\n"))
 }
 
+async fn do_examine(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    // examine = look <arg> plus any item-type-specific details.  We
+    // delegate to do_look and append type info if the keyword matched an
+    // object.  For Checkpoint 8 the extra detail is just the item-type
+    // banner.
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nExamine what?\r\n");
+    }
+    let base = do_look(arg, me, world, chars).await;
+
+    // Quick item-type sniffing: find a matching object and report its type.
+    let key = arg.to_ascii_lowercase();
+    let w = world.lock().await;
+    let proto_info: Option<(i32, [i32; 4])> = me.inventory.iter()
+        .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
+        .find_map(|&iid| {
+            let o = w.obj_instances.iter().find(|o| o.id == iid)?;
+            let p = w.obj_protos.get(&o.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some((p.item_type, p.value))
+            } else {
+                None
+            }
+        });
+
+    if let Some((ty, vals)) = proto_info {
+        let kind = item_type_name(ty);
+        let extra = match ty {
+            // ITEM_WEAPON: value[1] dice count, value[2] dice size, value[3] damage type
+            5 => format!("This is a {kind} that does {}d{} damage.\r\n", vals[1], vals[2]),
+            // ITEM_ARMOR: value[0] is AC
+            9 => format!("This is {kind}, providing {} AC.\r\n", vals[0]),
+            // ITEM_LIGHT: value[2] is hours remaining
+            1 => format!("This is a {kind} with {} hours of light left.\r\n", vals[2]),
+            _ => format!("This is a {kind}.\r\n"),
+        };
+        let mut out = base.text;
+        out.push_str(&extra);
+        return CmdOutput::text(out);
+    }
+    base
+}
+
+async fn do_give(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let (obj_kw, target_kw) = match arg.find(char::is_whitespace) {
+        Some(i) => (&arg[..i], arg[i..].trim_start()),
+        None    => return CmdOutput::text("\r\nGive what to whom?\r\n"),
+    };
+    if target_kw.is_empty() {
+        return CmdOutput::text("\r\nGive it to whom?\r\n");
+    }
+    let key = obj_kw.to_ascii_lowercase();
+
+    // Find item in inventory
+    let (idx, iid, short) = {
+        let w = world.lock().await;
+        match find_inv_match(&w, &me.inventory, &key) {
+            Some(t) => t,
+            None    => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
+        }
+    };
+
+    // Target may be another player in the same room.
+    let tlow = target_kw.to_ascii_lowercase();
+    let target_player = {
+        let cl = chars.lock().await;
+        let found = cl.iter()
+            .find(|p| p.current_room == me.current_room
+                  && p.id != me.id
+                  && p.name.to_ascii_lowercase() == tlow)
+            .cloned();
+        found
+    };
+
+    if let Some(ph) = target_player {
+        // Transfer: remove from us, push to their inventory, notify.
+        me.inventory.remove(idx);
+        {
+            let mut tc = ph.character.lock().await;
+            tc.inventory.push(iid);
+        }
+        let _ = ph.send.send(format!("\r\n{} gives you {}.\r\n", me.name, short));
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} gives {} to {}.\r\n", me.name, short, ph.name),
+        );
+        // Don't echo to receiver again
+        return CmdOutput::text(format!("\r\nYou give {} to {}.\r\n", short, ph.name));
+    }
+
+    // Or a mob in the same room — find by keyword.
+    let mut w = world.lock().await;
+    let room_mobs: Vec<u32> = w.rooms.get(&me.current_room)
+        .map(|r| r.mobs.clone())
+        .unwrap_or_default();
+    let mob_match: Option<(u32, String)> = room_mobs.iter().find_map(|&mid| {
+        let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+        let p = w.mob_protos.get(&m.vnum)?;
+        if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&tlow)) {
+            Some((mid, p.short_descr.clone()))
+        } else {
+            None
+        }
+    });
+
+    if let Some((mid, mname)) = mob_match {
+        me.inventory.remove(idx);
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
+            m.inventory.push(iid);
+        }
+        drop(w);
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} gives {} to {}.\r\n", me.name, short, mname),
+        );
+        return CmdOutput::text(format!("\r\nYou give {} to {}.\r\n", short, mname));
+    }
+
+    CmdOutput::text(format!("\r\nNo one called '{target_kw}' is here.\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Shop commands
+// ---------------------------------------------------------------------------
+
+async fn do_list(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let w = world.lock().await;
+    let Some(shop) = w.shop_in_room(me.current_room) else {
+        return CmdOutput::text("\r\nThere is no shop here.\r\n");
+    };
+    if shop.sells.is_empty() {
+        return CmdOutput::text("\r\nThe shopkeeper has nothing for sale.\r\n");
+    }
+    let mut s = String::from("\r\n##  Available    Item                                           Price\r\n");
+    s.push_str(  "--  ---------    ----                                          ------\r\n");
+    for (i, &vnum) in shop.sells.iter().enumerate() {
+        let Some(p) = w.obj_protos.get(&vnum) else { continue };
+        let price = (p.cost as f32 * shop.profit_buy) as i64;
+        s.push_str(&format!(
+            "{:>2}.  unlimited    {:<45} {:>6}\r\n",
+            i + 1, p.short_description, price,
+        ));
+    }
+    CmdOutput::text(s)
+}
+
+async fn do_buy(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nBuy what?\r\n");
+    }
+    let key = arg.to_ascii_lowercase();
+
+    let (vnum, short, price, keeper_name) = {
+        let w = world.lock().await;
+        let Some(shop) = w.shop_in_room(me.current_room) else {
+            return CmdOutput::text("\r\nThere is no shop here.\r\n");
+        };
+        let mut hit: Option<(i32, String, i64)> = None;
+        for &vnum in &shop.sells {
+            let Some(p) = w.obj_protos.get(&vnum) else { continue };
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                let price = (p.cost as f32 * shop.profit_buy) as i64;
+                hit = Some((vnum, p.short_description.clone(), price));
+                break;
+            }
+        }
+        let Some((vnum, short, price)) = hit else {
+            return CmdOutput::text(format!("\r\nThe shopkeeper has no {key} for sale.\r\n"));
+        };
+        let keeper_name = w.mob_protos.get(&shop.keeper_vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the shopkeeper".to_string());
+        (vnum, short, price, keeper_name)
+    };
+
+    if me.gold < price {
+        return CmdOutput::text(format!(
+            "\r\n{keeper_name} says, 'You can't afford that ({price} gold)!'\r\n"
+        ));
+    }
+
+    // Spawn a fresh instance, deduct gold, push to inventory.
+    let iid = {
+        let mut w = world.lock().await;
+        w.spawn_obj(vnum)
+    };
+    let Some(iid) = iid else {
+        return CmdOutput::text("\r\nThe shopkeeper fumbles awkwardly.\r\n");
+    };
+    me.gold -= price;
+    me.inventory.push(iid);
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} buys {} from {}.\r\n", me.name, short, keeper_name),
+    );
+
+    CmdOutput::text(format!(
+        "\r\n{keeper_name} says, 'Here you are, that'll be {price} gold.'\r\nYou now have {} gold.\r\n",
+        me.gold,
+    ))
+}
+
+async fn do_sell(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nSell what?\r\n");
+    }
+    let key = arg.to_ascii_lowercase();
+
+    let (idx, iid, short, price, keeper_name) = {
+        let w = world.lock().await;
+        let Some(shop) = w.shop_in_room(me.current_room) else {
+            return CmdOutput::text("\r\nThere is no shop here.\r\n");
+        };
+        let Some((idx, iid, short)) = find_inv_match(&w, &me.inventory, &key) else {
+            return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n"));
+        };
+        // Look up the proto for cost and check the shop accepts this item type.
+        let obj = w.obj_instances.iter().find(|o| o.id == iid).unwrap();
+        let proto = w.obj_protos.get(&obj.vnum).unwrap();
+        if !shop.buys_types.is_empty() && !shop.buys_types.contains(&proto.item_type) {
+            return CmdOutput::text("\r\nThe shopkeeper doesn't buy that kind of item.\r\n");
+        }
+        let price = (proto.cost as f32 * shop.profit_sell) as i64;
+        let keeper_name = w.mob_protos.get(&shop.keeper_vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the shopkeeper".to_string());
+        (idx, iid, short, price, keeper_name)
+    };
+
+    // Remove from inventory; extract instance from world (item absorbed by shop).
+    me.inventory.remove(idx);
+    {
+        let mut w = world.lock().await;
+        w.obj_instances.retain(|o| o.id != iid);
+    }
+    me.gold += price;
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} sells {} to {}.\r\n", me.name, short, keeper_name),
+    );
+
+    CmdOutput::text(format!(
+        "\r\n{keeper_name} gives you {price} gold for {short}.\r\nYou now have {} gold.\r\n",
+        me.gold,
+    ))
+}
+
+/// Best-effort English name for an ITEM_* type (structs.h).
+fn item_type_name(t: i32) -> &'static str {
+    match t {
+        1 => "light source",
+        2 => "scroll",
+        3 => "wand",
+        4 => "staff",
+        5 => "weapon",
+        6 => "missile",
+        7 => "treasure",
+        8 => "armor",
+        9 => "armor",   // ITEM_ARMOR is 9 in tbaMUD (not 8 like some Circle forks)
+        10 => "potion",
+        11 => "worn item",
+        12 => "other",
+        13 => "trash",
+        14 => "trap",
+        15 => "container",
+        16 => "note",
+        17 => "drink container",
+        18 => "key",
+        19 => "food",
+        20 => "money",
+        21 => "pen",
+        22 => "boat",
+        23 => "fountain",
+        _ => "object",
+    }
+}
+
 async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
     let pl = players.lock().await;
     let rec = match pl.load_player(&me.name) {
@@ -642,6 +954,12 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.max_hp = me.max_hp;
             r.room   = me.current_room;
             r.gold   = me.gold;
+            r.str_   = me.str_;
+            r.int_   = me.int_;
+            r.wis    = me.wis;
+            r.dex    = me.dex;
+            r.con    = me.con;
+            r.cha    = me.cha;
             r
         }
         Err(e) => {
