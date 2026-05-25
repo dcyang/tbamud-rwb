@@ -1603,6 +1603,16 @@ async fn do_kill(
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
 
+    // ROOM_PEACEFUL: refuse combat here.
+    if w.rooms.get(&me.current_room)
+        .map(|r| r.room_flags[0] & crate::world::ROOM_PEACEFUL != 0)
+        .unwrap_or(false)
+    {
+        return CmdOutput::text(
+            "\r\nA flash of white light fills the room, dispelling your violent aggression!\r\n"
+        );
+    }
+
     // Find a mob in the current room whose proto.name keyword matches.
     let mob_id = {
         let r = match w.rooms.get(&me.current_room) {
@@ -4208,6 +4218,65 @@ fn find_inv_match(w: &World, inv: &[u32], key: &str) -> Option<(usize, u32, Stri
     None
 }
 
+/// ROOM_DEATH handler: the player has stepped into a death trap.  Their
+/// inventory is dropped into the trap (visible to anyone who later
+/// passes through), their HP is reset to a single point, and they
+/// respawn at the mortal start room.  Broadcasts a death notice to
+/// everyone online so other players can react.
+async fn death_trap(
+    me: &mut Character,
+    death_room: crate::world::RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let from_room = me.current_room;
+    // Move the inventory contents into the death room (so the corpse
+    // pile is recoverable). Equipped gear stays on the body for
+    // simplicity — same as our normal player_death() behavior in combat.
+    let inv: Vec<u32> = std::mem::take(&mut me.inventory);
+    {
+        let mut w = world.lock().await;
+        if let Some(r) = w.rooms.get_mut(&death_room) {
+            for &iid in &inv {
+                r.objects.push(iid);
+            }
+        }
+        for &iid in &inv {
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.in_room = death_room;
+            }
+        }
+    }
+    // Respawn at mortal start, restore HP/mana to a sliver.
+    let start = {
+        let w = world.lock().await;
+        w.start_room(false)
+    };
+    me.current_room = start;
+    me.hp   = 1;
+    me.mana = me.max_mana;
+    me.fighting = None;
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, start);
+        cl.broadcast_room(from_room, Some(me.id),
+            &format!("{} leaves to the {}.\r\n", me.name, "void"));
+        cl.broadcast_room(start, Some(me.id),
+            &format!("{} appears in a flash of light, looking shaken.\r\n", me.name));
+        for ph in cl.iter() {
+            if ph.id == me.id { continue; }
+            let _ = ph.send.send(format!(
+                "\r\n*** {} has been killed by a deathtrap. ***\r\n", me.name,
+            ));
+        }
+    }
+    let view = render_room(start, Some(me.id), world, chars).await;
+    CmdOutput::text(format!(
+        "\r\nYou step forward — and the world goes black.\r\n\
+         You wake in a familiar place, drained but alive.\r\n{view}",
+    ))
+}
+
 async fn do_move(
     dir: Direction,
     me: &mut Character,
@@ -4219,20 +4288,30 @@ async fn do_move(
         Some(r) => r,
         None    => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
     };
-    let (target, closed, door_kw) = match &r.exits[dir as usize] {
+    let (target, closed, door_kw, target_flags) = match &r.exits[dir as usize] {
         Some(e) if e.to_room != crate::world::NOWHERE
             && w.rooms.contains_key(&e.to_room) =>
         {
             let closed = (e.exit_info & crate::world::EX_CLOSED) != 0;
             let kw = if e.keyword.is_empty() { "door".to_string() }
                      else { e.keyword.split_whitespace().next().unwrap_or("door").to_string() };
-            (e.to_room, closed, kw)
+            let flags = w.rooms.get(&e.to_room).map(|r| r.room_flags[0]).unwrap_or(0);
+            (e.to_room, closed, kw, flags)
         }
         _ => return CmdOutput::text(format!("\r\nAlas, you cannot go that way...\r\n")),
     };
     drop(w);
     if closed {
         return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
+    }
+    // ROOM_GODROOM: mortals can't enter.
+    if (target_flags & crate::world::ROOM_GODROOM) != 0 && me.level < LVL_IMMORT {
+        return CmdOutput::text("\r\nYou aren't godly enough to enter that room.\r\n".to_string());
+    }
+    // ROOM_DEATH: instant death for mortals.  Drops inventory in the
+    // death room, respawns at the mortal start. Immortals just enter.
+    if (target_flags & crate::world::ROOM_DEATH) != 0 && me.level < LVL_IMMORT {
+        return death_trap(me, target, world, chars).await;
     }
 
     let from_room = me.current_room;

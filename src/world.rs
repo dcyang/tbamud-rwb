@@ -94,8 +94,15 @@ pub struct Exit {
     pub to_room:     RoomVnum,  // destination vnum (NOWHERE if blocked)
 }
 
+/// ROOM_* bit positions inside `Room.room_flags[0]`.  Mirror the
+/// same-named macros in structs.h. Only the ones we currently honor are
+/// listed.
+pub const ROOM_DEATH:    u32 = 1 << 1;
+pub const ROOM_PEACEFUL: u32 = 1 << 4;
+pub const ROOM_GODROOM:  u32 = 1 << 10;
+
 /// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
-/// structs.h.  Only the bits we currently honor are listed.
+/// structs.h.  Only the ones we currently honor are listed.
 pub const EX_ISDOOR:    u32 = 1 << 0;
 pub const EX_CLOSED:    u32 = 1 << 1;
 pub const EX_LOCKED:    u32 = 1 << 2;
