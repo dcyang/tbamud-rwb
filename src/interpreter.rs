@@ -852,6 +852,7 @@ async fn do_quest_complete(
         };
         if let Some(iid) = iid {
             me.inventory.push(iid);
+            fire_obj_load_triggers(iid, &me.name, me.current_room, world, chars).await;
         }
     }
     me.completed_quests.push(vnum);
@@ -2731,6 +2732,18 @@ async fn do_give(
     if target_kw.is_empty() {
         return CmdOutput::text("\r\nGive it to whom?\r\n");
     }
+    // "give <N> [coins|gold|money] <target>"
+    if let Ok(amount) = obj_kw.parse::<i64>() {
+        // Strip optional "coins"/"gold"/"money" word.
+        let actual_target = if let Some(rest) = target_kw
+            .strip_prefix("coins ")
+            .or_else(|| target_kw.strip_prefix("gold "))
+            .or_else(|| target_kw.strip_prefix("money "))
+        {
+            rest.trim()
+        } else { target_kw };
+        return do_give_gold(amount, actual_target, me, world, chars).await;
+    }
     let key = obj_kw.to_ascii_lowercase();
 
     // Find item in inventory
@@ -2898,11 +2911,15 @@ async fn do_buy(
     me.gold -= price;
     me.inventory.push(iid);
 
-    let cl = chars.lock().await;
-    cl.broadcast_room(
-        me.current_room, Some(me.id),
-        &format!("{} buys {} from {}.\r\n", me.name, short, keeper_name),
-    );
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} buys {} from {}.\r\n", me.name, short, keeper_name),
+        );
+    }
+    // Fire LOAD triggers on the freshly-spawned shop item.
+    fire_obj_load_triggers(iid, &me.name, me.current_room, world, chars).await;
 
     CmdOutput::text(format!(
         "\r\n{keeper_name} says, 'Here you are, that'll be {price} gold.'\r\nYou now have {} gold.\r\n",
@@ -2960,6 +2977,87 @@ async fn do_sell(
         "\r\n{keeper_name} gives you {price} gold for {short}.\r\nYou now have {} gold.\r\n",
         me.gold,
     ))
+}
+
+/// Hand `amount` gold to a target named `target_kw`.  Target may be a
+/// player in the room or a mob in the room.  Mob recipients fire BRIBE
+/// triggers.  Insufficient funds aborts.
+async fn do_give_gold(
+    amount: i64,
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if amount <= 0 {
+        return CmdOutput::text("\r\nGive how much gold?\r\n");
+    }
+    if me.gold < amount {
+        return CmdOutput::text(format!(
+            "\r\nYou don't have {amount} gold to give. (You have {}.)\r\n",
+            me.gold,
+        ));
+    }
+    let tlow = target_kw.to_ascii_lowercase();
+
+    // Player target first.
+    let target_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room && p.name.to_ascii_lowercase() == tlow
+        ).cloned();
+        h
+    };
+    if let Some(ph) = target_handle {
+        me.gold -= amount;
+        {
+            let mut c = ph.character.lock().await;
+            c.gold += amount;
+        }
+        let _ = ph.send.send(format!(
+            "\r\n{} gives you {amount} gold.\r\n", me.name,
+        ));
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} gives some gold to {}.\r\n", me.name, ph.name),
+        );
+        return CmdOutput::text(format!(
+            "\r\nYou give {amount} gold to {}. (Now {} left.)\r\n",
+            ph.name, me.gold,
+        ));
+    }
+
+    // Mob target.
+    let mob_match: Option<(u32, String)> = {
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&tlow)) {
+                Some((mid, p.short_descr.clone()))
+            } else { None }
+        }))
+    };
+    if let Some((mid, mname)) = mob_match {
+        me.gold -= amount;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                me.current_room, Some(me.id),
+                &format!("{} gives some gold to {}.\r\n", me.name, mname),
+            );
+        }
+        // Fire BRIBE triggers on the receiver.
+        fire_mob_bribe_triggers(mid, &me.name, amount, world, chars).await;
+        return CmdOutput::text(format!(
+            "\r\nYou give {amount} gold to {mname}. (Now {} left.)\r\n",
+            me.gold,
+        ));
+    }
+
+    CmdOutput::text(format!("\r\nNo one called '{target_kw}' is here.\r\n"))
 }
 
 /// Best-effort English name for an ITEM_* type (structs.h).
@@ -3128,6 +3226,10 @@ enum ScriptOut {
     PlayerTeleport { name: String, to: RoomVnum },
     /// Extract the self mob silently (`mpurge`).  Inventory is destroyed.
     Purge { mob_id: u32, mob_name: String, room: RoomVnum },
+    /// Inflict raw damage on a target by name (`mdamage`).  The target is
+    /// either a player (matched against PlayerHandle.name) or a mob in
+    /// the script's `self_room` (matched against mob_proto.name keywords).
+    Damage { target: String, amount: i32, mob_name: String, room: RoomVnum },
 }
 
 /// Per-script-execution context carrying mutable variables and the
@@ -3345,6 +3447,19 @@ fn execute_script(
                     out.push(ScriptOut::PlayerTeleport { name: n, to });
                 }
             }
+        } else if let Some(rest) = line.strip_prefix("mdamage ") {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let (Some(target), Some(amt_str)) = (parts.next(), parts.next()) {
+                let t = substitute(&ctx, target.trim());
+                if let Ok(a) = substitute(&ctx, amt_str.trim()).parse::<i32>() {
+                    out.push(ScriptOut::Damage {
+                        target: t,
+                        amount: a,
+                        mob_name: ctx.mob_name.to_string(),
+                        room:   ctx.self_room,
+                    });
+                }
+            }
         } else if line == "mpurge" || line.starts_with("mpurge ") {
             if let Some(mid) = ctx.self_mob_id {
                 out.push(ScriptOut::Purge {
@@ -3478,6 +3593,7 @@ async fn apply_script_outputs(
     let mut mob_gotos: Vec<(u32, String, RoomVnum)> = Vec::new();
     let mut purges:    Vec<(u32, String, RoomVnum)> = Vec::new();
     let mut teleports: Vec<(String, RoomVnum)>      = Vec::new();
+    let mut damages:   Vec<(String, i32, String, RoomVnum)> = Vec::new();
     {
         let cl = chars.lock().await;
         for out in outputs {
@@ -3500,10 +3616,14 @@ async fn apply_script_outputs(
                 ScriptOut::Purge { mob_id, mob_name, room } => {
                     purges.push((mob_id, mob_name, room));
                 }
+                ScriptOut::Damage { target, amount, mob_name, room } => {
+                    damages.push((target, amount, mob_name, room));
+                }
             }
         }
     }
     // Apply world mutations under a single lock.
+    let mut loaded_iids: Vec<(u32, RoomVnum)> = Vec::new();
     if !load_queue.is_empty() || !mob_gotos.is_empty() || !purges.is_empty() {
         let mut w = world.lock().await;
         for (vnum, rv) in load_queue {
@@ -3514,6 +3634,7 @@ async fn apply_script_outputs(
                 if let Some(r) = w.rooms.get_mut(&rv) {
                     r.objects.push(iid);
                 }
+                loaded_iids.push((iid, rv));
             }
         }
         for (mob_id, _mob_name, to) in &mob_gotos {
@@ -3541,6 +3662,47 @@ async fn apply_script_outputs(
             w.obj_instances.retain(|o| !inv.contains(&o.id));
         }
     }
+    // Apply damages.  Player target: lookup PlayerHandle, decrement HP,
+    // notify via mpsc.  Mob target: find by keyword in target room.
+    for (target, amount, mob_name, room) in damages {
+        let tlow = target.to_ascii_lowercase();
+        // Player path.
+        let ph = {
+            let cl = chars.lock().await;
+            let h = cl.iter()
+                .find(|p| p.name.to_ascii_lowercase() == tlow)
+                .cloned();
+            h
+        };
+        if let Some(ph) = ph {
+            let (cur, max) = {
+                let mut c = ph.character.lock().await;
+                c.hp -= amount;
+                (c.hp, c.max_hp)
+            };
+            let _ = ph.send.send(format!(
+                "\r\n{mob_name} hits you with raw force for {amount} damage! ({cur}/{max} HP)\r\n",
+            ));
+            continue;
+        }
+        // Mob path: keyword match in `room`.
+        let mut w = world.lock().await;
+        let room_mobs: Vec<u32> = w.rooms.get(&room)
+            .map(|r| r.mobs.clone()).unwrap_or_default();
+        for mid in room_mobs {
+            let proto_match = w.mob_instances.iter().find(|m| m.id == mid)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.name.split_whitespace()
+                    .any(|k| k.eq_ignore_ascii_case(&tlow)))
+                .unwrap_or(false);
+            if !proto_match { continue; }
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
+                m.hp -= amount;
+            }
+            break;
+        }
+    }
+
     // Announce mob movements + apply teleports under the chars lock.
     if !mob_gotos.is_empty() || !purges.is_empty() || !teleports.is_empty() {
         let cl = chars.lock().await;
@@ -3573,6 +3735,11 @@ async fn apply_script_outputs(
             let _ = ph.send.send(format!("\r\nThe world swirls — you find yourself elsewhere.\r\n"));
         }
     }
+    // NOTE: LOAD triggers are deliberately NOT fired for mload-spawned
+    // objects to avoid recursive async (apply -> fire_obj_load ->
+    // fire_obj_triggers -> apply).  Callers that spawn objects via
+    // do_buy / do_quest_complete fire LOAD triggers themselves.
+    let _ = loaded_iids;
 }
 
 /// Fire all triggers of the given type attached to mobs in `room`.
@@ -3733,6 +3900,19 @@ pub async fn fire_obj_give_triggers(
     fire_obj_triggers(obj_iid, actor_name, room, 'i', world, chars).await;
 }
 
+/// LOAD trigger ('m' on objects) — fires when the object is freshly
+/// spawned at runtime (mload, quest reward, shop buy). Not fired for
+/// objects restored from a player's saved inventory.
+pub async fn fire_obj_load_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'm', world, chars).await;
+}
+
 /// Run FIGHT (type 'k') triggers each combat round for a mob currently
 /// engaged with a player.  Provides %actor.name%/%actor.hp% to the
 /// script so dynamic combat dialogue is possible.
@@ -3786,6 +3966,44 @@ pub async fn fire_mob_entry_triggers(
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'i' { continue; }
             acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, &ScriptInputs::default()));
+        }
+        (acc, mob_room)
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Run BRIBE (type 'l') triggers when a mob receives gold from a player.
+/// `gold_amount` is passed in via `%actor.gold%` (overrides default).
+pub async fn fire_mob_bribe_triggers(
+    mob_id: u32,
+    actor_name: &str,
+    gold_amount: i64,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let (outputs, room) = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
+            return;
+        };
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let inputs = ScriptInputs {
+            self_mob_id: Some(m.id),
+            self_hp: m.hp, self_max_hp: m.max_hp,
+            self_level: proto.level,
+            actor_gold: gold_amount,
+            self_fighting: m.fighting.is_some(),
+            ..Default::default()
+        };
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'l' { continue; }
+            // CircleMUD's BRIBE narg is the minimum gold threshold to fire.
+            if (gold_amount as i32) < t.narg { continue; }
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs));
         }
         (acc, mob_room)
     };
