@@ -470,12 +470,17 @@ async fn mob_flee(
         let mut w = world.lock().await;
         let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { return; };
         let from = m.in_room;
-        // Pick a random exit.
+        // Pick a random exit, skipping NOMOB destinations.
         let candidates: Vec<crate::world::RoomVnum> = w.rooms.get(&from)
             .map(|r| r.exits.iter()
                 .filter_map(|e| e.as_ref())
                 .filter(|e| e.to_room != crate::world::NOWHERE
                           && w.rooms.contains_key(&e.to_room))
+                .filter(|e| {
+                    w.rooms.get(&e.to_room)
+                        .map(|t| t.room_flags[0] & crate::world::ROOM_NOMOB == 0)
+                        .unwrap_or(false)
+                })
                 .map(|e| e.to_room)
                 .collect())
             .unwrap_or_default();

@@ -70,7 +70,7 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title",
-    "goto", "transfer", "purge", "shutdown", "stat",
+    "goto", "transfer", "purge", "shutdown", "stat", "force", "set",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -188,6 +188,8 @@ pub async fn dispatch_command(
         Some("purge")     => do_purge(me, world, chars).await,
         Some("shutdown")  => do_shutdown(me, chars).await,
         Some("stat")      => do_stat(rest, me, world, chars).await,
+        Some("force")     => do_force(rest, me, world, chars).await,
+        Some("set")       => do_set(rest, me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -955,6 +957,146 @@ async fn do_help(
         Some(e) => CmdOutput::text(format!("\r\n{}\r\n", e.body.trim_end())),
         None    => CmdOutput::text(format!("\r\nThere is no help on '{topic}'.\r\n")),
     }
+}
+
+/// `force <player> <command>` — immortal-only. Dispatches the command
+/// as the named online player via the existing FORCE_CMD_TX channel
+/// (same plumbing as the `mforce` script verb in cp30). Notifies the
+/// target before the dispatch so they see the coercion.
+async fn do_force(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let (target, command) = match arg.find(char::is_whitespace) {
+        Some(i) => (arg[..i].trim(), arg[i..].trim()),
+        None    => return CmdOutput::text("\r\nForce whom to do what?\r\n".to_string()),
+    };
+    if target.is_empty() || command.is_empty() {
+        return CmdOutput::text("\r\nForce whom to do what?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(target)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    let _ = ph.send.send(format!("\r\n{} forces you to '{}'.\r\n", me.name, command));
+    let Some(tx) = FORCE_CMD_TX.get() else {
+        return CmdOutput::text("\r\nForce dispatch channel is unavailable.\r\n".to_string());
+    };
+    let _ = tx.send(ForceCmdMsg {
+        player:  ph.name.clone(),
+        command: command.to_string(),
+        world:   Arc::clone(world),
+        chars:   Arc::clone(chars),
+    });
+    CmdOutput::text(format!("\r\nYou force {} to '{}'.\r\n", ph.name, command))
+}
+
+/// `set <player> <field> <value>` — immortal-only. Supports a handful
+/// of common fields: level / hp / maxhp / mana / maxmana / gold / exp /
+/// room. Room change updates the registry and broadcasts a "vanishes"
+/// / "appears" pair so other players see the move.
+async fn do_set(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() < 3 {
+        return CmdOutput::text("\r\nUsage: set <player> <field> <value>\r\n  Fields: level hp maxhp mana maxmana gold exp room title\r\n".to_string());
+    }
+    let target = parts[0];
+    let field  = parts[1].to_ascii_lowercase();
+    let value_str = parts[2..].join(" ");
+
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(target)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+
+    // Integer fields share a parser.
+    let parse_i = || value_str.parse::<i64>().ok();
+    let parse_i32 = || value_str.parse::<i32>().ok();
+
+    match field.as_str() {
+        "title" => {
+            let mut c = ph.character.lock().await;
+            c.title = value_str.chars().filter(|c| !c.is_control()).take(60).collect();
+            CmdOutput::text(format!("\r\nSet {}'s title to '{}'.\r\n", ph.name, c.title))
+        }
+        "level" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            ph.character.lock().await.level = v.clamp(1, 34);
+            CmdOutput::text(format!("\r\nSet {}'s level to {v}.\r\n", ph.name))
+        }
+        "hp" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            let mut c = ph.character.lock().await;
+            c.hp = v.max(0).min(c.max_hp.max(v));
+            CmdOutput::text(format!("\r\nSet {}'s HP to {}.\r\n", ph.name, c.hp))
+        }
+        "maxhp" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            let mut c = ph.character.lock().await;
+            c.max_hp = v.max(1);
+            c.hp = c.hp.min(c.max_hp);
+            CmdOutput::text(format!("\r\nSet {}'s max HP to {}.\r\n", ph.name, c.max_hp))
+        }
+        "mana" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            let mut c = ph.character.lock().await;
+            c.mana = v.max(0).min(c.max_mana.max(v));
+            CmdOutput::text(format!("\r\nSet {}'s mana to {}.\r\n", ph.name, c.mana))
+        }
+        "maxmana" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            let mut c = ph.character.lock().await;
+            c.max_mana = v.max(0);
+            c.mana = c.mana.min(c.max_mana);
+            CmdOutput::text(format!("\r\nSet {}'s max mana to {}.\r\n", ph.name, c.max_mana))
+        }
+        "gold" => {
+            let Some(v) = parse_i() else { return bad_value(&field); };
+            ph.character.lock().await.gold = v.max(0);
+            CmdOutput::text(format!("\r\nSet {}'s gold to {v}.\r\n", ph.name))
+        }
+        "exp" => {
+            let Some(v) = parse_i() else { return bad_value(&field); };
+            ph.character.lock().await.exp = v.max(0);
+            CmdOutput::text(format!("\r\nSet {}'s exp to {v}.\r\n", ph.name))
+        }
+        "room" => {
+            let Some(v) = parse_i32() else { return bad_value(&field); };
+            let from = {
+                let mut c = ph.character.lock().await;
+                let f = c.current_room;
+                c.current_room = v;
+                f
+            };
+            let mut cl = chars.lock().await;
+            cl.update_room(ph.id, v);
+            cl.broadcast_room(from, Some(ph.id),
+                &format!("{} vanishes by divine command.\r\n", ph.name));
+            cl.broadcast_room(v, Some(ph.id),
+                &format!("{} appears by divine command.\r\n", ph.name));
+            let _ = ph.send.send(format!(
+                "\r\n{} sends you to room {v}.\r\n", me.name,
+            ));
+            CmdOutput::text(format!("\r\nMoved {} to room {v}.\r\n", ph.name))
+        }
+        _ => CmdOutput::text(format!("\r\nUnknown field '{field}'.\r\n")),
+    }
+}
+
+fn bad_value(field: &str) -> CmdOutput {
+    CmdOutput::text(format!("\r\nBad value for '{field}'.\r\n"))
 }
 
 /// `stat [name]` — inspect a player/mob/obj/room.  With no arg or
@@ -4897,6 +5039,22 @@ async fn do_move(
     // death room, respawns at the mortal start. Immortals just enter.
     if (target_flags & crate::world::ROOM_DEATH) != 0 && me.level < LVL_IMMORT {
         return death_trap(me, target, world, chars).await;
+    }
+    // ROOM_TUNNEL / ROOM_PRIVATE: cap occupancy by player count.
+    // Immortals bypass both.
+    if me.level < LVL_IMMORT &&
+        (target_flags & (crate::world::ROOM_TUNNEL | crate::world::ROOM_PRIVATE)) != 0
+    {
+        let occupants = {
+            let cl = chars.lock().await;
+            cl.iter().filter(|p| p.current_room == target).count()
+        };
+        if (target_flags & crate::world::ROOM_TUNNEL) != 0 && occupants >= 1 {
+            return CmdOutput::text("\r\nThere isn't enough room for you to enter.\r\n".to_string());
+        }
+        if (target_flags & crate::world::ROOM_PRIVATE) != 0 && occupants >= 2 {
+            return CmdOutput::text("\r\nThat room is private — there's no room for a third.\r\n".to_string());
+        }
     }
 
     let from_room = me.current_room;

@@ -562,6 +562,7 @@ fn compute_wander_moves(
                 if e.to_room == crate::world::NOWHERE { continue; }
                 let Some(target) = w.rooms.get(&e.to_room) else { continue; };
                 if stay_zone && target.zone != mob_zone { continue; }
+                if target.room_flags[0] & crate::world::ROOM_NOMOB != 0 { continue; }
                 candidates.push((d, e.to_room));
             }
         }
