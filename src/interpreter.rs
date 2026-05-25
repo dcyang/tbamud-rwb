@@ -2072,6 +2072,9 @@ async fn do_cast(
         crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         crate::character::Skill::Sleep        => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Sleep).await,
         crate::character::Skill::Blindness    => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Blindness).await,
+        crate::character::Skill::CurePoison   => cast_cure_affect(target, me, world, chars, crate::character::Skill::Poison).await,
+        crate::character::Skill::CureBlind    => cast_cure_affect(target, me, world, chars, crate::character::Skill::Blindness).await,
+        crate::character::Skill::CureCritic   => cast_cure_critic(target, me, chars, learned).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -2737,6 +2740,158 @@ async fn cast_debuff(
     cl.broadcast_room(me.current_room, Some(me.id),
         &broadcast_room.replace("{}", &mob_name));
     CmdOutput::text(format!("\r\n{}", broadcast_self.replace("{}", &mob_name)))
+}
+
+/// Strip a single affect (Poison/Blindness/...) from a target.  With no
+/// target keyword, cures the caster.  Otherwise looks up another
+/// player in the room first, then a mob.  Mana drains on every cast,
+/// even when no matching affect was found.
+async fn cast_cure_affect(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    affect_kind: crate::character::Skill,
+) -> CmdOutput {
+    let cure_skill = match affect_kind {
+        crate::character::Skill::Poison    => crate::character::Skill::CurePoison,
+        crate::character::Skill::Blindness => crate::character::Skill::CureBlind,
+        _ => return CmdOutput::text("\r\nUnknown cure target.\r\n"),
+    };
+    me.mana -= cure_skill.mana_cost();
+
+    // No-arg → self.
+    if target_kw.is_empty() {
+        let before = me.affects.len();
+        me.affects.retain(|a| a.skill != affect_kind);
+        let removed = before != me.affects.len();
+        return CmdOutput::text(if removed {
+            format!("\r\nA warm light banishes the {} from you.\r\n", affect_kind.name())
+        } else {
+            format!("\r\nYou are not {}.\r\n", affect_kind.name())
+        });
+    }
+
+    // Try another player in the same room.
+    let target_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    if let Some(ph) = target_handle {
+        let removed = {
+            let mut c = ph.character.lock().await;
+            let before = c.affects.len();
+            c.affects.retain(|a| a.skill != affect_kind);
+            before != c.affects.len()
+        };
+        let msg = if removed {
+            format!("\r\n{} cures your {}.\r\n", me.name, affect_kind.name())
+        } else {
+            format!("\r\n{} prays for your relief — but you weren't {}.\r\n",
+                me.name, affect_kind.name())
+        };
+        let _ = ph.send.send(msg);
+        return CmdOutput::text(if removed {
+            format!("\r\nThe {} fades from {}.\r\n", affect_kind.name(), ph.name)
+        } else {
+            format!("\r\n{} is not {}.\r\n", ph.name, affect_kind.name())
+        });
+    }
+
+    // Otherwise a mob in the room.
+    let kw = target_kw.to_ascii_lowercase();
+    let (mob_name, removed) = {
+        let mut w = world.lock().await;
+        let target_mid: Option<u32> = w.rooms.get(&me.current_room).and_then(|r| {
+            r.mobs.iter().find_map(|&mid| {
+                let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+                let p = w.mob_protos.get(&m.vnum)?;
+                if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+                    Some(mid)
+                } else { None }
+            })
+        });
+        let Some(mid) = target_mid else {
+            return CmdOutput::text(format!("\r\nYou see no '{target_kw}' here.\r\n"));
+        };
+        let (name, removed) = {
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mid).unwrap();
+            let before = m.affects.len();
+            m.affects.retain(|a| a.skill != affect_kind);
+            let removed = before != m.affects.len();
+            (m.vnum, removed)
+        };
+        let name = w.mob_protos.get(&name).map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".to_string());
+        (name, removed)
+    };
+    if removed {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} looks better.\r\n", mob_name));
+        CmdOutput::text(format!("\r\nThe {} fades from {mob_name}.\r\n", affect_kind.name()))
+    } else {
+        CmdOutput::text(format!("\r\n{mob_name} is not {}.\r\n", affect_kind.name()))
+    }
+}
+
+/// Heavier heal — 3d8 + level + wis/2.  Targets self if no arg, else a
+/// named player in the caller's room (mirrors cast_cure_light).  Spell
+/// does not affect mobs.
+async fn cast_cure_critic(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    me.mana -= crate::character::Skill::CureCritic.mana_cost();
+    let hit_chance = (90 + learned as i32 / 5).min(99);
+    if rand::thread_rng().gen_range(0..100) >= hit_chance {
+        return CmdOutput::text("\r\nThe healing prayer fizzles.\r\n");
+    }
+    let heal = crate::db::dice(3, 8) + me.level + (me.wis - 10).max(0) / 2;
+
+    // Self?
+    if target_kw.is_empty() {
+        me.hp = (me.hp + heal).min(me.max_hp);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} bathes themself in restorative light.\r\n", me.name));
+        return CmdOutput::text(format!(
+            "\r\nWaves of warmth course through you, mending wounds. ({}/{} HP)\r\n",
+            me.hp, me.max_hp,
+        ));
+    }
+    // Another player in room.
+    let target_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = target_handle else {
+        return CmdOutput::text(format!("\r\nNo one named '{target_kw}' is here.\r\n"));
+    };
+    let (new_hp, max) = {
+        let mut c = ph.character.lock().await;
+        c.hp = (c.hp + heal).min(c.max_hp);
+        (c.hp, c.max_hp)
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} bathes you in restorative light. ({}/{} HP)\r\n",
+        me.name, new_hp, max,
+    ));
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} bathes {} in restorative light.\r\n", me.name, ph.name));
+    CmdOutput::text(format!(
+        "\r\nYour healing magic restores {} ({} HP).\r\n", ph.name, heal,
+    ))
 }
 
 async fn cast_identify(

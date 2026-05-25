@@ -45,6 +45,9 @@ pub enum Skill {
     Poison,
     Sleep,
     Blindness,
+    CurePoison,
+    CureBlind,
+    CureCritic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,9 @@ impl Skill {
             "poison"                          => Some(Skill::Poison),
             "sleep"                           => Some(Skill::Sleep),
             "blindness" | "blind"             => Some(Skill::Blindness),
+            "curepoison"                      => Some(Skill::CurePoison),
+            "cureblind" | "cureblindness"     => Some(Skill::CureBlind),
+            "curecritic" | "curecritical"     => Some(Skill::CureCritic),
             _ => None,
         }
     }
@@ -110,6 +116,9 @@ impl Skill {
             Skill::Poison       => "poison",
             Skill::Sleep        => "sleep",
             Skill::Blindness    => "blindness",
+            Skill::CurePoison   => "cure poison",
+            Skill::CureBlind    => "cure blindness",
+            Skill::CureCritic   => "cure critic",
         }
     }
 
@@ -123,6 +132,7 @@ impl Skill {
                 | Skill::WordOfRecall | Skill::Identify
                 | Skill::DetectInvis  | Skill::DetectMagic
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
+                | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                                       => SkillKind::Spell,
         }
     }
@@ -145,6 +155,9 @@ impl Skill {
             Skill::Poison       => 12,
             Skill::Sleep        => 15,
             Skill::Blindness    => 8,
+            Skill::CurePoison   => 10,
+            Skill::CureBlind    => 10,
+            Skill::CureCritic   => 14,
         }
     }
 
@@ -174,6 +187,9 @@ impl Skill {
             Skill::Poison       => &[Class::MagicUser, Class::Cleric],
             Skill::Sleep        => &[Class::MagicUser],
             Skill::Blindness    => &[Class::MagicUser, Class::Cleric],
+            Skill::CurePoison   => &[Class::Cleric],
+            Skill::CureBlind    => &[Class::Cleric],
+            Skill::CureCritic   => &[Class::Cleric],
         }
     }
 
@@ -204,6 +220,9 @@ impl Skill {
             Skill::Poison       => "poison",
             Skill::Sleep        => "sleep",
             Skill::Blindness    => "blindness",
+            Skill::CurePoison   => "cure-poison",
+            Skill::CureBlind    => "cure-blind",
+            Skill::CureCritic   => "cure-critic",
         }
     }
 
@@ -223,6 +242,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::WordOfRecall, Skill::Identify,
     Skill::DetectInvis, Skill::DetectMagic,
     Skill::Poison, Skill::Sleep, Skill::Blindness,
+    Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
 ];
 
 // ---------------------------------------------------------------------------
