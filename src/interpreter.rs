@@ -70,7 +70,7 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick",
     "drink", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell",
-    "goto", "transfer", "purge", "shutdown",
+    "goto", "transfer", "purge", "shutdown", "stat",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -184,6 +184,7 @@ pub async fn dispatch_command(
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
         Some("shutdown")  => do_shutdown(me, chars).await,
+        Some("stat")      => do_stat(rest, me, world, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -951,6 +952,121 @@ async fn do_help(
         Some(e) => CmdOutput::text(format!("\r\n{}\r\n", e.body.trim_end())),
         None    => CmdOutput::text(format!("\r\nThere is no help on '{topic}'.\r\n")),
     }
+}
+
+/// `stat [name]` — inspect a player/mob/obj/room.  With no arg or
+/// "room", dump the caller's current room. Otherwise auto-detect by
+/// the same priority C uses: player name → mob keyword in room →
+/// object keyword in inventory/equip/room.
+async fn do_stat(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+
+    // No arg or "room" → describe the current room.
+    if arg.is_empty() || arg.eq_ignore_ascii_case("room") {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None    => return CmdOutput::text("\r\nYou're nowhere statable.\r\n".to_string()),
+        };
+        let mut s = format!(
+            "\r\nRoom [{}] (zone {})\r\n  Name:     {}\r\n  Flags:    0x{:x}\r\n  Sector:   {}\r\n  Mobs:     {}\r\n  Objects:  {}\r\n",
+            r.vnum, r.zone, r.name, r.room_flags[0], r.sector_type, r.mobs.len(), r.objects.len(),
+        );
+        s.push_str("  Exits:    ");
+        let mut any = false;
+        for d in crate::world::Direction::ALL {
+            if let Some(e) = &r.exits[d as usize] {
+                if e.to_room == crate::world::NOWHERE { continue; }
+                if any { s.push_str(", "); }
+                s.push_str(&format!("{}→{}", d.name(), e.to_room));
+                any = true;
+            }
+        }
+        if !any { s.push_str("(none)"); }
+        s.push_str("\r\n");
+        if !r.triggers.is_empty() {
+            s.push_str(&format!("  Triggers: {:?}\r\n", r.triggers));
+        }
+        return CmdOutput::text(s);
+    }
+
+    // Try player.
+    let player_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    if let Some(ph) = player_handle {
+        let c = ph.character.lock().await;
+        let s = format!(
+            "\r\nPlayer [{}] {}\r\n  Class:    {:?}\r\n  Level:    {}\r\n  HP:       {}/{}\r\n  Mana:     {}/{}\r\n  Exp:      {}\r\n  Gold:     {}\r\n  Room:     {}\r\n  Str/Dex/Int/Wis/Con/Cha: {}/{}/{}/{}/{}/{}\r\n  Bonus hr/dr/ac: {}/{}/{}\r\n  Following:{}  Grouped:{}\r\n  Following:{:?}  Skills:{}\r\n",
+            ph.id, c.name, c.class, c.level, c.hp, c.max_hp, c.mana, c.max_mana,
+            c.exp, c.gold, c.current_room,
+            c.str_, c.dex, c.int_, c.wis, c.con, c.cha,
+            c.bonus_hitroll, c.bonus_damroll, c.bonus_ac,
+            c.following.is_some(), c.grouped,
+            c.following, c.skills.len(),
+        );
+        return CmdOutput::text(s);
+    }
+
+    // Try mob in current room by keyword.
+    let key = arg.to_ascii_lowercase();
+    let w = world.lock().await;
+    let mob_info = w.rooms.get(&me.current_room).and_then(|r| {
+        r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some((m, p))
+            } else { None }
+        })
+    });
+    if let Some((m, p)) = mob_info {
+        let s = format!(
+            "\r\nMob [vnum {}] iid {}  \"{}\"\r\n  Level:    {}\r\n  HP:       {}/{}\r\n  AC:       {}\r\n  Hitroll:  {}\r\n  Damage:   {}d{}+{}\r\n  Exp:      {}\r\n  Gold:     {}\r\n  Flags:    0x{:x}\r\n  Affs:     0x{:x}\r\n  In room:  {}\r\n  Fighting: {:?}\r\n  Inventory:{} items   Triggers:{:?}\r\n",
+            m.vnum, m.id, p.short_descr, p.level, m.hp, m.max_hp, p.ac, p.hitroll,
+            p.dam_dice, p.dam_size, p.damroll,
+            p.exp, p.gold, p.mob_flags[0], p.aff_flags[0], m.in_room,
+            m.fighting, m.inventory.len(), m.triggers,
+        );
+        return CmdOutput::text(s);
+    }
+
+    // Try object (inventory → equipment → current room floor).
+    let obj_info = {
+        let pool: Vec<u32> = me.inventory.iter().copied()
+            .chain(me.equipment.iter().filter_map(|s| s.as_ref()).copied())
+            .chain(w.rooms.get(&me.current_room).map(|r| r.objects.clone()).unwrap_or_default())
+            .collect();
+        pool.into_iter().find_map(|iid| {
+            let o = w.obj_instances.iter().find(|o| o.id == iid)?;
+            let p = w.obj_protos.get(&o.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some((o.clone(), p.clone()))
+            } else { None }
+        })
+    };
+    if let Some((o, p)) = obj_info {
+        let s = format!(
+            "\r\nObject [vnum {}] iid {}  \"{}\"\r\n  Type:     {}\r\n  Value:    {} {} {} {}\r\n  Weight:   {}\r\n  Cost:     {}\r\n  Level:    {}\r\n  Extra:    0x{:x}\r\n  Wear:     0x{:x}\r\n  Affect:   0x{:x}\r\n  Timer:    {:?}  Decay:{:?}  Lit:{}\r\n  In room:  {}\r\n  Affects:  {:?}\r\n  Triggers: {:?}\r\n",
+            o.vnum, o.id, p.short_description, item_type_name(p.item_type),
+            p.value[0], p.value[1], p.value[2], p.value[3],
+            p.weight, p.cost, p.level,
+            p.extra_flags[0], p.wear_flags[0], p.affect_flags[0],
+            o.timer, o.decay_in, o.light_lit,
+            o.in_room, p.affected, o.triggers,
+        );
+        return CmdOutput::text(s);
+    }
+
+    CmdOutput::text("\r\nNo one and nothing matches that here.\r\n".to_string())
 }
 
 async fn do_where(
