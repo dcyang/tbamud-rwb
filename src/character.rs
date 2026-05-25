@@ -48,6 +48,8 @@ pub enum Skill {
     CurePoison,
     CureBlind,
     CureCritic,
+    Strength,
+    Armor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,8 @@ impl Skill {
             "curepoison"                      => Some(Skill::CurePoison),
             "cureblind" | "cureblindness"     => Some(Skill::CureBlind),
             "curecritic" | "curecritical"     => Some(Skill::CureCritic),
+            "strength"                        => Some(Skill::Strength),
+            "armor"                           => Some(Skill::Armor),
             _ => None,
         }
     }
@@ -119,6 +123,8 @@ impl Skill {
             Skill::CurePoison   => "cure poison",
             Skill::CureBlind    => "cure blindness",
             Skill::CureCritic   => "cure critic",
+            Skill::Strength     => "strength",
+            Skill::Armor        => "armor",
         }
     }
 
@@ -133,6 +139,7 @@ impl Skill {
                 | Skill::DetectInvis  | Skill::DetectMagic
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
+                | Skill::Strength     | Skill::Armor
                                       => SkillKind::Spell,
         }
     }
@@ -158,6 +165,8 @@ impl Skill {
             Skill::CurePoison   => 10,
             Skill::CureBlind    => 10,
             Skill::CureCritic   => 14,
+            Skill::Strength     => 8,
+            Skill::Armor        => 10,
         }
     }
 
@@ -190,6 +199,8 @@ impl Skill {
             Skill::CurePoison   => &[Class::Cleric],
             Skill::CureBlind    => &[Class::Cleric],
             Skill::CureCritic   => &[Class::Cleric],
+            Skill::Strength     => &[Class::MagicUser],
+            Skill::Armor        => &[Class::Cleric],
         }
     }
 
@@ -223,6 +234,8 @@ impl Skill {
             Skill::CurePoison   => "cure-poison",
             Skill::CureBlind    => "cure-blind",
             Skill::CureCritic   => "cure-critic",
+            Skill::Strength     => "strength",
+            Skill::Armor        => "armor",
         }
     }
 
@@ -243,6 +256,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::DetectInvis, Skill::DetectMagic,
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
+    Skill::Strength, Skill::Armor,
 ];
 
 // ---------------------------------------------------------------------------
@@ -261,6 +275,9 @@ pub struct Affect {
     pub dmg_reduction: i32,
     /// Recurring damage per combat tick (Poison etc).  Zero for buffs.
     pub dot_damage:    i32,
+    /// AC bonus while active (positive = better defense, summed into
+    /// total_ac alongside armor's value[0]).  Used by Armor spell.
+    pub to_ac:         i32,
 }
 
 impl Affect {
@@ -569,6 +586,11 @@ impl Character {
     /// Sum of `to_dam` bonuses from all active affects.
     pub fn affect_dam_bonus(&self) -> i32 {
         self.affects.iter().map(|a| a.to_dam).sum()
+    }
+
+    /// Sum of AC bonuses from active affects (Armor spell etc).
+    pub fn affect_ac_bonus(&self) -> i32 {
+        self.affects.iter().map(|a| a.to_ac).sum()
     }
 
     /// Total damage reduction percent (0..=75) from active affects.

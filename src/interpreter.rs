@@ -67,7 +67,7 @@ const COMMANDS: &[&str] = &[
     "quest", "where",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
-    "open", "close", "lock", "unlock", "pick",
+    "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set",
@@ -171,6 +171,7 @@ pub async fn dispatch_command(
         Some("lock")      => do_door(rest, me, world, chars, DoorOp::Lock).await,
         Some("unlock")    => do_door(rest, me, world, chars, DoorOp::Unlock).await,
         Some("pick")      => do_pick(rest, me, world, chars).await,
+        Some("search")    => do_search(me, world, chars).await,
         Some("quaff")     => do_quaff(rest, me, world, chars).await,
         Some("drink")     => do_drink_container(rest, me, world, chars).await,
         Some("eat")       => do_eat(rest, me, world, chars).await,
@@ -1891,7 +1892,7 @@ pub async fn total_ac(me: &Character, world: &Arc<Mutex<World>>) -> i32 {
             }
         }
     }
-    total + me.bonus_ac
+    total + me.bonus_ac + me.affect_ac_bonus()
 }
 
 async fn do_kill(
@@ -2258,6 +2259,8 @@ async fn do_cast(
         crate::character::Skill::CurePoison   => cast_cure_affect(target, me, world, chars, crate::character::Skill::Poison).await,
         crate::character::Skill::CureBlind    => cast_cure_affect(target, me, world, chars, crate::character::Skill::Blindness).await,
         crate::character::Skill::CureCritic   => cast_cure_critic(target, me, chars, learned).await,
+        crate::character::Skill::Strength     => cast_buff(target, me, chars, learned, crate::character::Skill::Strength).await,
+        crate::character::Skill::Armor        => cast_buff(target, me, chars, learned, crate::character::Skill::Armor).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -2338,6 +2341,7 @@ fn cast_detect_invis(me: &mut Character) -> CmdOutput {
         to_dam:        0,
         dmg_reduction: 0,
         dot_damage:    0,
+        to_ac:         0,
     };
     me.mana -= crate::character::Skill::DetectInvis.mana_cost();
     me.apply_affect(aff);
@@ -2575,6 +2579,7 @@ async fn cast_bless(
         to_dam:        1,
         dmg_reduction: 0,
         dot_damage:    0,
+        to_ac:         0,
     };
 
     if let Some(ph) = target_handle {
@@ -2637,6 +2642,7 @@ async fn cast_sanctuary(
         to_dam:        0,
         dmg_reduction: 50,
         dot_damage:    0,
+        to_ac:         0,
     };
 
     if let Some(ph) = target_handle {
@@ -2839,6 +2845,7 @@ async fn cast_poison(
             to_dam:        0,
             dmg_reduction: 0,
             dot_damage:    3,
+            to_ac:         0,
         };
         let vnum = {
             let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) else {
@@ -2907,7 +2914,7 @@ async fn cast_debuff(
         let mut w = world.lock().await;
         let aff = crate::character::Affect {
             skill, duration,
-            to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0,
+            to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 0,
         };
         let vnum = {
             let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) else {
@@ -3075,6 +3082,71 @@ async fn cast_cure_critic(
     CmdOutput::text(format!(
         "\r\nYour healing magic restores {} ({} HP).\r\n", ph.name, heal,
     ))
+}
+
+/// Shared shape for self/target-player buff spells (Strength, Armor).
+/// Picks per-skill duration + (to_dam, to_ac) modifiers and refresh-
+/// stacks via Character::apply_affect.
+async fn cast_buff(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+    skill:   crate::character::Skill,
+) -> CmdOutput {
+    me.mana -= skill.mana_cost();
+    let (duration, to_dam, to_ac, self_msg, room_msg) = match skill {
+        crate::character::Skill::Strength => (
+            6 + learned as i32 / 10,
+            1 + learned as i32 / 30, 0,
+            "Your muscles surge with newfound strength.\r\n",
+            "{} looks stronger.\r\n",
+        ),
+        crate::character::Skill::Armor => (
+            8 + learned as i32 / 10,
+            0, 20,
+            "A shimmering layer of force wraps around you.\r\n",
+            "A shimmering layer of force wraps around {}.\r\n",
+        ),
+        _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
+    };
+
+    // Resolve target — self if no arg, else named player in room.
+    let target_self = target_kw.is_empty()
+        || target_kw.eq_ignore_ascii_case(&me.name);
+    if target_self {
+        me.apply_affect(crate::character::Affect {
+            skill, duration,
+            to_hit: 0, to_dam, dmg_reduction: 0, dot_damage: 0, to_ac,
+        });
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &room_msg.replace("{}", &me.name));
+        return CmdOutput::text(format!("\r\n{}", self_msg));
+    }
+
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text(format!("\r\nNo one named '{target_kw}' is here.\r\n"));
+    };
+    {
+        let mut c = ph.character.lock().await;
+        c.apply_affect(crate::character::Affect {
+            skill, duration,
+            to_hit: 0, to_dam, dmg_reduction: 0, dot_damage: 0, to_ac,
+        });
+    }
+    let _ = ph.send.send(format!("\r\n{} casts {} on you.\r\n", me.name, skill.name()));
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &room_msg.replace("{}", &ph.name));
+    CmdOutput::text(format!("\r\nYou cast {} on {}.\r\n", skill.name(), ph.name))
 }
 
 async fn cast_identify(
@@ -3706,6 +3778,46 @@ async fn do_door(
     CmdOutput::text(format!("\r\nYou {verb} the {kw_short}.\r\n"))
 }
 
+/// `search` — peek for hidden exits in the current room.  Always
+/// succeeds for now (a future tweak could roll vs class/perception).
+/// Lists each hidden direction + door keyword and broadcasts a "X
+/// searches the area." line so other players can see what you're up
+/// to.  No-op if the room has no hidden exits.
+async fn do_search(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::EX_HIDDEN;
+    let w = world.lock().await;
+    let Some(r) = w.rooms.get(&me.current_room) else {
+        return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+    };
+    let mut found = Vec::new();
+    for d in Direction::ALL {
+        if let Some(e) = &r.exits[d as usize] {
+            if e.to_room == crate::world::NOWHERE { continue; }
+            if (e.exit_info & EX_HIDDEN) == 0 { continue; }
+            let kw = if e.keyword.is_empty() { "passage".to_string() }
+                     else { e.keyword.split_whitespace().next().unwrap_or("passage").to_string() };
+            found.push((d, kw));
+        }
+    }
+    drop(w);
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} searches the area.\r\n", me.name));
+    drop(cl);
+    if found.is_empty() {
+        return CmdOutput::text("\r\nYou find nothing of interest.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nYou find:\r\n");
+    for (d, kw) in found {
+        s.push_str(&format!("  A hidden {kw} to the {}.\r\n", d.name()));
+    }
+    CmdOutput::text(s)
+}
+
 async fn do_pick(
     arg: &str,
     me: &mut Character,
@@ -4238,6 +4350,11 @@ async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     for d in Direction::ALL {
         if let Some(e) = &r.exits[d as usize] {
             if e.to_room == crate::world::NOWHERE { continue; }
+            // EX_HIDDEN exits don't show up in obvious exits — players
+            // have to `search` to find them.  Immortals see everything.
+            if (e.exit_info & crate::world::EX_HIDDEN) != 0 && me.level < LVL_IMMORT {
+                continue;
+            }
             any = true;
             let to_name = w.rooms.get(&e.to_room)
                 .map(|r| r.name.as_str())
@@ -6394,10 +6511,21 @@ pub async fn render_room(
         s.push_str("\r\n");
     }
 
-    // Exits
+    // Exits — EX_HIDDEN ones are suppressed for mortals.  Viewer's level
+    // comes from the cached PlayerHandle level (registry).
+    let viewer_level: i32 = match viewer_id {
+        Some(id) => {
+            let cl = chars.lock().await;
+            let lvl = cl.iter().find(|p| p.id == id).map(|p| p.level).unwrap_or(0);
+            lvl
+        }
+        None => 0,
+    };
     let exits: Vec<&str> = Direction::ALL.iter()
         .filter(|d| r.exits[**d as usize].as_ref()
-            .map(|e| e.to_room != crate::world::NOWHERE)
+            .map(|e| e.to_room != crate::world::NOWHERE
+                && (viewer_level >= LVL_IMMORT
+                    || e.exit_info & crate::world::EX_HIDDEN == 0))
             .unwrap_or(false))
         .map(|d| d.name())
         .collect();
