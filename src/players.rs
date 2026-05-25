@@ -124,6 +124,8 @@ pub struct PlayerRecord {
     pub dex:           i32,
     pub con:           i32,
     pub cha:           i32,
+    /// Skill name → practice percent (0..=100).
+    pub skills:        std::collections::HashMap<String, u8>,
 }
 
 impl PlayerRecord {
@@ -288,6 +290,15 @@ impl PlayerDb {
                 "Dex"  => rec.dex  = val.parse().unwrap_or(0),
                 "Con"  => rec.con  = val.parse().unwrap_or(0),
                 "Cha"  => rec.cha  = val.parse().unwrap_or(0),
+                "Skil" => {
+                    // "Skil: <name> <percent>"
+                    let mut parts = val.split_ascii_whitespace();
+                    if let (Some(name), Some(pct)) = (parts.next(), parts.next()) {
+                        if let Ok(p) = pct.parse::<u8>() {
+                            rec.skills.insert(name.to_string(), p);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -344,6 +355,11 @@ impl PlayerDb {
         if rec.dex  != 0 { writeln!(f, "Dex : {}", rec.dex)?;  }
         if rec.con  != 0 { writeln!(f, "Con : {}", rec.con)?;  }
         if rec.cha  != 0 { writeln!(f, "Cha : {}", rec.cha)?;  }
+        let mut sk_names: Vec<&String> = rec.skills.keys().collect();
+        sk_names.sort();
+        for name in sk_names {
+            writeln!(f, "Skil: {} {}", name, rec.skills[name])?;
+        }
 
         Ok(())
     }

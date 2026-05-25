@@ -195,7 +195,10 @@ pub async fn handle_connection(
                 // otherwise initialise defaults.  Same for ability scores —
                 // any zero scores get freshly rolled (3d6) on this login.
                 let p_ref     = session.player.as_ref();
-                let default_hp = Character::init_hp(session.level);
+                // Class-aware default HP: warriors get more, magic-users less.
+                let cls       = p_ref.map(|p| p.class).unwrap_or(crate::players::Class::Undefined);
+                let con_score = p_ref.map(|p| p.con).filter(|v| *v > 0).unwrap_or(12);
+                let default_hp = Character::init_hp_for_class(cls, con_score, session.level.max(1));
                 let max_hp    = p_ref.map(|p| p.max_hp).filter(|h| *h > 0).unwrap_or(default_hp);
                 let hp        = p_ref.map(|p| p.hp).filter(|h| *h > 0).unwrap_or(max_hp);
                 let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
@@ -222,6 +225,18 @@ pub async fn handle_connection(
                     con:          ab(p_ref.map(|p| p.con ).unwrap_or(0)),
                     cha:          ab(p_ref.map(|p| p.cha ).unwrap_or(0)),
                     fighting:     None,
+                    skills:       {
+                        // Translate saved skill names → Skill enum values.
+                        let mut m = std::collections::HashMap::new();
+                        if let Some(p) = p_ref {
+                            for (k, v) in &p.skills {
+                                if let Some(skill) = crate::character::Skill::from_save_key(k) {
+                                    m.insert(skill, *v);
+                                }
+                            }
+                        }
+                        m
+                    },
                 };
 
                 // Restore persisted inventory + equipment by spawning fresh
@@ -426,6 +441,10 @@ async fn run_game_session(
             rec.dex    = me.dex;
             rec.con    = me.con;
             rec.cha    = me.cha;
+            rec.skills.clear();
+            for (skill, pct) in &me.skills {
+                rec.skills.insert(skill.save_key().to_string(), *pct);
+            }
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }

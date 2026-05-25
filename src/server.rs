@@ -56,6 +56,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn periodic zone reset tick -------------------------------------
     db::spawn_zone_reset_tick(Arc::clone(&world));
 
+    // --- Spawn corpse/decay tick -------------------------------------------
+    db::spawn_decay_tick(Arc::clone(&world));
+
     // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr)

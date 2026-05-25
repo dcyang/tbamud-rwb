@@ -11,7 +11,68 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use std::collections::HashMap;
+
 use crate::{players::{Class, Sex}, world::RoomVnum};
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/// A combat skill. Mirrors a tiny slice of the SKILL_* defines in spells.h
+/// (CircleMUD doesn't separate spells and skills; we will eventually).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Skill {
+    Kick,
+    Bash,
+    Backstab,
+}
+
+impl Skill {
+    /// Parse a player-typed skill name (case-insensitive).
+    pub fn parse(s: &str) -> Option<Skill> {
+        match s.to_ascii_lowercase().as_str() {
+            "kick"     => Some(Skill::Kick),
+            "bash"     => Some(Skill::Bash),
+            "backstab" => Some(Skill::Backstab),
+            _ => None,
+        }
+    }
+
+    /// Canonical name (lowercase, single word).
+    pub fn name(self) -> &'static str {
+        match self {
+            Skill::Kick     => "kick",
+            Skill::Bash     => "bash",
+            Skill::Backstab => "backstab",
+        }
+    }
+
+    /// Which classes can learn this skill. Mirrors the per-class spell_info
+    /// tables in spell_parser.c.
+    pub fn allowed_classes(self) -> &'static [Class] {
+        match self {
+            Skill::Kick     => &[Class::Warrior, Class::Thief, Class::Cleric],
+            Skill::Bash     => &[Class::Warrior],
+            Skill::Backstab => &[Class::Thief],
+        }
+    }
+
+    pub fn is_class_allowed(self, class: Class) -> bool {
+        self.allowed_classes().contains(&class)
+    }
+
+    /// Storage key for serialisation in the player file.
+    pub fn save_key(self) -> &'static str { self.name() }
+
+    /// Inverse of save_key.
+    pub fn from_save_key(s: &str) -> Option<Skill> {
+        Self::parse(s)
+    }
+}
+
+/// All known skills — iteration order for `skills` command + persistence.
+pub const ALL_SKILLS: &[Skill] = &[Skill::Kick, Skill::Bash, Skill::Backstab];
 
 /// Who/what a character is fighting. Mob instance ids are positive; we use
 /// the same numeric space for player ids (they're both `u32`) — the
@@ -51,6 +112,9 @@ pub struct Character {
     pub cha:          i32,
     /// Current opponent, if any.
     pub fighting:     Option<Target>,
+    /// Learned skill levels — value is "practice percent" (0..=100).  Only
+    /// skills the player has invested in appear here.
+    pub skills:       HashMap<Skill, u8>,
 }
 
 /// STR-based damage modifier — mirrors str_app[].todam in constants.c
@@ -179,11 +243,34 @@ impl Character {
     /// Derive starting HP for a brand-new mortal. Immortals (lvl >= 34) get
     /// a much higher pool. Mirrors very loosely what CircleMUD does in
     /// new-character init — exact constants will come with the stat system.
+    /// Class-specific HP gain per level. Mirrors the CircleMUD ranges in
+    /// constants.c::Class_apply_table[].hit_dice.
+    pub fn hp_per_level(class: Class) -> i32 {
+        match class {
+            Class::Warrior   => 12,
+            Class::Cleric    => 9,
+            Class::Thief     => 8,
+            Class::MagicUser => 6,
+            Class::Undefined => 8,
+        }
+    }
+
     pub fn init_hp(level: i32) -> i32 {
-        // Starting HP for a brand-new mortal.  Generous enough to survive
-        // a sparring match in the temple courtyard.  Subsequent sessions
-        // restore from the saved value (Hit: cur/max in the player file).
+        // Class-independent default; per-class scaling is applied on
+        // level-up.  Mortals start at 50 (+ a small ramp per level), but
+        // the actual starting HP for a brand-new character is set in
+        // descriptor.rs using init_hp_for_class().
         if level >= 34 { 1000 } else { 50 + level * 10 }
+    }
+
+    /// Starting HP for a freshly-rolled character.  Combines a flat base
+    /// with the per-level gain for the chosen class.
+    pub fn init_hp_for_class(class: Class, con: i32, level: i32) -> i32 {
+        if level >= 34 { return 1000; }
+        let base = 30;
+        let per_lvl = Self::hp_per_level(class);
+        let con_bonus = (con - 10).max(0) / 2;
+        base + per_lvl * level.max(1) + con_bonus * level.max(1)
     }
 
     /// Max mortal level. Above this you're an immortal (LVL_IMMORT = 34 in
@@ -211,9 +298,10 @@ impl Character {
             && self.exp >= Self::exp_for_level(self.level)
         {
             self.level += 1;
-            // +HP, heal to full.
-            let hp_gain = 10 + self.con / 2;
-            self.max_hp += hp_gain;
+            // Class-specific HP gain + CON bonus, heal to full.
+            let per_lvl = Self::hp_per_level(self.class);
+            let con_bonus = (self.con - 10).max(0) / 2;
+            self.max_hp += per_lvl + con_bonus;
             self.hp = self.max_hp;
             gained += 1;
         }

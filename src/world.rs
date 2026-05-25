@@ -181,11 +181,17 @@ pub struct ObjInstance {
     /// has no prototype.  The string is the mob's short_descr (e.g.
     /// "the gelatinous blob"), used in rendering and keyword matching.
     pub corpse_of: Option<String>,
+    /// Seconds remaining until the object decays.  Currently used only by
+    /// corpses; regular objects have None.
+    pub decay_in: Option<i32>,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
 /// no prototype). Always checked alongside `corpse_of`.
 pub const CORPSE_VNUM: ObjVnum = -1;
+
+/// Seconds before a corpse decays and is removed from the world (5 min).
+pub const CORPSE_DECAY_SECS: i32 = 300;
 
 /// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
 /// gameplay (containers, weapons, armor).
@@ -310,6 +316,50 @@ impl World {
         None
     }
 
+    /// Run one decay tick: decrement `decay_in` on every object that has
+    /// it set; when an object reaches 0, dump its contents into its room
+    /// (corpse contents fall to the floor) and remove it from the world.
+    /// Returns the number of objects extracted (for logging).
+    pub fn decay_tick(&mut self, seconds: i32) -> usize {
+        let mut to_remove: Vec<u32> = Vec::new();
+        // Phase 1: decrement timers, identify expired.
+        for o in self.obj_instances.iter_mut() {
+            if let Some(t) = o.decay_in {
+                let next = t - seconds;
+                if next <= 0 {
+                    to_remove.push(o.id);
+                } else {
+                    o.decay_in = Some(next);
+                }
+            }
+        }
+        // Phase 2: for each expired corpse, move contents to its room.
+        for id in &to_remove {
+            let (room, contents) = match self.obj_instances.iter().find(|o| o.id == *id) {
+                Some(o) => (o.in_room, o.contents.clone()),
+                None => continue,
+            };
+            if room != NOWHERE {
+                if let Some(r) = self.rooms.get_mut(&room) {
+                    r.objects.retain(|&i| i != *id);
+                    for &cid in &contents {
+                        r.objects.push(cid);
+                    }
+                }
+                for &cid in &contents {
+                    if let Some(child) = self.obj_instances.iter_mut().find(|o| o.id == cid) {
+                        child.in_room = room;
+                    }
+                }
+            }
+        }
+        // Phase 3: drop the expired instances themselves.
+        if !to_remove.is_empty() {
+            self.obj_instances.retain(|o| !to_remove.contains(&o.id));
+        }
+        to_remove.len()
+    }
+
     /// Create a synthetic corpse object containing the given vector of
     /// child instance ids.  Places the corpse in `room` and returns the
     /// new instance id.  `mob_short` becomes the corpse's identifying
@@ -333,6 +383,7 @@ impl World {
             in_room: room,
             contents,
             corpse_of: Some(mob_short.to_string()),
+            decay_in: Some(CORPSE_DECAY_SECS),
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -350,6 +401,7 @@ impl World {
             id, vnum, in_room: NOWHERE,
             contents: Vec::new(),
                         corpse_of: None,
+                        decay_in: None,
         });
         Some(id)
     }

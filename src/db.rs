@@ -224,6 +224,30 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 // Periodic zone reset tick
 // ---------------------------------------------------------------------------
 
+/// Background task that decays timed objects (currently just corpses).
+/// Ticks every 60 seconds; per tick subtracts 60 from each timed object's
+/// `decay_in`, dumping contents into the room when timers hit zero.
+pub fn spawn_decay_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
+    const TICK_SECONDS: u64 = 60;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;  // skip the immediate first fire
+        loop {
+            interval.tick().await;
+            let mut w = world.lock().await;
+            let removed = w.decay_tick(TICK_SECONDS as i32);
+            if removed > 0 {
+                tracing::debug!(removed, "Object decay tick");
+            }
+        }
+    });
+}
+
 /// Background task that re-runs reset_zone() for every zone on a fixed
 /// interval.  reset_zone respects each command's `max_existing` cap, so
 /// rooms whose mobs/objects are already populated stay unchanged — only
@@ -789,6 +813,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                         contents: Vec::new(),
                         corpse_of: None,
+                        decay_in: None,
                     });
                     last_cmd_ok = true;
                 } else if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
@@ -798,6 +823,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         id, vnum: cmd.arg1, in_room: cmd.arg3,
                         contents: Vec::new(),
                         corpse_of: None,
+                        decay_in: None,
                     });
                     last_cmd_ok = true;
                 } else {
@@ -826,6 +852,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
                         corpse_of: None,
+                        decay_in: None,
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -854,6 +881,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
                         corpse_of: None,
+                        decay_in: None,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {

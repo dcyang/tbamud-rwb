@@ -40,7 +40,8 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell",
-    "kick", "bash",
+    "kick", "bash", "backstab",
+    "skills", "practice",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
@@ -115,6 +116,9 @@ pub async fn dispatch_command(
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
+        Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("skills")    => do_skills(me),
+        Some("practice")  => do_practice(rest, me),
         Some("give")      => do_give(rest, me, world, chars).await,
         Some("examine")   => do_examine(rest, me, world, chars).await,
         Some("list")      => do_list(me, world).await,
@@ -538,6 +542,57 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     CmdOutput::text(s)
 }
 
+fn do_skills(me: &Character) -> CmdOutput {
+    use crate::character::ALL_SKILLS;
+    let mut s = String::from("\r\nSkills available to your class:\r\n");
+    let mut any = false;
+    for &skill in ALL_SKILLS {
+        if !skill.is_class_allowed(me.class) { continue; }
+        any = true;
+        let pct = *me.skills.get(&skill).unwrap_or(&0);
+        s.push_str(&format!("  {:<10} {:>3}%\r\n", skill.name(), pct));
+    }
+    if !any {
+        s.push_str("  (none — your class has no learnable skills)\r\n");
+    }
+    CmdOutput::text(s)
+}
+
+fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
+    if arg.is_empty() {
+        return do_skills(me);
+    }
+    let Some(skill) = crate::character::Skill::parse(arg) else {
+        return CmdOutput::text(format!("\r\nThere is no skill called '{arg}'.\r\n"));
+    };
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text(format!(
+            "\r\n{} is not a {:?} skill.\r\n", uppercase_first(skill.name()), me.class,
+        ));
+    }
+    // Each practice yields a fixed +10% (cap 90%).  In CircleMUD this also
+    // costs a practice point (cleared on level-up); we ignore the budget for
+    // now — first pass at a working skill loop.
+    let pct = me.skills.entry(skill).or_insert(0);
+    if *pct >= 90 {
+        return CmdOutput::text(format!(
+            "\r\nYou know everything you can about {} ({}%).\r\n", skill.name(), pct,
+        ));
+    }
+    *pct = (*pct + 10).min(90);
+    CmdOutput::text(format!(
+        "\r\nYou practice {} a bit. ({}%)\r\n", skill.name(), pct,
+    ))
+}
+
+fn uppercase_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + chars.as_str(),
+        None    => String::new(),
+    }
+}
+
 fn do_exp(me: &Character) -> CmdOutput {
     let next = Character::exp_for_level(me.level);
     if next == i64::MAX {
@@ -635,8 +690,7 @@ async fn do_kill(
 // Combat skills (kick, bash)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-enum Skill { Kick, Bash }
+use crate::character::Skill;
 
 async fn do_skill(
     arg: &str,
@@ -647,6 +701,21 @@ async fn do_skill(
 ) -> CmdOutput {
     use rand::Rng;
     use crate::db::dice;
+
+    // Class restriction.
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text(format!(
+            "\r\nYou do not know how to {}.\r\n", skill.name(),
+        ));
+    }
+    // Must have practised the skill at all.
+    let learned = *me.skills.get(&skill).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(format!(
+            "\r\nYou are unfamiliar with the art of {}. Try `practice {}`.\r\n",
+            skill.name(), skill.name(),
+        ));
+    }
 
     // Choose target: either the explicit arg, or our current fighting target.
     let target_mob_id: Option<u32> = if !arg.is_empty() {
@@ -665,41 +734,47 @@ async fn do_skill(
     };
 
     let Some(mob_id) = target_mob_id else {
-        return CmdOutput::text(match skill {
-            Skill::Kick => "\r\nKick whom?\r\n",
-            Skill::Bash => "\r\nBash whom?\r\n",
-        }.to_string());
+        return CmdOutput::text(format!("\r\n{} whom?\r\n",
+            uppercase_first(skill.name())));
     };
 
-    // Bash needs a shield; kick has no requirement.
+    // Per-skill prerequisites.
     if let Skill::Bash = skill {
         if me.equipment[crate::character::WEAR_SHIELD].is_none() {
             return CmdOutput::text("\r\nYou need a shield to bash effectively.\r\n");
         }
     }
+    if let Skill::Backstab = skill {
+        // Backstab needs a piercing weapon AND target not yet fighting.
+        if me.equipment[crate::character::WEAR_WIELD].is_none() {
+            return CmdOutput::text("\r\nYou need to wield a weapon to backstab.\r\n");
+        }
+        if me.fighting.is_some() {
+            return CmdOutput::text("\r\nYou can't backstab someone while in combat.\r\n");
+        }
+    }
 
-    // Roll damage and to-hit.
+    // Roll to-hit (modified by skill %) and damage.
     let (hit, dmg) = {
         let mut rng = rand::thread_rng();
-        match skill {
-            Skill::Kick => {
-                // 80% hit, 1d6 + level/2 + str bonus
-                let hit = rng.gen_range(0..100) < 80;
-                let dmg = dice(1, 6) + me.level / 2
-                    + crate::character::str_damage_bonus(me.str_);
-                (hit, dmg.max(1))
-            }
-            Skill::Bash => {
-                // 50% hit, 2d4 + level + str bonus
-                let hit = rng.gen_range(0..100) < 50;
-                let dmg = dice(2, 4) + me.level
-                    + crate::character::str_damage_bonus(me.str_);
-                (hit, dmg.max(1))
-            }
-        }
+        let str_b = crate::character::str_damage_bonus(me.str_);
+        // Hit chance baseline + skill bonus.
+        let base_hit = match skill {
+            Skill::Kick     => 60,
+            Skill::Bash     => 30,
+            Skill::Backstab => 40,
+        };
+        let hit_chance = (base_hit + learned as i32 / 2).min(95);
+        let hit = rng.gen_range(0..100) < hit_chance;
+        let dmg = match skill {
+            Skill::Kick     => dice(1, 6) + me.level / 2 + str_b,
+            Skill::Bash     => dice(2, 4) + me.level + str_b,
+            Skill::Backstab => dice(3, 6) + me.level * 2 + str_b,
+        };
+        (hit, dmg.max(1))
     };
 
-    let verb = match skill { Skill::Kick => "kick", Skill::Bash => "bash" };
+    let verb = skill.name();
 
     // Apply.
     let (mob_name, mob_dead, mob_room) = {
@@ -1308,6 +1383,10 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.dex    = me.dex;
             r.con    = me.con;
             r.cha    = me.cha;
+            r.skills.clear();
+            for (skill, pct) in &me.skills {
+                r.skills.insert(skill.save_key().to_string(), *pct);
+            }
             r
         }
         Err(e) => {
