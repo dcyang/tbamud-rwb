@@ -59,6 +59,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn corpse/decay tick -------------------------------------------
     db::spawn_decay_tick(Arc::clone(&world));
 
+    // --- Spawn mob wander tick ---------------------------------------------
+    db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
+
     // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     let listener = TcpListener::bind(addr)

@@ -319,6 +319,101 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 // Periodic zone reset tick
 // ---------------------------------------------------------------------------
 
+/// Background task: every 30 seconds, each non-sentinel, non-fighting
+/// mob has ~25% chance to wander to a random adjacent room.  Sentinel
+/// mobs (MOB_SENTINEL) stay put, as do mobs in combat.  Mobs flagged
+/// MOB_STAY_ZONE refuse to cross zone boundaries.
+pub fn spawn_wander_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const TICK_SECONDS: u64 = 30;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;  // skip the immediate first fire
+        loop {
+            interval.tick().await;
+            wander_pass(&world, &chars).await;
+        }
+    });
+}
+
+/// Synchronous helper: pick wander targets for all eligible mobs.  Keeps
+/// the !Send `rand::thread_rng` out of the async future.
+fn compute_wander_moves(
+    w: &World,
+) -> Vec<(u32, String, crate::world::RoomVnum, crate::world::RoomVnum, crate::world::Direction)> {
+    use rand::{Rng, seq::SliceRandom};
+    let mut rng = rand::thread_rng();
+    let mut v = Vec::new();
+    for m in &w.mob_instances {
+        if m.fighting.is_some() { continue; }
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { continue; };
+        let flags = proto.mob_flags[0];
+        if flags & crate::world::MOB_SENTINEL != 0 { continue; }
+        if rng.gen_range(0..100) >= 25 { continue; }
+        let Some(room) = w.rooms.get(&m.in_room) else { continue; };
+        let stay_zone = flags & crate::world::MOB_STAY_ZONE != 0;
+        let mob_zone = room.zone;
+        let mut candidates: Vec<(crate::world::Direction, crate::world::RoomVnum)> = Vec::new();
+        for d in crate::world::Direction::ALL {
+            if let Some(e) = &room.exits[d as usize] {
+                if e.to_room == crate::world::NOWHERE { continue; }
+                let Some(target) = w.rooms.get(&e.to_room) else { continue; };
+                if stay_zone && target.zone != mob_zone { continue; }
+                candidates.push((d, e.to_room));
+            }
+        }
+        if let Some(&(dir, to)) = candidates.choose(&mut rng) {
+            v.push((m.id, proto.short_descr.clone(), m.in_room, to, dir));
+        }
+    }
+    v
+}
+
+async fn wander_pass(
+    world: &std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: &crate::character::SharedChars,
+) {
+    // Phase 1: snapshot candidate moves while holding the world lock.
+    // The RNG is created and dropped entirely within this synchronous
+    // block so the resulting future stays Send (rand::thread_rng() is !Send).
+    let moves: Vec<(u32, String, crate::world::RoomVnum, crate::world::RoomVnum, crate::world::Direction)>;
+    {
+        let w = world.lock().await;
+        moves = compute_wander_moves(&w);
+    }
+
+    if moves.is_empty() { return; }
+
+    // Phase 2: apply moves under a fresh lock.
+    let cl = chars.lock().await;
+    let mut w = world.lock().await;
+    for (mob_id, mob_name, from, to, dir) in moves {
+        // Skip if mob has since started fighting or its room changed.
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { continue; };
+        if m.fighting.is_some() || m.in_room != from { continue; }
+        // Move the mob between room mob-lists.
+        if let Some(r) = w.rooms.get_mut(&from) {
+            r.mobs.retain(|&id| id != mob_id);
+        }
+        if let Some(r) = w.rooms.get_mut(&to) {
+            r.mobs.push(mob_id);
+        }
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.in_room = to;
+        }
+        // Broadcast to both rooms.
+        cl.broadcast_room(from, None, &format!("{mob_name} leaves {}.\r\n", dir.name()));
+        cl.broadcast_room(to,   None, &format!("{mob_name} arrives.\r\n"));
+    }
+}
+
 /// Background task that decays timed objects (currently just corpses).
 /// Ticks every 60 seconds; per tick subtracts 60 from each timed object's
 /// `decay_in`, dumping contents into the room when timers hit zero.

@@ -292,8 +292,20 @@ async fn do_get(
         }
     };
 
-    // Capture the object's vnum for quest-pickup hook.
-    let picked_vnum = w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum);
+    // Capture the object's vnum + weight for quest hook + carry-cap check.
+    let (picked_vnum, picked_weight) = w.obj_instances.iter().find(|o| o.id == iid)
+        .map(|o| (Some(o.vnum), w.obj_protos.get(&o.vnum).map(|p| p.weight).unwrap_or(0)))
+        .unwrap_or((None, 0));
+
+    // Enforce carry weight cap.
+    let cap = crate::character::str_carry_cap(me.str_);
+    let cur = total_carry_weight(me, &w);
+    if cur + picked_weight > cap {
+        return CmdOutput::text(format!(
+            "\r\n{} is too heavy for you to carry. ({} + {} > {} lb)\r\n",
+            name, cur, picked_weight, cap,
+        ));
+    }
 
     // Mutate world: remove from room, add to player's inventory list,
     // update the instance's in_room.
@@ -773,7 +785,7 @@ async fn do_quest_complete(
     let Some(vnum) = me.active_quest else {
         return CmdOutput::text("\r\nYou have no active quest.\r\n");
     };
-    let (qname, done_msg, qm_vnum, gold, exp, obj_reward, can_turn_in) = {
+    let (qname, done_msg, qm_vnum, gold, exp, obj_reward, can_turn_in, next_q) = {
         let w = world.lock().await;
         let Some(q) = w.quests.get(&vnum) else {
             return CmdOutput::text("\r\nYour quest's data has been lost.\r\n");
@@ -785,7 +797,7 @@ async fn do_quest_complete(
                 .collect())
             .unwrap_or_default();
         let qm_here = room_mob_vnums.contains(&q.qm);
-        (q.name.clone(), q.done.clone(), q.qm, q.gold_reward, q.exp_reward, q.obj_reward, qm_here)
+        (q.name.clone(), q.done.clone(), q.qm, q.gold_reward, q.exp_reward, q.obj_reward, qm_here, q.next_quest)
     };
     if !can_turn_in {
         return CmdOutput::text(
@@ -820,13 +832,49 @@ async fn do_quest_complete(
     me.quest_progress = 0;
     let _ = qm_vnum;
 
-    let cl = chars.lock().await;
-    cl.broadcast_room(me.current_room, Some(me.id),
-        &format!("{} completes a quest!\r\n", me.name));
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} completes a quest!\r\n", me.name));
+    }
+
+    // Auto-join the next quest in the chain, if any.  We re-check the
+    // questmaster-is-here invariant since the next quest may belong to a
+    // different master; if so, we just announce the chain and let the
+    // player seek them out.
+    let mut chain_msg = String::new();
+    if next_q != -1 && next_q != 0 {
+        let chain_ok: Option<(String, String, bool)> = {
+            let w = world.lock().await;
+            w.quests.get(&next_q).map(|nq| {
+                let mob_vnums: Vec<i32> = w.rooms.get(&me.current_room)
+                    .map(|r| r.mobs.iter()
+                        .filter_map(|&mid|
+                            w.mob_instances.iter().find(|m| m.id == mid).map(|m| m.vnum))
+                        .collect())
+                    .unwrap_or_default();
+                let here = mob_vnums.contains(&nq.qm);
+                (nq.name.clone(), nq.desc.clone(), here)
+            })
+        };
+        if let Some((nname, ndesc, here)) = chain_ok {
+            if here {
+                me.active_quest = Some(next_q);
+                me.quest_progress = 0;
+                chain_msg = format!(
+                    "\r\n=== Next Quest: {nname} ===\r\n{ndesc}\r\n",
+                );
+            } else {
+                chain_msg = format!(
+                    "\r\n(Seek the next questmaster to continue: #{next_q})\r\n",
+                );
+            }
+        }
+    }
 
     CmdOutput::text(format!(
         "\r\n=== Quest Complete: {qname} ===\r\n{done_msg}\r\n\
-         Rewards: {gold} gold, {exp} exp{obj_text}\r\n",
+         Rewards: {gold} gold, {exp} exp{obj_text}\r\n{chain_msg}",
         obj_text = if obj_reward >= 0 { format!(", obj #{obj_reward}") } else { String::new() },
     ))
 }
@@ -1041,6 +1089,25 @@ fn do_exp(me: &Character) -> CmdOutput {
         "\r\nLevel {}: {} experience, {} until next level.\r\n",
         me.level, me.exp, (next - me.exp).max(0),
     ))
+}
+
+/// Sum of weights of every object the player is carrying (inventory +
+/// equipment).  Container contents count toward the carrier's weight.
+pub fn total_carry_weight(me: &Character, w: &World) -> i32 {
+    let mut sum = 0;
+    let mut stack: Vec<u32> = Vec::new();
+    stack.extend(me.inventory.iter().copied());
+    stack.extend(me.equipment.iter().filter_map(|s| *s));
+    while let Some(iid) = stack.pop() {
+        if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+            if let Some(p) = w.obj_protos.get(&o.vnum) {
+                sum += p.weight;
+            }
+            // Descend into container contents.
+            stack.extend(o.contents.iter().copied());
+        }
+    }
+    sum
 }
 
 /// Total AC = sum of worn ITEM_ARMOR value[0] + DEX defensive bonus.

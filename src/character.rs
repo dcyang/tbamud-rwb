@@ -305,6 +305,21 @@ pub fn str_damage_bonus(str_score: i32) -> i32 {
     TODAM[i]
 }
 
+/// STR-based carry weight cap.  Mirrors str_app[].carry_w in constants.c
+/// (the third column).  Clamped lookup at the table edges.
+pub fn str_carry_cap(str_score: i32) -> i32 {
+    static CARRY: &[i32] = &[
+        // 0  1  2  3  4  5  6  7  8  9
+           0, 3, 3, 10, 25, 55, 80, 90,100,100,
+        //10 11 12 13 14 15 16 17 18 19
+          115,115,140,140,170,170,195,220,255,640,
+        //20 21 22 23 24 25
+          700,810,970,1130,1440,1750,
+    ];
+    let i = str_score.clamp(0, (CARRY.len() - 1) as i32) as usize;
+    CARRY[i]
+}
+
 /// DEX-based AC bonus — mirrors dex_app[].defensive in constants.c.
 /// Negative values reduce AC (better defense).  Returned with the same
 /// sign convention as armor: more positive = better.  So we negate the
