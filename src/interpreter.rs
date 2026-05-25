@@ -69,7 +69,7 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
-    "follow", "group", "gtell",
+    "follow", "group", "gtell", "title",
     "goto", "transfer", "purge", "shutdown", "stat",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -182,6 +182,7 @@ pub async fn dispatch_command(
         Some("follow")    => do_follow(rest, me, chars).await,
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
+        Some("title")     => do_title(rest, me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -1071,6 +1072,26 @@ async fn do_stat(
     CmdOutput::text("\r\nNo one and nothing matches that here.\r\n".to_string())
 }
 
+/// `title <text>` — set the vanity title shown after your name on
+/// `who` and `score`.  Empty arg or "-" clears.  Cap at 60 chars,
+/// strip control bytes to keep the listing tidy.
+fn do_title(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() || arg == "-" {
+        me.title.clear();
+        return CmdOutput::text("\r\nTitle cleared.\r\n".to_string());
+    }
+    let sanitized: String = arg.chars()
+        .filter(|c| !c.is_control())
+        .take(60)
+        .collect();
+    if sanitized.is_empty() {
+        return CmdOutput::text("\r\nTitle was empty after stripping control bytes.\r\n".to_string());
+    }
+    me.title = sanitized;
+    CmdOutput::text(format!("\r\nTitle set: {}\r\n", me.title))
+}
+
 async fn do_where(
     me: &Character,
     world: &Arc<Mutex<World>>,
@@ -1099,12 +1120,27 @@ async fn do_where(
 }
 
 async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
+    // Snapshot titles outside the registry lock so we don't serialize on
+    // contended Character mutexes.
+    let titles: Vec<(u32, String)> = {
+        let cl = chars.lock().await;
+        let handles: Vec<_> = cl.iter().cloned().collect();
+        drop(cl);
+        let mut out = Vec::new();
+        for ph in handles {
+            let t = ph.character.lock().await.title.clone();
+            out.push((ph.id, t));
+        }
+        out
+    };
     let cl = chars.lock().await;
     let mut s = String::from("\r\nPlayers online:\r\n");
     let mut count = 0;
     for p in cl.iter() {
         let marker = if p.id == me.id { " (you)" } else { "" };
-        s.push_str(&format!("  [{:>2}] {}{}\r\n", p.level, p.name, marker));
+        let title = titles.iter().find(|(id, _)| *id == p.id).map(|(_, t)| t.as_str()).unwrap_or("");
+        let title_str = if title.is_empty() { String::new() } else { format!(" {title}") };
+        s.push_str(&format!("  [{:>2}] {}{}{}\r\n", p.level, p.name, title_str, marker));
         count += 1;
     }
     s.push_str(&format!("\r\n{count} player(s) online.\r\n"));
@@ -1126,10 +1162,15 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     let drink = if me.thirst < 0 { "satisfied".to_string() }
                 else if me.thirst == 0 { "parched".to_string() }
                 else { format!("{}/{} hours", me.thirst, MAX_THIRST) };
+    let name_line = if me.title.is_empty() {
+        format!("Name:  {}", me.name)
+    } else {
+        format!("Name:  {} {}", me.name, me.title)
+    };
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
-        me.name, me.level, me.hp, me.max_hp, me.mana, me.max_mana,
+        me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
@@ -4714,6 +4755,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.completed_quests = me.completed_quests.clone();
             r.hunger          = me.hunger;
             r.thirst          = me.thirst;
+            r.title           = me.title.clone();
             r
         }
         Err(e) => {

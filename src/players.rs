@@ -139,6 +139,8 @@ pub struct PlayerRecord {
     /// across login; the runtime tick decays them in real time.
     pub hunger:        i32,
     pub thirst:        i32,
+    /// Vanity title (empty for new chars).
+    pub title:         String,
 }
 
 impl PlayerRecord {
@@ -336,6 +338,7 @@ impl PlayerDb {
                 }
                 "Hung" => rec.hunger = val.parse().unwrap_or(24),
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
+                "Titl" => rec.title  = val.to_string(),
                 _ => {}
             }
         }
@@ -411,6 +414,7 @@ impl PlayerDb {
         }
         writeln!(f, "Hung: {}", rec.hunger)?;
         writeln!(f, "Thst: {}", rec.thirst)?;
+        if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
 
         Ok(())
     }

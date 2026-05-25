@@ -328,6 +328,9 @@ pub struct Character {
     /// Vnums of quests this character has already completed.  Used for
     /// prereq checks and to prevent re-collecting one-shot rewards.
     pub completed_quests: Vec<i32>,
+    /// Vanity title shown after the name on `who` and `score`.  Empty
+    /// for new characters; trimmed and length-capped on set.
+    pub title:        String,
     /// Hours of food remaining. Counts down each game-hour tick;
     /// reaching 0 starts deducting HP. `-1` is the "never hungry"
     /// sentinel used by immortals and applied by certain food affects.
