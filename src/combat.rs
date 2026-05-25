@@ -285,11 +285,20 @@ async fn resolve_mob_attack(
         return;
     };
 
-    // Roll mob damage from its prototype dice (dam_dice d dam_size + damroll).
-    // Reduce by AC/3 (armor) and again by the player's affect-based damage
-    // reduction (e.g. sanctuary).  Clamped to ≥ 1.
-    let dmg: i32 = {
-        let raw = {
+    // Decide whether this mob is a spellcaster and rolls a cast this round.
+    let cast_attempt = {
+        let w = world.lock().await;
+        let casts = w.mob_protos.get(&m.attacker_vnum)
+            .map(|p| should_cast(p))
+            .unwrap_or(false);
+        casts
+    } && rand::thread_rng().gen_range(0..100) < 30;
+
+    // Roll mob damage. Spell attacks (when cast_attempt) use a separate
+    // dice pool that ignores mundane AC but is still reduced by
+    // affect-based dmg_reduction (sanctuary). Mundane attacks go through AC.
+    let (dmg, is_spell): (i32, bool) = {
+        let raw_mundane = {
             let w = world.lock().await;
             match w.mob_protos.get(&m.attacker_vnum) {
                 Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
@@ -302,9 +311,15 @@ async fn resolve_mob_attack(
             let r  = me.affect_dmg_reduction();
             (ac, r)
         };
-        let after_ac = (raw - ac / 3).max(1);
-        let after_buff = (after_ac * (100 - reduction)) / 100;
-        after_buff.max(1)
+        if cast_attempt {
+            let raw = dice(2, 4) + m.level / 2;
+            let after = (raw * (100 - reduction)) / 100;
+            (after.max(1), true)
+        } else {
+            let after_ac = (raw_mundane - ac / 3).max(1);
+            let after = (after_ac * (100 - reduction)) / 100;
+            (after.max(1), false)
+        }
     };
 
     // Apply damage to the player; check death.
@@ -326,8 +341,17 @@ async fn resolve_mob_attack(
         (c.hp <= 0, c.current_room, short)
     };
 
-    let to_victim = format!("\r\n{mob_short_name} hits you for {dmg} damage.\r\n");
-    let to_room   = format!("\r\n{mob_short_name} hits {}.\r\n", ph.name);
+    let (to_victim, to_room) = if is_spell {
+        (
+            format!("\r\n{mob_short_name} conjures a glowing dart of force that strikes you for {dmg} damage!\r\n"),
+            format!("\r\n{mob_short_name} hurls a glowing dart of force at {}.\r\n", ph.name),
+        )
+    } else {
+        (
+            format!("\r\n{mob_short_name} hits you for {dmg} damage.\r\n"),
+            format!("\r\n{mob_short_name} hits {}.\r\n", ph.name),
+        )
+    };
     let _ = ph.send.send(to_victim);
     {
         let cl = chars.lock().await;
@@ -441,6 +465,20 @@ async fn player_death(
     let view = crate::interpreter::render_room(start_room, Some(ph.id), world, chars).await;
     let _ = ph.send.send(view);
     let _ = ph.send.send("\r\n> ".to_string());
+}
+
+/// Heuristic: should this mob attempt to cast a spell in combat?
+/// We don't have a class-on-mob field yet, so we infer from the mob's
+/// keywords / short_descr. Anything level 10+ whose name contains a
+/// caster archetype keyword qualifies.
+fn should_cast(p: &crate::world::MobProto) -> bool {
+    if p.level < 10 { return false; }
+    const KW: &[&str] = &[
+        "mage", "wizard", "sorcer", "witch", "warlock",
+        "priest", "cleric", "shaman", "druid", "necromancer",
+    ];
+    let bag = format!("{} {}", p.name.to_ascii_lowercase(), p.short_descr.to_ascii_lowercase());
+    KW.iter().any(|k| bag.contains(k))
 }
 
 // Tiny no-op so unused imports don't warn during incremental builds.

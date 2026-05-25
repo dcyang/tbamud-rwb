@@ -998,6 +998,8 @@ async fn do_cast(
         crate::character::Skill::CureLight    => cast_cure_light(target, me, chars, learned).await,
         crate::character::Skill::Bless        => cast_bless(target, me, chars, learned).await,
         crate::character::Skill::BurningHands => cast_burning_hands(me, world, chars, learned).await,
+        crate::character::Skill::Sanctuary    => cast_sanctuary(target, me, chars, learned).await,
+        crate::character::Skill::Harm         => cast_harm(target, me, world, chars, learned).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -1247,6 +1249,186 @@ async fn cast_bless(
             "\r\nYou feel righteous. (blessed for {} ticks)\r\n", dur,
         ))
     }
+}
+
+async fn cast_sanctuary(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    let target_handle: Option<crate::character::PlayerHandle> = if target_kw.is_empty() {
+        None
+    } else {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| {
+            p.current_room == me.current_room
+                && p.name.eq_ignore_ascii_case(target_kw)
+        }).cloned();
+        h
+    };
+    me.mana -= crate::character::Skill::Sanctuary.mana_cost();
+
+    let hit_chance = (70 + learned as i32 / 5).min(99);
+    if rand::thread_rng().gen_range(0..100) >= hit_chance {
+        return CmdOutput::text(
+            "\r\nYour prayer goes unanswered; the aura fails to form.\r\n".to_string(),
+        );
+    }
+
+    // Sanctuary: 50% damage reduction for 8 ticks (~16s).
+    let aff = crate::character::Affect {
+        skill:         crate::character::Skill::Sanctuary,
+        duration:      8 + (learned as i32 / 20),
+        to_hit:        0,
+        to_dam:        0,
+        dmg_reduction: 50,
+    };
+
+    if let Some(ph) = target_handle {
+        let dur = aff.duration;
+        {
+            let mut c = ph.character.lock().await;
+            c.apply_affect(aff);
+        }
+        let _ = ph.send.send(format!(
+            "\r\n{} surrounds you with a glowing white aura. ({} ticks)\r\n",
+            me.name, dur,
+        ));
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} surrounds {} with a glowing white aura.\r\n", me.name, ph.name));
+        CmdOutput::text(format!("\r\nYou surround {} with a glowing white aura.\r\n", ph.name))
+    } else {
+        let dur = aff.duration;
+        me.apply_affect(aff);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} is surrounded by a glowing white aura.\r\n", me.name));
+        CmdOutput::text(format!(
+            "\r\nA glowing white aura surrounds you. (sanctuary for {} ticks)\r\n", dur,
+        ))
+    }
+}
+
+async fn cast_harm(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::db::dice;
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let hit_chance = (65 + learned as i32 / 4).min(95);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let dmg = dice(3, 8) + me.level + (me.wis - 10).max(0) / 2;
+    me.mana -= crate::character::Skill::Harm.mana_cost();
+
+    let (mob_name, mob_dead, mob_room) = {
+        let mut w = world.lock().await;
+        let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => (m.vnum, m.in_room),
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        if in_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, dead, in_room)
+    };
+
+    let (to_me, to_room) = if hit {
+        (
+            format!("\r\nYou call down divine wrath upon {mob_name}! ({dmg} damage)\r\n"),
+            format!("{} calls down divine wrath upon {mob_name}.\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour curse upon {mob_name} fails to take hold.\r\n"),
+            format!("{} curses {mob_name}, who shrugs it off.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(|m| m.inventory.clone()).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        return CmdOutput::text(msg);
+    }
+    CmdOutput::text(to_me)
 }
 
 async fn cast_burning_hands(

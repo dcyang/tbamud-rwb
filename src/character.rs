@@ -32,6 +32,8 @@ pub enum Skill {
     CureLight,
     Bless,
     BurningHands,
+    Sanctuary,
+    Harm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +59,8 @@ impl Skill {
             "curelight"    => Some(Skill::CureLight),
             "bless"        => Some(Skill::Bless),
             "burninghands" => Some(Skill::BurningHands),
+            "sanctuary"    => Some(Skill::Sanctuary),
+            "harm"         => Some(Skill::Harm),
             _ => None,
         }
     }
@@ -71,6 +75,8 @@ impl Skill {
             Skill::CureLight    => "cure light",
             Skill::Bless        => "bless",
             Skill::BurningHands => "burning hands",
+            Skill::Sanctuary    => "sanctuary",
+            Skill::Harm         => "harm",
         }
     }
 
@@ -78,7 +84,8 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
-                | Skill::Bless  | Skill::BurningHands   => SkillKind::Spell,
+                | Skill::Bless  | Skill::BurningHands
+                | Skill::Sanctuary | Skill::Harm        => SkillKind::Spell,
         }
     }
 
@@ -90,6 +97,8 @@ impl Skill {
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
             Skill::BurningHands => 12,
+            Skill::Sanctuary    => 10,
+            Skill::Harm         => 10,
         }
     }
 
@@ -103,6 +112,8 @@ impl Skill {
             Skill::CureLight    => &[Class::Cleric],
             Skill::Bless        => &[Class::Cleric],
             Skill::BurningHands => &[Class::MagicUser],
+            Skill::Sanctuary    => &[Class::Cleric],
+            Skill::Harm         => &[Class::Cleric],
         }
     }
 
@@ -120,6 +131,8 @@ impl Skill {
             Skill::CureLight    => "cure-light",
             Skill::Bless        => "bless",
             Skill::BurningHands => "burning-hands",
+            Skill::Sanctuary    => "sanctuary",
+            Skill::Harm         => "harm",
         }
     }
 
@@ -134,6 +147,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Kick, Skill::Bash, Skill::Backstab,
     Skill::MagicMissile, Skill::CureLight,
     Skill::Bless, Skill::BurningHands,
+    Skill::Sanctuary, Skill::Harm,
 ];
 
 // ---------------------------------------------------------------------------
