@@ -285,6 +285,15 @@ pub struct Character {
     /// Vnums of quests this character has already completed.  Used for
     /// prereq checks and to prevent re-collecting one-shot rewards.
     pub completed_quests: Vec<i32>,
+    /// Character id of the leader this character is currently following,
+    /// or `None` if they aren't following anyone. Set by `follow`,
+    /// cleared by `follow self` or by the leader logging off.
+    pub following:    Option<u32>,
+    /// Whether this character is in a formal group with their leader (or,
+    /// for a leader, with their followers). `group` toggles individual
+    /// followers in/out; ungrouped followers tag along on movement but
+    /// don't share XP and don't see `gtell`.
+    pub grouped:      bool,
 }
 
 impl Character {

@@ -69,6 +69,7 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick",
     "drink", "recite", "use", "zap", "light", "extinguish",
+    "follow", "group", "gtell",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -175,6 +176,9 @@ pub async fn dispatch_command(
         Some("zap")       => do_zap(rest, me, world, chars).await,
         Some("light")     => do_light(rest, me, world, chars, true).await,
         Some("extinguish")=> do_light(rest, me, world, chars, false).await,
+        Some("follow")    => do_follow(rest, me, chars).await,
+        Some("group")     => do_group(rest, me, chars).await,
+        Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -613,6 +617,143 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         }
         _ => CmdOutput::text("\r\nNo one by that name is online.\r\n"),
     }
+}
+
+/// `follow <player>` — start trailing a leader; subsequent leader
+/// movement drags this character along (see `do_move`).  `follow self`
+/// or `follow stop` clears the relationship.
+async fn do_follow(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        if let Some(lid) = me.following {
+            let cl = chars.lock().await;
+            let name = cl.iter().find(|p| p.id == lid).map(|p| p.name.clone())
+                .unwrap_or_else(|| "someone".to_string());
+            return CmdOutput::text(format!("\r\nYou are following {name}.\r\n"));
+        }
+        return CmdOutput::text("\r\nYou are not following anyone.\r\n".to_string());
+    }
+    if arg.eq_ignore_ascii_case("self") || arg.eq_ignore_ascii_case("stop")
+        || arg.eq_ignore_ascii_case(&me.name)
+    {
+        if let Some(lid) = me.following.take() {
+            let leader = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|p| p.id == lid).cloned();
+                h
+            };
+            if let Some(leader) = leader {
+                let _ = leader.send.send(format!("\r\n{} stops following you.\r\n", me.name));
+            }
+        }
+        me.grouped = false;
+        return CmdOutput::text("\r\nYou stop following anyone.\r\n".to_string());
+    }
+    // Resolve target — must be in same room.
+    let cl = chars.lock().await;
+    let Some(leader) = cl.iter().find(|p|
+        p.id != me.id
+        && p.current_room == me.current_room
+        && p.name.eq_ignore_ascii_case(arg))
+    else {
+        return CmdOutput::text("\r\nThere is nobody here by that name.\r\n".to_string());
+    };
+    if me.following == Some(leader.id) {
+        return CmdOutput::text(format!("\r\nYou are already following {}.\r\n", leader.name));
+    }
+    me.following = Some(leader.id);
+    me.grouped   = false;          // require explicit `group` to share XP
+    let _ = leader.send.send(format!("\r\n{} starts following you.\r\n", me.name));
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} starts following {}.\r\n", me.name, leader.name));
+    CmdOutput::text(format!("\r\nYou start following {}.\r\n", leader.name))
+}
+
+/// `group`: list members.
+/// `group <follower>`: leader toggles a follower into/out of the formal
+/// group (eligibility: target must already be following `me`).  Solo
+/// players cannot self-group.
+async fn do_group(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        // List the group: me + all online followers of me with grouped=true.
+        let cl = chars.lock().await;
+        let mut text = format!("\r\nYour group:\r\n  {}\r\n", me.name);
+        let mut any = false;
+        let handles: Vec<_> = cl.iter().cloned().collect();
+        drop(cl);
+        for ph in &handles {
+            if ph.id == me.id { continue; }
+            let c = ph.character.lock().await;
+            if c.following == Some(me.id) && c.grouped {
+                text.push_str(&format!("  {}\r\n", c.name));
+                any = true;
+            }
+        }
+        if !any { text.push_str("  (no group members)\r\n"); }
+        return CmdOutput::text(text);
+    }
+    // Resolve target: must be following me.
+    let cl = chars.lock().await;
+    let Some(target) = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned() else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    drop(cl);
+    if target.id == me.id {
+        return CmdOutput::text("\r\nYou can't group yourself.\r\n".to_string());
+    }
+    let mut tc = target.character.lock().await;
+    if tc.following != Some(me.id) {
+        return CmdOutput::text(format!("\r\n{} isn't following you.\r\n", tc.name));
+    }
+    tc.grouped = !tc.grouped;
+    let joined = tc.grouped;
+    let msg_them = if joined {
+        format!("\r\n{} adds you to the group.\r\n", me.name)
+    } else {
+        format!("\r\n{} removes you from the group.\r\n", me.name)
+    };
+    let _ = target.send.send(msg_them);
+    me.grouped = true;             // leader is implicitly in their own group
+    CmdOutput::text(format!(
+        "\r\nYou {} {} {} your group.\r\n",
+        if joined { "add" } else { "remove" },
+        tc.name,
+        if joined { "to" } else { "from" },
+    ))
+}
+
+/// `gtell <message>`: broadcast to all online characters who share a
+/// group with the sender (their leader or any grouped follower of the
+/// shared leader).
+async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nGroup-tell what?\r\n".to_string());
+    }
+    if !me.grouped {
+        return CmdOutput::text("\r\nYou're not in any group.\r\n".to_string());
+    }
+    // Determine the group leader id: if I'm following someone with grouped,
+    // they're the leader; otherwise I am.
+    let leader_id = me.following.unwrap_or(me.id);
+    let formatted = format!("\r\n{} group-tells, '{msg}'\r\n", me.name);
+    let cl = chars.lock().await;
+    let handles: Vec<_> = cl.iter().cloned().collect();
+    drop(cl);
+    let mut delivered = 0;
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let c = ph.character.lock().await;
+        let in_group = (c.id == leader_id && c.grouped)
+            || (c.following == Some(leader_id) && c.grouped);
+        if in_group {
+            let _ = ph.send.send(formatted.clone());
+            delivered += 1;
+        }
+    }
+    let _ = delivered;
+    CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
 }
 
 async fn do_where(
@@ -3848,6 +3989,41 @@ async fn do_move(
     if let Some(qmsg) = quest_check_room(me, target, world).await {
         view.push_str(&qmsg);
     }
+
+    // Drag any followers who were with us in from_room and aren't busy.
+    // Each follower's Character is behind its own mutex; lock them
+    // one at a time after we've released ours.  Fighting followers
+    // stay behind.
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in handles {
+        if ph.id == me.id { continue; }
+        let should_drag = {
+            let c = ph.character.lock().await;
+            c.following == Some(me.id)
+                && c.current_room == from_room
+                && c.fighting.is_none()
+        };
+        if !should_drag { continue; }
+        {
+            let mut c = ph.character.lock().await;
+            c.current_room = target;
+        }
+        {
+            let mut cl = chars.lock().await;
+            cl.update_room(ph.id, target);
+            cl.broadcast_room(from_room, Some(ph.id),
+                &format!("{} follows {}.\r\n", ph.name, me.name));
+            cl.broadcast_room(target, Some(ph.id),
+                &format!("{} has arrived.\r\n", ph.name));
+        }
+        let _ = ph.send.send(format!("\r\nYou follow {}.\r\n", me.name));
+        let follower_view = render_room(target, Some(ph.id), world, chars).await;
+        let _ = ph.send.send(follower_view);
+    }
+
     CmdOutput::text(view)
 }
 

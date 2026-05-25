@@ -333,8 +333,8 @@ async fn resolve_player_attack(
         kill_mob(p.target.id, target_room, &target_name, &p.attacker_name, world, chars).await;
         // Clear the player's fighting state since the mob is gone.
         clear_player_fighting(p.attacker_id, chars).await;
-        // Award XP and check for level-up.
-        award_xp(p.attacker_id, xp, chars).await;
+        // Award XP, split among grouped members in the kill room.
+        award_xp_split(p.attacker_id, target_room, xp, chars).await;
         // Quest progress.
         notify_quest_kill(p.attacker_id, killed_vnum, world, chars).await;
         return;
@@ -416,6 +416,54 @@ async fn notify_quest_kill(
     }
     if let Some(qmsg) = crate::interpreter::quest_check_save(&mut c, world).await {
         let _ = ph.send.send(qmsg);
+    }
+}
+
+/// Split `xp` among the killer and any grouped allies in `killer_room`.
+/// The killer always gets at least their share — a solo kill (no group,
+/// or no grouped ally co-located) hands them the full amount.  Sharers
+/// must be `grouped` AND in the same group as the killer (sharing a
+/// leader id).
+async fn award_xp_split(
+    killer_id: u32,
+    killer_room: crate::world::RoomVnum,
+    xp: i64,
+    chars: &SharedChars,
+) {
+    if xp <= 0 { return; }
+    let recipients: Vec<u32> = {
+        let cl = chars.lock().await;
+        let killer = match cl.iter().find(|p| p.id == killer_id) {
+            Some(k) => k.clone(),
+            None    => { award_xp(killer_id, xp, chars).await; return; }
+        };
+        let (killer_grouped, killer_leader) = {
+            let c = killer.character.lock().await;
+            (c.grouped, c.following.unwrap_or(killer_id))
+        };
+        if !killer_grouped {
+            vec![killer_id]
+        } else {
+            let mut ids = vec![killer_id];
+            let handles: Vec<_> = cl.iter().cloned().collect();
+            drop(cl);
+            for ph in handles {
+                if ph.id == killer_id { continue; }
+                if ph.current_room != killer_room { continue; }
+                let c = ph.character.lock().await;
+                let in_group = c.grouped && (
+                    c.id == killer_leader
+                    || c.following == Some(killer_leader)
+                );
+                if in_group { ids.push(ph.id); }
+            }
+            ids
+        }
+    };
+    let n = recipients.len() as i64;
+    let share = (xp / n).max(1);
+    for id in recipients {
+        award_xp(id, share, chars).await;
     }
 }
 
