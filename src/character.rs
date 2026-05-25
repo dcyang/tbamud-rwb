@@ -43,6 +43,8 @@ pub enum Skill {
     DetectInvis,
     DetectMagic,
     Poison,
+    Sleep,
+    Blindness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,8 @@ impl Skill {
             "detectinvis" | "detectinvisible" => Some(Skill::DetectInvis),
             "detectmagic"                     => Some(Skill::DetectMagic),
             "poison"                          => Some(Skill::Poison),
+            "sleep"                           => Some(Skill::Sleep),
+            "blindness" | "blind"             => Some(Skill::Blindness),
             _ => None,
         }
     }
@@ -104,6 +108,8 @@ impl Skill {
             Skill::DetectInvis  => "detect invis",
             Skill::DetectMagic  => "detect magic",
             Skill::Poison       => "poison",
+            Skill::Sleep        => "sleep",
+            Skill::Blindness    => "blindness",
         }
     }
 
@@ -116,7 +122,8 @@ impl Skill {
                 | Skill::Sanctuary | Skill::Harm
                 | Skill::WordOfRecall | Skill::Identify
                 | Skill::DetectInvis  | Skill::DetectMagic
-                | Skill::Poison       => SkillKind::Spell,
+                | Skill::Poison       | Skill::Sleep | Skill::Blindness
+                                      => SkillKind::Spell,
         }
     }
 
@@ -136,6 +143,8 @@ impl Skill {
             Skill::DetectInvis  => 10,
             Skill::DetectMagic  => 8,
             Skill::Poison       => 12,
+            Skill::Sleep        => 15,
+            Skill::Blindness    => 8,
         }
     }
 
@@ -163,6 +172,8 @@ impl Skill {
             Skill::DetectInvis  => &[Class::MagicUser, Class::Cleric],
             Skill::DetectMagic  => &[Class::MagicUser, Class::Cleric],
             Skill::Poison       => &[Class::MagicUser, Class::Cleric],
+            Skill::Sleep        => &[Class::MagicUser],
+            Skill::Blindness    => &[Class::MagicUser, Class::Cleric],
         }
     }
 
@@ -191,6 +202,8 @@ impl Skill {
             Skill::DetectInvis  => "detect-invis",
             Skill::DetectMagic  => "detect-magic",
             Skill::Poison       => "poison",
+            Skill::Sleep        => "sleep",
+            Skill::Blindness    => "blindness",
         }
     }
 
@@ -209,7 +222,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Sanctuary, Skill::Harm,
     Skill::WordOfRecall, Skill::Identify,
     Skill::DetectInvis, Skill::DetectMagic,
-    Skill::Poison,
+    Skill::Poison, Skill::Sleep, Skill::Blindness,
 ];
 
 // ---------------------------------------------------------------------------

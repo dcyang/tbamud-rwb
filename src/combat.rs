@@ -129,9 +129,13 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
     }
 
     // ----- Phase 3: snapshot mob attackers -------------------------------
+    // Mobs with an active Sleep affect skip their swing this round; their
+    // intent never makes it into the snapshot. Blindness is honored later
+    // inside resolve_mob_attack via the affect lookup.
     let mob_intents: Vec<MobIntent> = {
         let w = world.lock().await;
         w.mob_instances.iter()
+            .filter(|m| !m.affects.iter().any(|a| a.skill == crate::character::Skill::Sleep))
             .filter_map(|m| {
                 m.fighting.map(|tgt| MobIntent {
                     attacker_id:   m.id,
@@ -393,9 +397,11 @@ async fn resolve_player_attack(
             None => ("the creature".into(), false, false),
         };
 
-        // Mutation: damage + remember attacker.
+        // Mutation: damage + remember attacker.  Sleep is broken by any
+        // damage, so the affect is stripped here.
         let m = w.mob_instances.iter_mut().find(|m| m.id == p.target.id).unwrap();
         m.hp -= dmg;
+        m.affects.retain(|a| a.skill != crate::character::Skill::Sleep);
         let dead = m.hp <= 0;
         if !dead && m.fighting.is_none() {
             m.fighting = Some(Target { id: p.attacker_id, is_player: true });
@@ -623,6 +629,27 @@ async fn resolve_mob_attack(
         }
         return;
     };
+
+    // Blindness: 50% miss chance.  Skip the swing on the missed roll.
+    let blinded = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|x| x.id == m.attacker_id)
+            .map(|x| x.affects.iter().any(|a| a.skill == crate::character::Skill::Blindness))
+            .unwrap_or(false)
+    };
+    if blinded && rand::thread_rng().gen_range(0..100) < 50 {
+        let short = {
+            let w = world.lock().await;
+            w.mob_protos.get(&m.attacker_vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "Something".into())
+        };
+        let _ = ph.send.send(format!("\r\n{short} swings at you blindly and misses!\r\n"));
+        let cl = chars.lock().await;
+        cl.broadcast_room(m.room, Some(m.target.id),
+            &format!("\r\n{short} swings blindly at {} and misses.\r\n", ph.name));
+        return;
+    }
 
     // Decide whether this mob is a spellcaster and rolls a cast this round.
     let cast_attempt = {
