@@ -72,6 +72,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn periodic random-trigger tick (WTRIG_RANDOM/MTRIG_RANDOM) ---
     db::spawn_random_trigger_tick(Arc::clone(&world), Arc::clone(&chars));
 
+    // --- Spawn hunger/thirst decay tick -----------------------------------
+    db::spawn_hunger_tick(Arc::clone(&chars));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

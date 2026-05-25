@@ -256,6 +256,8 @@ pub async fn handle_connection(
                     active_quest:    p_ref.and_then(|p| p.active_quest),
                     quest_progress:  p_ref.map(|p| p.quest_progress).unwrap_or(0),
                     completed_quests: p_ref.map(|p| p.completed_quests.clone()).unwrap_or_default(),
+                    hunger:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.hunger).unwrap_or(24) },
+                    thirst:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.thirst).unwrap_or(24) },
                     bonus_hitroll:    0,
                     bonus_damroll:    0,
                     bonus_ac:         0,
@@ -480,6 +482,8 @@ async fn run_game_session(
             rec.active_quest    = me.active_quest;
             rec.quest_progress  = me.quest_progress;
             rec.completed_quests = me.completed_quests.clone();
+            rec.hunger          = me.hunger;
+            rec.thirst          = me.thirst;
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }

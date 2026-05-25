@@ -650,6 +650,52 @@ pub fn spawn_decay_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
     });
 }
 
+/// Background task that ticks each online mortal's hunger/thirst once
+/// per game-hour (~60s of real time).  `-1` is the never-hungry
+/// sentinel (immortals).  At 0 the player gets a one-shot warning; at
+/// -1 they take 1 HP damage per tick with a "starving/parched" line.
+pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
+    const TICK_SECONDS: u64 = 60;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;       // skip the immediate first fire
+        loop {
+            interval.tick().await;
+            let handles: Vec<crate::character::PlayerHandle> = {
+                let cl = chars.lock().await;
+                cl.iter().cloned().collect()
+            };
+            for ph in handles {
+                let mut c = ph.character.lock().await;
+                let mut hunger_msg: Option<&'static str> = None;
+                let mut thirst_msg: Option<&'static str> = None;
+                if c.hunger > 0 {
+                    c.hunger -= 1;
+                    if c.hunger == 0 { hunger_msg = Some("You are hungry.\r\n"); }
+                } else if c.hunger == 0 {
+                    c.hp = (c.hp - 1).max(0);
+                    hunger_msg = Some("You are starving — your strength fades.\r\n");
+                }
+                if c.thirst > 0 {
+                    c.thirst -= 1;
+                    if c.thirst == 0 { thirst_msg = Some("You are thirsty.\r\n"); }
+                } else if c.thirst == 0 {
+                    c.hp = (c.hp - 1).max(0);
+                    thirst_msg = Some("You are parched — your strength fades.\r\n");
+                }
+                drop(c);
+                if let Some(m) = hunger_msg { let _ = ph.send.send(m.to_string()); }
+                if let Some(m) = thirst_msg { let _ = ph.send.send(m.to_string()); }
+            }
+        }
+    });
+}
+
 /// Background task that ticks per-instance object timers (the OTRIG_TIMER
 /// mechanism). Each prototype's `timer` field (in MUD-hours) seeds a
 /// per-instance countdown when the object spawns; on expiry, the object's

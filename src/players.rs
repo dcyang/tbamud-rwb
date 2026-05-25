@@ -135,6 +135,10 @@ pub struct PlayerRecord {
     pub quest_progress: i32,
     /// Vnums of quests already completed.
     pub completed_quests: Vec<i32>,
+    /// Hours of food/drink remaining (-1 = never hungry).  Persisted
+    /// across login; the runtime tick decays them in real time.
+    pub hunger:        i32,
+    pub thirst:        i32,
 }
 
 impl PlayerRecord {
@@ -330,6 +334,8 @@ impl PlayerDb {
                         rec.completed_quests.push(v);
                     }
                 }
+                "Hung" => rec.hunger = val.parse().unwrap_or(24),
+                "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 _ => {}
             }
         }
@@ -403,6 +409,8 @@ impl PlayerDb {
         for qv in &rec.completed_quests {
             writeln!(f, "Qcmp: {qv}")?;
         }
+        writeln!(f, "Hung: {}", rec.hunger)?;
+        writeln!(f, "Thst: {}", rec.thirst)?;
 
         Ok(())
     }

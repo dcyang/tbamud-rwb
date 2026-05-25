@@ -1120,8 +1120,14 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     } else {
         format!("{} ({} to next)", me.exp, to_next)
     };
+    let food = if me.hunger < 0 { "satisfied".to_string() }
+               else if me.hunger == 0 { "starving".to_string() }
+               else { format!("{}/{} hours", me.hunger, MAX_HUNGER) };
+    let drink = if me.thirst < 0 { "satisfied".to_string() }
+                else if me.thirst == 0 { "parched".to_string() }
+                else { format!("{}/{} hours", me.thirst, MAX_THIRST) };
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\n\
+        "\r\nName:  {}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.name, me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
@@ -3397,7 +3403,7 @@ async fn do_quaff(
 /// (informational). The container itself stays in inventory.
 async fn do_drink_container(
     arg: &str,
-    me: &Character,
+    me: &mut Character,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
@@ -3442,11 +3448,18 @@ async fn do_drink_container(
         p.value[1] -= 1;
         (p.value[1], p.value[0])
     };
+    let was_thirsty = me.thirst >= 0 && me.thirst <= 3;
+    if me.thirst >= 0 {
+        me.thirst = (me.thirst + 3).min(MAX_THIRST);
+    }
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id),
         &format!("{} drinks from {}.\r\n", me.name, short));
     drop(cl);
     let mut text = format!("\r\nYou drink from {}.\r\n", short);
+    if was_thirsty && me.thirst > 3 {
+        text.push_str("You are no longer thirsty.\r\n");
+    }
     if sips_after == 0 {
         text.push_str(&format!("{} is now empty.\r\n", short));
     }
@@ -3468,9 +3481,13 @@ async fn do_eat(
     if arg.is_empty() {
         return CmdOutput::text("\r\nEat what?\r\n".to_string());
     }
-    let Some((iid, short, _v)) = find_consumable(me, world, arg, ITEM_FOOD).await else {
+    let Some((iid, short, value)) = find_consumable(me, world, arg, ITEM_FOOD).await else {
         return CmdOutput::text("\r\nYou have no such food.\r\n".to_string());
     };
+    let was_hungry = me.hunger >= 0 && me.hunger <= 3;
+    if me.hunger >= 0 {
+        me.hunger = (me.hunger + value[0].max(1)).min(MAX_HUNGER);
+    }
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id),
         &format!("{} eats {}.\r\n", me.name, short));
@@ -3480,8 +3497,17 @@ async fn do_eat(
         let mut w = world.lock().await;
         w.obj_instances.retain(|o| o.id != iid);
     }
-    CmdOutput::text(format!("\r\nYou eat {}.\r\n", short))
+    let mut text = format!("\r\nYou eat {}.\r\n", short);
+    if was_hungry && me.hunger > 3 {
+        text.push_str("You are no longer hungry.\r\n");
+    }
+    CmdOutput::text(text)
 }
+
+/// Hunger/thirst caps — game-hours of fullness. Roughly matches stock
+/// CircleMUD constants.c.
+pub const MAX_HUNGER: i32 = 24;
+pub const MAX_THIRST: i32 = 24;
 
 async fn do_recite(
     arg: &str,
@@ -4392,6 +4418,8 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.active_quest    = me.active_quest;
             r.quest_progress  = me.quest_progress;
             r.completed_quests = me.completed_quests.clone();
+            r.hunger          = me.hunger;
+            r.thirst          = me.thirst;
             r
         }
         Err(e) => {
