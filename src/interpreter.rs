@@ -135,9 +135,9 @@ pub async fn dispatch_command(
         Some("buy")       => do_buy(rest, me, world, chars).await,
         Some("sell")      => do_sell(rest, me, world, chars).await,
         Some("flee")      => do_flee(me, world, chars).await,
-        Some("wield")     => do_wield(rest, me, world).await,
-        Some("wear")      => do_wear(rest, me, world).await,
-        Some("remove")    => do_remove(rest, me, world).await,
+        Some("wield")     => do_wield(rest, me, world, chars).await,
+        Some("wear")      => do_wear(rest, me, world, chars).await,
+        Some("remove")    => do_remove(rest, me, world, chars).await,
         Some("equipment") => do_equipment(me, world).await,
         Some("save")      => do_save(me, players).await,
         Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, wield, wear, remove, equip, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
@@ -516,11 +516,15 @@ async fn do_drop(
     }
     drop(w);
 
-    let cl = chars.lock().await;
-    cl.broadcast_room(
-        me.current_room, Some(me.id),
-        &format!("{} drops {}.\r\n", me.name, name),
-    );
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} drops {}.\r\n", me.name, name),
+        );
+    }
+    // Fire any DROP triggers on the dropped object.
+    fire_obj_drop_triggers(iid, &me.name, me.current_room, world, chars).await;
 
     CmdOutput::text(format!("\r\nYou drop {}.\r\n", name))
 }
@@ -2549,7 +2553,12 @@ async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 // Equipment commands
 // ---------------------------------------------------------------------------
 
-async fn do_wield(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+async fn do_wield(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nWield what?\r\n");
     }
@@ -2577,10 +2586,16 @@ async fn do_wield(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> C
 
     me.inventory.remove(idx);
     me.equipment[WEAR_WIELD] = Some(iid);
+    fire_obj_wear_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou wield {short}.\r\n"))
 }
 
-async fn do_wear(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+async fn do_wear(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nWear what?\r\n");
     }
@@ -2615,10 +2630,16 @@ async fn do_wear(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> Cm
 
     me.inventory.remove(idx);
     me.equipment[slot] = Some(iid);
+    fire_obj_wear_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou wear {short} {}.\r\n", wear_pos_name(slot)))
 }
 
-async fn do_remove(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+async fn do_remove(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nRemove what?\r\n");
     }
@@ -2645,6 +2666,7 @@ async fn do_remove(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> 
 
     me.equipment[slot] = None;
     me.inventory.push(iid);
+    fire_obj_remove_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou stop using {short}.\r\n"))
 }
 
@@ -2792,6 +2814,8 @@ async fn do_give(
         }
         // Fire RECEIVE triggers on the receiving mob.
         fire_mob_receive_triggers(mid, &me.name, &obj_keywords, world, chars).await;
+        // Fire GIVE triggers on the given object itself.
+        fire_obj_give_triggers(iid, &me.name, me.current_room, world, chars).await;
         return CmdOutput::text(msg);
     }
 
@@ -3098,6 +3122,12 @@ enum ScriptOut {
     Echo { text: String },
     /// Spawn an object of this vnum into the mob's room.
     Load { vnum: i32, room: RoomVnum },
+    /// Move the self mob to the given room (`mgoto`).
+    MobGoto { mob_id: u32, mob_name: String, to: RoomVnum },
+    /// Teleport a named player to the given room (`mteleport`).
+    PlayerTeleport { name: String, to: RoomVnum },
+    /// Extract the self mob silently (`mpurge`).  Inventory is destroyed.
+    Purge { mob_id: u32, mob_name: String, room: RoomVnum },
 }
 
 /// Per-script-execution context carrying mutable variables and the
@@ -3109,6 +3139,10 @@ struct ScriptCtx<'a> {
     actor_gold:    i64,
     actor_class:   String,
     mob_name:      &'a str,
+    /// Instance id of the "self" mob when this script is attached to a
+    /// mob.  None for room/obj scripts; commands like `mgoto`/`mpurge`
+    /// no-op when this is unset.
+    self_mob_id:   Option<u32>,
     self_hp:       i32,
     self_max_hp:   i32,
     self_level:    i32,
@@ -3130,6 +3164,7 @@ pub struct ScriptInputs {
     pub actor_level:   i32,
     pub actor_gold:    i64,
     pub actor_class:   String,
+    pub self_mob_id:   Option<u32>,
     pub self_hp:       i32,
     pub self_max_hp:   i32,
     pub self_level:    i32,
@@ -3163,6 +3198,7 @@ fn execute_script(
         actor_gold:    inputs.actor_gold,
         actor_class:   inputs.actor_class.clone(),
         mob_name,
+        self_mob_id:   inputs.self_mob_id,
         self_hp:       inputs.self_hp,
         self_max_hp:   inputs.self_max_hp,
         self_level:    inputs.self_level,
@@ -3293,6 +3329,30 @@ fn execute_script(
             if let Ok(vnum) = substitute(&ctx, rest.trim()).parse::<i32>() {
                 out.push(ScriptOut::Load { vnum, room: ctx.self_room });
             }
+        } else if let Some(rest) = line.strip_prefix("mgoto ") {
+            if let (Some(mid), Ok(to)) = (ctx.self_mob_id,
+                substitute(&ctx, rest.trim()).parse::<i32>())
+            {
+                out.push(ScriptOut::MobGoto {
+                    mob_id: mid, mob_name: ctx.mob_name.to_string(), to,
+                });
+            }
+        } else if let Some(rest) = line.strip_prefix("mteleport ") {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let (Some(name), Some(room_str)) = (parts.next(), parts.next()) {
+                let n = substitute(&ctx, name.trim());
+                if let Ok(to) = substitute(&ctx, room_str.trim()).parse::<i32>() {
+                    out.push(ScriptOut::PlayerTeleport { name: n, to });
+                }
+            }
+        } else if line == "mpurge" || line.starts_with("mpurge ") {
+            if let Some(mid) = ctx.self_mob_id {
+                out.push(ScriptOut::Purge {
+                    mob_id: mid,
+                    mob_name: ctx.mob_name.to_string(),
+                    room: ctx.self_room,
+                });
+            }
         }
     }
     out
@@ -3412,23 +3472,39 @@ async fn apply_script_outputs(
     chars: &SharedChars,
 ) {
     if outputs.is_empty() { return; }
-    let cl = chars.lock().await;
+    // Bin outputs by side-effect category so we can apply chars-only ops
+    // separately from world mutations.
     let mut load_queue: Vec<(i32, RoomVnum)> = Vec::new();
-    for out in outputs {
-        match out {
-            ScriptOut::Say { mob_name, text } => {
-                cl.broadcast_room(room, None, &format!("{mob_name} says, '{text}'\r\n"));
-            }
-            ScriptOut::Echo { text } => {
-                cl.broadcast_room(room, None, &text);
-            }
-            ScriptOut::Load { vnum, room } => {
-                load_queue.push((vnum, room));
+    let mut mob_gotos: Vec<(u32, String, RoomVnum)> = Vec::new();
+    let mut purges:    Vec<(u32, String, RoomVnum)> = Vec::new();
+    let mut teleports: Vec<(String, RoomVnum)>      = Vec::new();
+    {
+        let cl = chars.lock().await;
+        for out in outputs {
+            match out {
+                ScriptOut::Say { mob_name, text } => {
+                    cl.broadcast_room(room, None, &format!("{mob_name} says, '{text}'\r\n"));
+                }
+                ScriptOut::Echo { text } => {
+                    cl.broadcast_room(room, None, &text);
+                }
+                ScriptOut::Load { vnum, room } => {
+                    load_queue.push((vnum, room));
+                }
+                ScriptOut::MobGoto { mob_id, mob_name, to } => {
+                    mob_gotos.push((mob_id, mob_name, to));
+                }
+                ScriptOut::PlayerTeleport { name, to } => {
+                    teleports.push((name, to));
+                }
+                ScriptOut::Purge { mob_id, mob_name, room } => {
+                    purges.push((mob_id, mob_name, room));
+                }
             }
         }
     }
-    drop(cl);
-    if !load_queue.is_empty() {
+    // Apply world mutations under a single lock.
+    if !load_queue.is_empty() || !mob_gotos.is_empty() || !purges.is_empty() {
         let mut w = world.lock().await;
         for (vnum, rv) in load_queue {
             if let Some(iid) = w.spawn_obj(vnum) {
@@ -3439,6 +3515,62 @@ async fn apply_script_outputs(
                     r.objects.push(iid);
                 }
             }
+        }
+        for (mob_id, _mob_name, to) in &mob_gotos {
+            let from = w.mob_instances.iter()
+                .find(|m| m.id == *mob_id).map(|m| m.in_room);
+            if let Some(from) = from {
+                if from != *to {
+                    if let Some(r) = w.rooms.get_mut(&from) { r.mobs.retain(|&id| id != *mob_id); }
+                    if let Some(r) = w.rooms.get_mut(to)    { r.mobs.push(*mob_id); }
+                    if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == *mob_id) {
+                        m.in_room = *to;
+                    }
+                }
+            }
+        }
+        for (mob_id, _mob_name, room) in &purges {
+            if let Some(r) = w.rooms.get_mut(room) {
+                r.mobs.retain(|&id| id != *mob_id);
+            }
+            // Extract any objects the mob was holding too.
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == *mob_id)
+                .map(|m| m.inventory.clone()).unwrap_or_default();
+            w.mob_instances.retain(|m| m.id != *mob_id);
+            w.obj_instances.retain(|o| !inv.contains(&o.id));
+        }
+    }
+    // Announce mob movements + apply teleports under the chars lock.
+    if !mob_gotos.is_empty() || !purges.is_empty() || !teleports.is_empty() {
+        let cl = chars.lock().await;
+        for (_, mob_name, to) in &mob_gotos {
+            cl.broadcast_room(*to, None, &format!("{mob_name} appears in a puff of smoke.\r\n"));
+        }
+        for (_, mob_name, room) in &purges {
+            cl.broadcast_room(*room, None, &format!("{mob_name} dissolves into nothingness.\r\n"));
+        }
+        // Player teleports.
+        let handles: Vec<crate::character::PlayerHandle> = cl.iter().cloned().collect();
+        drop(cl);
+        for (name, to) in teleports {
+            let Some(ph) = handles.iter().find(|p| p.name.eq_ignore_ascii_case(&name)).cloned() else { continue; };
+            // Update character + registry, broadcast departure/arrival.
+            let from_room = {
+                let mut c = ph.character.lock().await;
+                let f = c.current_room;
+                c.current_room = to;
+                f
+            };
+            {
+                let mut cl = chars.lock().await;
+                cl.update_room(ph.id, to);
+                cl.broadcast_room(from_room, Some(ph.id),
+                    &format!("{} vanishes in a flash.\r\n", ph.name));
+                cl.broadcast_room(to, Some(ph.id),
+                    &format!("{} appears in a flash.\r\n", ph.name));
+            }
+            let _ = ph.send.send(format!("\r\nThe world swirls — you find yourself elsewhere.\r\n"));
         }
     }
 }
@@ -3476,10 +3608,11 @@ async fn fire_mob_triggers(
                     if !any_match { continue; }
                 }
                 let inputs = ScriptInputs {
+                    self_mob_id: Some(m.id),
                     self_hp: m.hp, self_max_hp: m.max_hp,
                     self_level: proto.level,
                     self_fighting: m.fighting.is_some(),
-                    room_people: 0,  // filled by caller-specific paths if needed
+                    room_people: 0,
                     ..Default::default()
                 };
                 acc.extend(execute_script(t, actor_name, &mob_name, room, &inputs));
@@ -3513,12 +3646,14 @@ async fn fire_room_triggers(
     apply_script_outputs(outputs, room, world, chars).await;
 }
 
-/// Fire object GET triggers ('g' on attach_type=1) when an object is
-/// picked up.  The "self" in scripts is the object's short_description.
-pub async fn fire_obj_get_triggers(
+/// Fire one of the object-trigger types (GET/DROP/WEAR/REMOVE/GIVE) on
+/// the object identified by `obj_iid`.  `room` is where output gets
+/// broadcast — typically the actor's current room.
+async fn fire_obj_triggers(
     obj_iid: u32,
     actor_name: &str,
     room: RoomVnum,
+    trigger_type: char,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
@@ -3533,14 +3668,69 @@ pub async fn fire_obj_get_triggers(
         let mut acc = Vec::new();
         for &tvnum in &o.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
-            // Object GET: attach_type must be 1 (OBJ) and type 'g'.
             if t.attach_type != crate::world::TRIG_ATTACH_OBJ { continue; }
-            if t.trigger_type != 'g' { continue; }
+            if t.trigger_type != trigger_type { continue; }
             acc.extend(execute_script(t, actor_name, &obj_name, room, &ScriptInputs::default()));
         }
         acc
     };
     apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// GET trigger ('g' on objects).
+pub async fn fire_obj_get_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'g', world, chars).await;
+}
+
+/// DROP trigger ('h' on objects).
+pub async fn fire_obj_drop_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'h', world, chars).await;
+}
+
+/// WEAR trigger ('j' on objects).  Fired by both `wear` and `wield`.
+pub async fn fire_obj_wear_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'j', world, chars).await;
+}
+
+/// REMOVE trigger ('l' on objects).
+pub async fn fire_obj_remove_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'l', world, chars).await;
+}
+
+/// GIVE trigger ('i' on objects) — fires when the object is handed to
+/// a mob.
+pub async fn fire_obj_give_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_obj_triggers(obj_iid, actor_name, room, 'i', world, chars).await;
 }
 
 /// Run FIGHT (type 'k') triggers each combat round for a mob currently
@@ -3559,6 +3749,7 @@ pub async fn fire_mob_fight_triggers(
         let mob_name = proto.short_descr.clone();
         let mob_room = m.in_room;
         let inputs = ScriptInputs {
+            self_mob_id: Some(m.id),
             self_hp: m.hp, self_max_hp: m.max_hp,
             self_level: proto.level,
             ..Default::default()
