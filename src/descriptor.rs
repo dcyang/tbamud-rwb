@@ -221,7 +221,7 @@ async fn handle_game_loop(
 
     // Show the starting room
     if let Some(r) = world.room(current) {
-        stream.write_all(render_room(r).as_bytes()).await?;
+        stream.write_all(render_room(r, &world).as_bytes()).await?;
     } else {
         stream.write_all(b"\r\nYou are nowhere. The world has not loaded properly.\r\n").await?;
     }
@@ -301,7 +301,7 @@ fn execute_command(cmd: &str, current: &mut crate::world::RoomVnum, world: &Worl
 
     match lower.as_str() {
         "l" | "look" => match world.room(*current) {
-            Some(r) => render_room(r),
+            Some(r) => render_room(r, world),
             None => "\r\nYou are nowhere.".to_string(),
         },
         "quit" => "Goodbye.\r\n".to_string(),
@@ -325,7 +325,7 @@ fn do_move(
         {
             *current = exit.to_room;
             match world.room(*current) {
-                Some(r) => render_room(r),
+                Some(r) => render_room(r, world),
                 None    => "\r\nYou stumble into the void.".to_string(),
             }
         }
@@ -333,17 +333,19 @@ fn do_move(
     }
 }
 
-/// Render a room's name, description, and obvious exits for the player.
-fn render_room(r: &Room) -> String {
-    let mut s = String::with_capacity(r.description.len() + 256);
+/// Render a room's name, description, obvious exits, objects on the ground,
+/// and mobs present.  Mirrors look_at_room() in act.informative.c (minimal
+/// subset — no light/sneak/invisibility, no colour).
+fn render_room(r: &Room, world: &World) -> String {
+    let mut s = String::with_capacity(r.description.len() + 512);
     s.push_str("\r\n");
     s.push_str(&r.name);
     s.push_str("\r\n");
-    // Description: convert lone \n to \r\n so telnet clients render properly.
     for line in r.description.split('\n') {
         s.push_str(line);
         s.push_str("\r\n");
     }
+
     // Obvious exits
     let exits: Vec<&str> = Direction::ALL.iter()
         .filter(|d| r.exits[**d as usize].as_ref()
@@ -357,6 +359,31 @@ fn render_room(r: &Room) -> String {
         s.push_str("Obvious exits: ");
         s.push_str(&exits.join(", "));
         s.push_str(".\r\n");
+    }
+
+    // Objects on the ground — use prototype's long description (the "lies
+    // here" line). Mirror the "list_obj_to_char(LIST_NORMAL)" branch.
+    for &iid in &r.objects {
+        if let Some(inst) = world.obj_instances.iter().find(|o| o.id == iid) {
+            if let Some(proto) = world.obj_protos.get(&inst.vnum) {
+                if !proto.description.is_empty() {
+                    s.push_str(&proto.description);
+                    s.push_str("\r\n");
+                }
+            }
+        }
+    }
+
+    // Mobs in room — use prototype long_descr (the "is here" line).
+    for &iid in &r.mobs {
+        if let Some(inst) = world.mob_instances.iter().find(|m| m.id == iid) {
+            if let Some(proto) = world.mob_protos.get(&inst.vnum) {
+                if !proto.long_descr.is_empty() {
+                    s.push_str(proto.long_descr.trim_end());
+                    s.push_str("\r\n");
+                }
+            }
+        }
     }
     s
 }

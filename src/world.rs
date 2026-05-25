@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 
 pub type RoomVnum = i32;
 pub type ZoneVnum = i32;
+pub type ObjVnum  = i32;
+pub type MobVnum  = i32;
 
 /// NOWHERE sentinel — mirrors the NOWHERE define in structs.h
 pub const NOWHERE: RoomVnum = -1;
@@ -87,6 +89,9 @@ pub struct ExtraDescr {
 }
 
 /// A single room. Mirrors room_data in structs.h (minimal subset).
+/// `mobs` and `objects` hold *instance ids* — pointers into World.mob_instances
+/// / World.obj_instances. They are populated by reset_zone(), not by the file
+/// parser.
 #[derive(Debug, Clone, Default)]
 pub struct Room {
     pub vnum:        RoomVnum,
@@ -97,10 +102,30 @@ pub struct Room {
     pub room_flags:  [u32; 4],
     pub exits:       [Option<Exit>; 6],
     pub extras:      Vec<ExtraDescr>,
+    pub mobs:        Vec<u32>,    // mob instance ids
+    pub objects:     Vec<u32>,    // object instance ids
 }
 
-/// A single zone. Mirrors zone_data in structs.h (minimal subset; reset
-/// commands deferred to a later checkpoint).
+/// A single zone reset command. Mirrors `reset_com` in structs.h.
+/// `if_flag`: 0 = always execute, 1 = only if previous command succeeded.
+/// Operands are interpreted per command kind:
+///   M arg1=mob_vnum  arg2=max  arg3=room_vnum
+///   O arg1=obj_vnum  arg2=max  arg3=room_vnum (-1 = nowhere)
+///   G arg1=obj_vnum  arg2=max  arg3=-1         (give to last mob)
+///   E arg1=obj_vnum  arg2=max  arg3=wear_pos
+///   P arg1=obj_vnum  arg2=max  arg3=container_vnum
+///   D arg1=room_vnum arg2=dir  arg3=state (0=open, 1=closed, 2=locked)
+///   R arg1=room_vnum arg2=obj_vnum
+#[derive(Debug, Clone, Default)]
+pub struct ResetCmd {
+    pub command: char,
+    pub if_flag: i32,
+    pub arg1:    i32,
+    pub arg2:    i32,
+    pub arg3:    i32,
+}
+
+/// A single zone. Mirrors zone_data in structs.h (minimal subset).
 #[derive(Debug, Clone, Default)]
 pub struct Zone {
     pub number:    ZoneVnum,
@@ -113,19 +138,108 @@ pub struct Zone {
     pub zone_flags: [u32; 4],
     pub min_level: i32,
     pub max_level: i32,
+    pub commands:  Vec<ResetCmd>,
+}
+
+// ---------------------------------------------------------------------------
+// Object prototypes & instances
+// ---------------------------------------------------------------------------
+
+/// Object prototype — mirrors obj_data + obj_flag_data (minimal subset).
+/// We split prototypes (read once from disk) from instances (which can be
+/// loaded into the world) the same way C does with obj_proto[] vs obj_list.
+#[derive(Debug, Clone, Default)]
+pub struct ObjProto {
+    pub vnum:              ObjVnum,
+    pub name:              String,      // keywords (e.g. "wings")
+    pub short_description: String,      // "a pair of wings"
+    pub description:       String,      // long: shown on the ground
+    pub action_description: String,     // action / read text
+    pub item_type:         i32,
+    pub extra_flags:       [u32; 4],
+    pub wear_flags:        [u32; 4],
+    pub affect_flags:      [u32; 4],
+    pub value:             [i32; 4],
+    pub weight:            i32,
+    pub cost:              i32,
+    pub rent:              i32,
+    pub level:             i32,
+    pub timer:             i32,
+    pub extras:            Vec<ExtraDescr>,
+}
+
+/// A live object instance in the world.
+#[derive(Debug, Clone)]
+pub struct ObjInstance {
+    pub id:    u32,
+    pub vnum:  ObjVnum,
+    pub in_room: RoomVnum,   // NOWHERE if not in a room
+    // Future: in_obj (container), carried_by, worn_by/worn_on
+}
+
+// ---------------------------------------------------------------------------
+// Mob prototypes & instances
+// ---------------------------------------------------------------------------
+
+/// Mob prototype — mirrors mob portion of char_data (minimal subset).
+#[derive(Debug, Clone, Default)]
+pub struct MobProto {
+    pub vnum:        MobVnum,
+    pub name:        String,    // keywords
+    pub short_descr: String,    // "Puff"
+    pub long_descr:  String,    // "Puff the Fractal Dragon is here..."
+    pub description: String,    // look text
+    pub mob_flags:   [u32; 4],
+    pub aff_flags:   [u32; 4],
+    pub alignment:   i32,
+    pub level:       i32,
+    pub hitroll:     i32,
+    pub ac:          i32,
+    pub hit:         i32,        // hp dice "d"
+    pub mana:        i32,
+    pub mv:          i32,
+    pub gold:        i32,
+    pub exp:         i32,
+    pub position:    i32,
+    pub default_pos: i32,
+    pub sex:         i32,
+}
+
+/// A live mob instance in the world.
+#[derive(Debug, Clone)]
+pub struct MobInstance {
+    pub id:    u32,
+    pub vnum:  MobVnum,
+    pub in_room: RoomVnum,
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep
-/// the rnum/vnum two-step that C's `world[]` array required.
+/// the rnum/vnum two-step that C's `world[]` array required. Instances live
+/// in dense Vecs keyed by instance id.
 #[derive(Debug, Default)]
 pub struct World {
-    pub rooms: BTreeMap<RoomVnum, Room>,
-    pub zones: BTreeMap<ZoneVnum, Zone>,
+    pub rooms:      BTreeMap<RoomVnum, Room>,
+    pub zones:      BTreeMap<ZoneVnum, Zone>,
+    pub obj_protos: BTreeMap<ObjVnum, ObjProto>,
+    pub mob_protos: BTreeMap<MobVnum, MobProto>,
+    pub obj_instances: Vec<ObjInstance>,
+    pub mob_instances: Vec<MobInstance>,
 }
 
 impl World {
     pub fn room(&self, vnum: RoomVnum) -> Option<&Room> {
         self.rooms.get(&vnum)
+    }
+
+    /// Count live instances of a given object vnum currently in the world
+    /// (not yet extracted). Mirrors obj_index[].number used by reset_zone.
+    pub fn count_obj(&self, vnum: ObjVnum) -> i32 {
+        self.obj_instances.iter().filter(|o| o.vnum == vnum).count() as i32
+    }
+
+    /// Count live instances of a given mob vnum currently in the world.
+    pub fn count_mob(&self, vnum: MobVnum) -> i32 {
+        self.mob_instances.iter().filter(|m| m.vnum == vnum).count() as i32
     }
 
     /// Pick a start room: prefer the configured mortal start, fall back to

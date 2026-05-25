@@ -14,7 +14,10 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     players::asciiflag_conv,
-    world::{Direction, Exit, ExtraDescr, Room, World, Zone},
+    world::{
+        Direction, Exit, ExtraDescr, MobInstance, MobProto, ObjInstance, ObjProto,
+        ResetCmd, Room, World, Zone,
+    },
 };
 
 /// Read the world: walk lib/world/zon/index → load zones, then
@@ -24,6 +27,8 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 
     let zon_dir = format!("{data_dir}/world/zon");
     let wld_dir = format!("{data_dir}/world/wld");
+    let obj_dir = format!("{data_dir}/world/obj");
+    let mob_dir = format!("{data_dir}/world/mob");
 
     // --- Zones -------------------------------------------------------------
     for fname in read_index(&zon_dir)? {
@@ -40,6 +45,36 @@ pub fn load_world(data_dir: &str) -> Result<World> {
             .with_context(|| format!("Parsing room file {}", path.display()))?;
     }
     tracing::info!(count = world.rooms.len(), "Loaded rooms");
+
+    // --- Object prototypes ------------------------------------------------
+    for fname in read_index(&obj_dir)? {
+        let path = PathBuf::from(&obj_dir).join(&fname);
+        parse_object_file(&path, &mut world)
+            .with_context(|| format!("Parsing object file {}", path.display()))?;
+    }
+    tracing::info!(count = world.obj_protos.len(), "Loaded object prototypes");
+
+    // --- Mob prototypes ----------------------------------------------------
+    for fname in read_index(&mob_dir)? {
+        let path = PathBuf::from(&mob_dir).join(&fname);
+        parse_mob_file(&path, &mut world)
+            .with_context(|| format!("Parsing mob file {}", path.display()))?;
+    }
+    tracing::info!(count = world.mob_protos.len(), "Loaded mob prototypes");
+
+    // --- Run zone resets ---------------------------------------------------
+    // Mirrors the initial reset_zone() pass that boot_db() performs over all
+    // zones. We do this synchronously at boot; periodic resets (driven by
+    // zone_update() / reset_mode) are deferred.
+    let zone_vnums: Vec<i32> = world.zones.keys().copied().collect();
+    for zv in zone_vnums {
+        reset_zone(&mut world, zv);
+    }
+    tracing::info!(
+        mobs = world.mob_instances.len(),
+        objs = world.obj_instances.len(),
+        "Initial zone reset complete",
+    );
 
     Ok(world)
 }
@@ -181,9 +216,457 @@ fn parse_zone_file(path: &PathBuf, world: &mut World) -> Result<()> {
         bail!("zone {vnum}: numeric line has too few fields: {numline:?}");
     }
 
-    // We ignore reset commands for this checkpoint, just read until S or $.
+    // Read reset commands until S or $ (or EOF).
+    loop {
+        s.skip_blanks();
+        let line = match s.next_line() {
+            Some(l) => l,
+            None => break,
+        };
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        let first = t.chars().next().unwrap();
+        // Comments
+        if first == '*' { continue; }
+        if first == 'S' || first == '$' { break; }
+
+        // The first token after the letter is `if_flag`. Parse out the rest.
+        // Format: "<cmd> <if_flag> <arg1> <arg2> [<arg3>] ..."
+        // Optional tab-separated trailing comment is ignored.
+        let rest = &t[1..];
+        // Strip trailing comment after a tab (zone files use this convention).
+        let rest = rest.split('\t').next().unwrap_or(rest);
+        let toks: Vec<&str> = rest.split_whitespace().collect();
+
+        // T and V commands have different shapes; we skip them for now.
+        if first == 'T' || first == 'V' {
+            continue;
+        }
+        if toks.len() < 3 {
+            // Malformed — skip rather than abort the whole boot
+            tracing::warn!(zone = zone.number, line = ?t, "skipping malformed reset");
+            continue;
+        }
+        let if_flag: i32 = toks[0].parse().unwrap_or(0);
+        let arg1:    i32 = toks[1].parse().unwrap_or(0);
+        let arg2:    i32 = toks[2].parse().unwrap_or(0);
+        let arg3:    i32 = toks.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        zone.commands.push(ResetCmd {
+            command: first,
+            if_flag, arg1, arg2, arg3,
+        });
+    }
+
     world.zones.insert(zone.number, zone);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Object file parser
+// ---------------------------------------------------------------------------
+fn parse_object_file(path: &PathBuf, world: &mut World) -> Result<()> {
+    let mut s = Stream::from_file(path)?;
+
+    loop {
+        s.skip_blanks();
+        let header = match s.next_line() {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+        let t = header.trim();
+        if t == "$" || t == "$~" { return Ok(()); }
+        let vnum: i32 = t.strip_prefix('#')
+            .ok_or_else(|| anyhow!("obj header missing '#': {t:?}"))?
+            .trim()
+            .parse()
+            .with_context(|| format!("bad obj vnum: {t:?}"))?;
+
+        let name               = s.read_tilde_string()?;
+        let short_description  = s.read_tilde_string()?;
+        let description        = s.read_tilde_string()?;
+        let action_description = s.read_tilde_string()?;
+
+        let line1 = s.next_line()
+            .ok_or_else(|| anyhow!("obj {vnum}: missing first numeric line"))?;
+        let toks: Vec<&str> = line1.split_whitespace().collect();
+
+        let mut o = ObjProto {
+            vnum,
+            name:               name.trim().to_string(),
+            short_description:  short_description.trim().to_string(),
+            description:        description.trim().to_string(),
+            action_description: action_description.trim().to_string(),
+            ..Default::default()
+        };
+
+        // Modern (128-bit) format has 13 tokens: type + 12 flag tokens.
+        if toks.len() >= 13 {
+            o.item_type        = toks[0].parse().unwrap_or(0);
+            o.extra_flags[0]   = asciiflag_conv(toks[1]);
+            o.extra_flags[1]   = asciiflag_conv(toks[2]);
+            o.extra_flags[2]   = asciiflag_conv(toks[3]);
+            o.extra_flags[3]   = asciiflag_conv(toks[4]);
+            o.wear_flags[0]    = asciiflag_conv(toks[5]);
+            o.wear_flags[1]    = asciiflag_conv(toks[6]);
+            o.wear_flags[2]    = asciiflag_conv(toks[7]);
+            o.wear_flags[3]    = asciiflag_conv(toks[8]);
+            o.affect_flags[0]  = asciiflag_conv(toks[9]);
+            o.affect_flags[1]  = asciiflag_conv(toks[10]);
+            o.affect_flags[2]  = asciiflag_conv(toks[11]);
+            o.affect_flags[3]  = asciiflag_conv(toks[12]);
+        } else if toks.len() >= 4 {
+            // Legacy 4-tok form: type extra wear affect
+            o.item_type      = toks[0].parse().unwrap_or(0);
+            o.extra_flags[0] = asciiflag_conv(toks[1]);
+            o.wear_flags[0]  = asciiflag_conv(toks[2]);
+            o.affect_flags[0]= asciiflag_conv(toks[3]);
+        } else {
+            bail!("obj {vnum}: bad first numeric line: {line1:?}");
+        }
+
+        let line2 = s.next_line()
+            .ok_or_else(|| anyhow!("obj {vnum}: missing values line"))?;
+        let toks: Vec<&str> = line2.split_whitespace().collect();
+        for i in 0..o.value.len().min(toks.len()) {
+            o.value[i] = toks[i].parse().unwrap_or(0);
+        }
+
+        let line3 = s.next_line()
+            .ok_or_else(|| anyhow!("obj {vnum}: missing third line"))?;
+        let toks: Vec<&str> = line3.split_whitespace().collect();
+        if !toks.is_empty()  { o.weight = toks[0].parse().unwrap_or(0); }
+        if toks.len() > 1    { o.cost   = toks[1].parse().unwrap_or(0); }
+        if toks.len() > 2    { o.rent   = toks[2].parse().unwrap_or(0); }
+        if toks.len() > 3    { o.level  = toks[3].parse().unwrap_or(0); }
+        if toks.len() > 4    { o.timer  = toks[4].parse().unwrap_or(0); }
+
+        // Trailing E (extra desc) / A (affect) / T (trigger) records, until
+        // we hit '$' (end of file) or '#' (next obj — push it back).
+        loop {
+            s.skip_blanks();
+            let peeked = s.peek().map(|p| p.trim_start().chars().next()).flatten();
+            match peeked {
+                Some('E') => {
+                    let _ = s.next_line(); // consume 'E' line
+                    let kw   = s.read_tilde_string()?;
+                    let desc = s.read_tilde_string()?;
+                    o.extras.push(ExtraDescr {
+                        keyword:     kw.trim().to_string(),
+                        description: desc.trim().to_string(),
+                    });
+                }
+                Some('A') => {
+                    // 'A' then a line "<location> <modifier>" — we don't use
+                    // affects yet but must consume two lines to stay in sync.
+                    let _ = s.next_line(); // 'A'
+                    let _ = s.next_line(); // values
+                }
+                Some('T') => {
+                    let _ = s.next_line(); // DG trigger — skip
+                }
+                Some('$') | Some('#') | None => break,
+                _ => {
+                    let bad = s.peek().map(|p| p.to_string()).unwrap_or_default();
+                    bail!("obj {vnum}: unexpected line {bad:?}");
+                }
+            }
+        }
+
+        world.obj_protos.insert(o.vnum, o);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mob file parser
+// ---------------------------------------------------------------------------
+fn parse_mob_file(path: &PathBuf, world: &mut World) -> Result<()> {
+    let mut s = Stream::from_file(path)?;
+
+    loop {
+        s.skip_blanks();
+        let header = match s.next_line() {
+            Some(h) => h,
+            None => return Ok(()),
+        };
+        let t = header.trim();
+        if t == "$" || t == "$~" { return Ok(()); }
+        let vnum: i32 = t.strip_prefix('#')
+            .ok_or_else(|| anyhow!("mob header missing '#': {t:?}"))?
+            .trim()
+            .parse()
+            .with_context(|| format!("bad mob vnum: {t:?}"))?;
+
+        let name        = s.read_tilde_string()?;
+        let short_descr = s.read_tilde_string()?;
+        let long_descr  = s.read_tilde_string()?;
+        let description = s.read_tilde_string()?;
+
+        // Flag line: "<f1..f8> <align> <S|E>" (10 tokens — modern 128-bit).
+        // Legacy 4-tok form: "<mobflags> <affflags> <align> <S|E>".
+        let flagline = s.next_line()
+            .ok_or_else(|| anyhow!("mob {vnum}: missing flag line"))?;
+        let toks: Vec<&str> = flagline.split_whitespace().collect();
+
+        let mut m = MobProto {
+            vnum,
+            name:        name.trim().to_string(),
+            short_descr: short_descr.trim().to_string(),
+            long_descr:  long_descr.trim().to_string(),
+            description: description.trim().to_string(),
+            ..Default::default()
+        };
+
+        let mob_kind: char;
+        if toks.len() >= 10 {
+            m.mob_flags[0] = asciiflag_conv(toks[0]);
+            m.mob_flags[1] = asciiflag_conv(toks[1]);
+            m.mob_flags[2] = asciiflag_conv(toks[2]);
+            m.mob_flags[3] = asciiflag_conv(toks[3]);
+            m.aff_flags[0] = asciiflag_conv(toks[4]);
+            m.aff_flags[1] = asciiflag_conv(toks[5]);
+            m.aff_flags[2] = asciiflag_conv(toks[6]);
+            m.aff_flags[3] = asciiflag_conv(toks[7]);
+            m.alignment    = toks[8].parse().unwrap_or(0);
+            mob_kind = toks[9].chars().next().unwrap_or('S').to_ascii_uppercase();
+        } else if toks.len() >= 4 {
+            m.mob_flags[0] = asciiflag_conv(toks[0]);
+            m.aff_flags[0] = asciiflag_conv(toks[1]);
+            m.alignment    = toks[2].parse().unwrap_or(0);
+            mob_kind = toks[3].chars().next().unwrap_or('S').to_ascii_uppercase();
+        } else {
+            bail!("mob {vnum}: bad flag line: {flagline:?}");
+        }
+
+        // Simple-mob stat block (both S and E start with this).
+        // Line A: "<level> <thac0> <ac> <hp_d>d<hp_s>+<hp_a> <dam_d>d<dam_s>+<dam_a>"
+        let l1 = s.next_line()
+            .ok_or_else(|| anyhow!("mob {vnum}: missing stat line 1"))?;
+        let (lvl, thac0, ac, hp, _hp_s, _hp_a, _dd, _ds, _da) = parse_mob_stats(&l1)
+            .with_context(|| format!("mob {vnum}: parsing stat line 1"))?;
+        m.level = lvl;
+        m.hitroll = 20 - thac0;
+        m.ac      = 10 * ac;
+        m.hit     = hp;
+        m.mana    = 10;
+        m.mv      = 50;
+
+        let l2 = s.next_line()
+            .ok_or_else(|| anyhow!("mob {vnum}: missing gold/exp line"))?;
+        let toks: Vec<&str> = l2.split_whitespace().collect();
+        if toks.len() >= 2 {
+            m.gold = toks[0].parse().unwrap_or(0);
+            m.exp  = toks[1].parse().unwrap_or(0);
+        }
+
+        let l3 = s.next_line()
+            .ok_or_else(|| anyhow!("mob {vnum}: missing pos line"))?;
+        let toks: Vec<&str> = l3.split_whitespace().collect();
+        if toks.len() >= 3 {
+            m.position    = toks[0].parse().unwrap_or(0);
+            m.default_pos = toks[1].parse().unwrap_or(0);
+            m.sex         = toks[2].parse().unwrap_or(0);
+        }
+
+        // Enhanced section: skip ESpec keyword:value lines until lone 'E'.
+        if mob_kind == 'E' {
+            loop {
+                let line = s.next_line()
+                    .ok_or_else(|| anyhow!("mob {vnum}: EOF in espec section"))?;
+                if line.trim() == "E" { break; }
+                if line.starts_with('#') {
+                    bail!("mob {vnum}: unterminated espec section");
+                }
+                // ignore espec keyword:value content for now
+            }
+        }
+
+        // Trailing DG trigger references (T <vnum>) — skip
+        loop {
+            s.skip_blanks();
+            match s.peek() {
+                Some(p) if p.trim_start().starts_with('T') => { let _ = s.next_line(); }
+                _ => break,
+            }
+        }
+
+        world.mob_protos.insert(m.vnum, m);
+    }
+}
+
+/// Parse a mob simple-stat line "L T A HdH+A DdD+A" into a 9-tuple.
+fn parse_mob_stats(line: &str) -> Result<(i32,i32,i32,i32,i32,i32,i32,i32,i32)> {
+    // Replace 'd' and '+' with spaces so we can split uniformly.
+    let normalized: String = line.chars()
+        .map(|c| if c == 'd' || c == '+' { ' ' } else { c })
+        .collect();
+    let toks: Vec<&str> = normalized.split_whitespace().collect();
+    if toks.len() < 9 {
+        bail!("expected 9 numeric fields, got {}: {line:?}", toks.len());
+    }
+    Ok((
+        toks[0].parse().unwrap_or(0),
+        toks[1].parse().unwrap_or(0),
+        toks[2].parse().unwrap_or(0),
+        toks[3].parse().unwrap_or(0),
+        toks[4].parse().unwrap_or(0),
+        toks[5].parse().unwrap_or(0),
+        toks[6].parse().unwrap_or(0),
+        toks[7].parse().unwrap_or(0),
+        toks[8].parse().unwrap_or(0),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Zone resets — execute one zone's reset commands
+// ---------------------------------------------------------------------------
+
+/// Initial zone reset: spawns mobs and objects according to the zone's
+/// reset command list. Mirrors reset_zone() in db.c, restricted to the
+/// commands we currently implement (M, O, G, P, R, D). E (equip) is
+/// downgraded to G (give) since we don't have equipment slots yet. T and V
+/// are dropped at parse time.
+fn reset_zone(world: &mut World, zone_vnum: i32) {
+    // Clone the command list so we can mutate world.* during execution.
+    let cmds = match world.zones.get(&zone_vnum) {
+        Some(z) => z.commands.clone(),
+        None => return,
+    };
+
+    let mut last_cmd_ok = true;
+    let mut next_mob_id: u32 = world.mob_instances.last().map(|m| m.id + 1).unwrap_or(1);
+    let mut next_obj_id: u32 = world.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
+    // Track the most-recently-loaded mob instance id for 'G' (give to mob).
+    let mut last_mob_id: Option<u32> = None;
+
+    for cmd in &cmds {
+        if cmd.if_flag != 0 && !last_cmd_ok {
+            continue;
+        }
+
+        match cmd.command {
+            'M' => {
+                // arg1=mob_vnum arg2=max arg3=room_vnum
+                if !world.mob_protos.contains_key(&cmd.arg1) {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if world.count_mob(cmd.arg1) >= cmd.arg2 {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
+                    let id = next_mob_id; next_mob_id += 1;
+                    room.mobs.push(id);
+                    world.mob_instances.push(MobInstance {
+                        id, vnum: cmd.arg1, in_room: cmd.arg3,
+                    });
+                    last_mob_id = Some(id);
+                    last_cmd_ok = true;
+                } else {
+                    last_cmd_ok = false;
+                }
+            }
+            'O' => {
+                // arg1=obj_vnum arg2=max arg3=room_vnum
+                if !world.obj_protos.contains_key(&cmd.arg1) {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if world.count_obj(cmd.arg1) >= cmd.arg2 {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if cmd.arg3 == -1 {
+                    // Limbo / nowhere — load but don't place.
+                    let id = next_obj_id; next_obj_id += 1;
+                    world.obj_instances.push(ObjInstance {
+                        id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                    });
+                    last_cmd_ok = true;
+                } else if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
+                    let id = next_obj_id; next_obj_id += 1;
+                    room.objects.push(id);
+                    world.obj_instances.push(ObjInstance {
+                        id, vnum: cmd.arg1, in_room: cmd.arg3,
+                    });
+                    last_cmd_ok = true;
+                } else {
+                    last_cmd_ok = false;
+                }
+            }
+            'G' | 'E' => {
+                // For now, both G (give) and E (equip) just attach the obj to
+                // the last-loaded mob's room. Full inventory/equipment lists
+                // come with the character system.
+                if last_mob_id.is_none() {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if !world.obj_protos.contains_key(&cmd.arg1) {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if world.count_obj(cmd.arg1) >= cmd.arg2 {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                // For inventory-less stub, just load into the mob's room.
+                let mob_id = last_mob_id.unwrap();
+                let mob_room = world.mob_instances.iter()
+                    .find(|m| m.id == mob_id)
+                    .map(|m| m.in_room);
+                if let Some(rv) = mob_room {
+                    if rv != crate::world::NOWHERE {
+                        let id = next_obj_id; next_obj_id += 1;
+                        if let Some(r) = world.rooms.get_mut(&rv) {
+                            r.objects.push(id);
+                        }
+                        world.obj_instances.push(ObjInstance {
+                            id, vnum: cmd.arg1, in_room: rv,
+                        });
+                    }
+                }
+                last_cmd_ok = true;
+            }
+            'P' => {
+                // Put obj-in-obj — we don't model containers yet; just spawn
+                // the inner object in limbo so the count_obj cap still works.
+                if !world.obj_protos.contains_key(&cmd.arg1) {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                if world.count_obj(cmd.arg1) >= cmd.arg2 {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                let id = next_obj_id; next_obj_id += 1;
+                world.obj_instances.push(ObjInstance {
+                    id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                });
+                last_cmd_ok = true;
+            }
+            'R' => {
+                // Remove obj from room: arg1=room_vnum arg2=obj_vnum
+                if let Some(r) = world.rooms.get_mut(&cmd.arg1) {
+                    if let Some(pos) = r.objects.iter().position(|&iid| {
+                        world.obj_instances.iter()
+                            .any(|o| o.id == iid && o.vnum == cmd.arg2)
+                    }) {
+                        let iid = r.objects.remove(pos);
+                        world.obj_instances.retain(|o| o.id != iid);
+                    }
+                }
+                last_cmd_ok = true;
+            }
+            'D' => {
+                // Door state — skipped until door-flag handling lands; counts
+                // as success so subsequent if-conditioned commands proceed.
+                last_cmd_ok = true;
+            }
+            _ => { last_cmd_ok = false; }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
