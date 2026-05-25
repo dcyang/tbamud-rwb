@@ -41,6 +41,7 @@ const COMMANDS: &[&str] = &[
     "examine",
     "list", "buy", "sell",
     "kick", "bash", "backstab",
+    "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
     "say", "tell", "who",
@@ -118,6 +119,9 @@ pub async fn dispatch_command(
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("sneak")     => do_sneak(me),
+        Some("hide")      => do_hide(me),
+        Some("steal")     => do_steal(rest, me, world, chars).await,
         Some("cast")      => do_cast(rest, me, world, chars).await,
         Some("skills")    => do_skills(me),
         Some("practice")  => do_practice(rest, me),
@@ -484,10 +488,11 @@ async fn do_drop(
     CmdOutput::text(format!("\r\nYou drop {}.\r\n", name))
 }
 
-async fn do_say(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+async fn do_say(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nYak yak yak...\r\n");
     }
+    me.reveal();
     let cl = chars.lock().await;
     cl.broadcast_room(
         me.current_room, Some(me.id),
@@ -691,6 +696,7 @@ async fn do_kill(
     if me.fighting.is_some() {
         return CmdOutput::text("\r\nYou are already fighting!\r\n");
     }
+    me.reveal();
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
 
@@ -756,6 +762,7 @@ async fn do_skill(
     use rand::Rng;
     use crate::db::dice;
 
+    me.reveal();
     // Class restriction.
     if !skill.is_class_allowed(me.class) {
         return CmdOutput::text(format!(
@@ -949,6 +956,7 @@ async fn do_cast(
     if arg.is_empty() {
         return CmdOutput::text("\r\nCast which spell? Try `cast magic-missile fido` or `cast cure-light`.\r\n");
     }
+    me.reveal();
 
     // Accept either `cast '<spell name>' target` or `cast <hyphenated-spell> target`.
     let (spell_str, target) = if let Some(stripped) = arg.strip_prefix('\'') {
@@ -1000,6 +1008,7 @@ async fn do_cast(
         crate::character::Skill::BurningHands => cast_burning_hands(me, world, chars, learned).await,
         crate::character::Skill::Sanctuary    => cast_sanctuary(target, me, chars, learned).await,
         crate::character::Skill::Harm         => cast_harm(target, me, world, chars, learned).await,
+        crate::character::Skill::WordOfRecall => cast_word_of_recall(me, world, chars).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -1431,6 +1440,52 @@ async fn cast_harm(
     CmdOutput::text(to_me)
 }
 
+async fn cast_word_of_recall(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let from_room = me.current_room;
+    // Mortal start = Temple of Midgaard.  Immortals get the immortal start.
+    let target = {
+        let w = world.lock().await;
+        w.start_room(me.level >= 34)
+    };
+    me.mana -= crate::character::Skill::WordOfRecall.mana_cost();
+    me.fighting = None;
+    me.hidden   = false;
+    me.sneaking = false;
+    let was_room = me.current_room;
+    me.current_room = target;
+    // Clear any mob targeting this player.
+    {
+        let mut w = world.lock().await;
+        for m in w.mob_instances.iter_mut() {
+            if m.fighting.map(|t| t.is_player && t.id == me.id).unwrap_or(false) {
+                m.fighting = None;
+            }
+        }
+        let _ = was_room;
+    }
+    // Update registry and broadcast.
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, target);
+        cl.broadcast_room(
+            from_room, Some(me.id),
+            &format!("{} disappears in a flash of holy light!\r\n", me.name),
+        );
+        cl.broadcast_room(
+            target, Some(me.id),
+            &format!("{} appears in a flash of holy light!\r\n", me.name),
+        );
+    }
+    let view = render_room(target, Some(me.id), world, chars).await;
+    CmdOutput::text(format!(
+        "\r\nA holy beacon snatches you back to the temple.\r\n{view}",
+    ))
+}
+
 async fn cast_burning_hands(
     me: &mut Character,
     world: &Arc<Mutex<World>>,
@@ -1554,6 +1609,183 @@ async fn cast_burning_hands(
     }
 
     CmdOutput::text(to_me)
+}
+
+// ---------------------------------------------------------------------------
+// Thief utility skills (sneak / hide / steal)
+// ---------------------------------------------------------------------------
+
+fn do_sneak(me: &mut Character) -> CmdOutput {
+    if !crate::character::Skill::Sneak.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou are too clumsy to sneak about.\r\n");
+    }
+    let learned = *me.skills.get(&crate::character::Skill::Sneak).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou haven't practised sneaking. Try `practice sneak`.\r\n",
+        );
+    }
+    me.sneaking = !me.sneaking;
+    if me.sneaking {
+        CmdOutput::text("\r\nYou are now sneaking quietly.\r\n")
+    } else {
+        CmdOutput::text("\r\nYou stop sneaking.\r\n")
+    }
+}
+
+fn do_hide(me: &mut Character) -> CmdOutput {
+    use rand::Rng;
+    if !crate::character::Skill::Hide.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou have no idea how to hide.\r\n");
+    }
+    let learned = *me.skills.get(&crate::character::Skill::Hide).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou haven't practised hiding. Try `practice hide`.\r\n",
+        );
+    }
+    let chance = (40 + learned as i32).min(95);
+    let success = rand::thread_rng().gen_range(0..100) < chance;
+    if success {
+        me.hidden = true;
+        CmdOutput::text("\r\nYou attempt to hide yourself.\r\n")
+    } else {
+        // Failure tries to look secretive but ultimately fails — same
+        // message either way: the player can't easily tell.
+        me.hidden = false;
+        CmdOutput::text("\r\nYou attempt to hide yourself.\r\n")
+    }
+}
+
+async fn do_steal(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    if !crate::character::Skill::Steal.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou couldn't pickpocket if your life depended on it.\r\n");
+    }
+    let learned = *me.skills.get(&crate::character::Skill::Steal).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou haven't practised stealing. Try `practice steal`.\r\n",
+        );
+    }
+    // "steal <item|coins> <target>"
+    let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
+    if parts.len() < 2 {
+        return CmdOutput::text("\r\nSteal what from whom?\r\n");
+    }
+    let what = parts[0].to_ascii_lowercase();
+    let target_kw = parts[1].trim().to_ascii_lowercase();
+
+    // Find a mob in the room with the target keyword.
+    let mob_id = {
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&target_kw)) {
+                Some(mid)
+            } else { None }
+        }))
+    };
+    let Some(mob_id) = mob_id else {
+        return CmdOutput::text(format!("\r\nYou see no {target_kw} here.\r\n"));
+    };
+
+    // Hide breaks on stealing; sneak survives.
+    me.hidden = false;
+
+    let success = rand::thread_rng().gen_range(0..100) < (30 + learned as i32 / 2).min(85);
+
+    // Mob info needed regardless of success.
+    let mob_name = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|m| m.id == mob_id)
+            .and_then(|m| w.mob_protos.get(&m.vnum))
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into())
+    };
+
+    if !success {
+        // Detection — mob aggros.
+        {
+            let mut w = world.lock().await;
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                if m.fighting.is_none() {
+                    m.fighting = Some(Target { id: me.id, is_player: true });
+                }
+            }
+        }
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+        }
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{mob_name} catches {} trying to steal from them!\r\n", me.name),
+        );
+        return CmdOutput::text(format!(
+            "\r\nOops. {mob_name} catches you and bristles in anger!\r\n",
+        ));
+    }
+
+    // Success — take coins or a named item.
+    if what == "coins" || what == "gold" || what == "money" {
+        // We don't model mob gold currently; treat as a small windfall
+        // proportional to mob level.
+        let level = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.gold.max(1))
+                .unwrap_or(1)
+        };
+        let take = (level / 4).max(1) as i64;
+        me.gold += take;
+        return CmdOutput::text(format!(
+            "\r\nYou lift {take} gold from {mob_name}.\r\n",
+        ));
+    }
+
+    // Otherwise: try to steal a named item from mob inventory.
+    let stolen = {
+        let mut w = world.lock().await;
+        let mob = w.mob_instances.iter().find(|m| m.id == mob_id);
+        let mob_inv = mob.map(|m| m.inventory.clone()).unwrap_or_default();
+        let mut found: Option<(u32, String)> = None;
+        for &iid in &mob_inv {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if let Some(p) = w.obj_protos.get(&o.vnum) {
+                    if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&what)) {
+                        found = Some((iid, p.short_description.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some((iid, _)) = found.as_ref() {
+            // Remove from mob, the caller pushes onto player inventory.
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                m.inventory.retain(|&i| i != *iid);
+            }
+        }
+        found
+    };
+
+    let Some((iid, short)) = stolen else {
+        return CmdOutput::text(format!(
+            "\r\n{mob_name} has no {what} for you to steal.\r\n",
+        ));
+    };
+    me.inventory.push(iid);
+    CmdOutput::text(format!(
+        "\r\nYou deftly lift {short} from {mob_name}.\r\n",
+    ))
 }
 
 async fn do_flee(
@@ -2132,6 +2364,10 @@ async fn do_move(
     drop(w);
 
     let from_room = me.current_room;
+    // Hide drops on any movement. Sneak persists across movements but
+    // suppresses the broadcasts.
+    let was_sneaking = me.sneaking;
+    me.hidden = false;
     let leave_msg = format!("{} leaves {}.\r\n", me.name, dir.name());
     let arrive_msg = format!("{} has arrived.\r\n", me.name);
 
@@ -2139,8 +2375,10 @@ async fn do_move(
     {
         let mut cl = chars.lock().await;
         cl.update_room(me.id, target);
-        cl.broadcast_room(from_room, Some(me.id), &leave_msg);
-        cl.broadcast_room(target,    Some(me.id), &arrive_msg);
+        if !was_sneaking {
+            cl.broadcast_room(from_room, Some(me.id), &leave_msg);
+            cl.broadcast_room(target,    Some(me.id), &arrive_msg);
+        }
     }
 
     // Show the new room
@@ -2212,11 +2450,14 @@ pub async fn render_room(
     }
     drop(w);
 
-    // Other players in this room
+    // Other players in this room (skip hidden players).
     let cl = chars.lock().await;
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
+        // Briefly lock the character to check the `hidden` flag.
+        let hidden = p.character.lock().await.hidden;
+        if hidden { continue; }
         s.push_str(&format!("{} is standing here.\r\n", p.name));
     }
 

@@ -251,6 +251,8 @@ pub async fn handle_connection(
                         m
                     },
                     affects:      Vec::new(),
+                    sneaking:     false,
+                    hidden:       false,
                 };
 
                 // Settle any pending level-ups (e.g. character was offline

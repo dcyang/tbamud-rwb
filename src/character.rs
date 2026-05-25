@@ -34,6 +34,10 @@ pub enum Skill {
     BurningHands,
     Sanctuary,
     Harm,
+    Sneak,
+    Hide,
+    Steal,
+    WordOfRecall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,10 @@ impl Skill {
             "burninghands" => Some(Skill::BurningHands),
             "sanctuary"    => Some(Skill::Sanctuary),
             "harm"         => Some(Skill::Harm),
+            "sneak"        => Some(Skill::Sneak),
+            "hide"         => Some(Skill::Hide),
+            "steal"        => Some(Skill::Steal),
+            "wordofrecall" => Some(Skill::WordOfRecall),
             _ => None,
         }
     }
@@ -77,28 +85,36 @@ impl Skill {
             Skill::BurningHands => "burning hands",
             Skill::Sanctuary    => "sanctuary",
             Skill::Harm         => "harm",
+            Skill::Sneak        => "sneak",
+            Skill::Hide         => "hide",
+            Skill::Steal        => "steal",
+            Skill::WordOfRecall => "word of recall",
         }
     }
 
     pub fn kind(self) -> SkillKind {
         match self {
-            Skill::Kick | Skill::Bash | Skill::Backstab => SkillKind::Physical,
+            Skill::Kick | Skill::Bash | Skill::Backstab
+                | Skill::Sneak | Skill::Hide | Skill::Steal => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
-                | Skill::Sanctuary | Skill::Harm        => SkillKind::Spell,
+                | Skill::Sanctuary | Skill::Harm
+                | Skill::WordOfRecall                       => SkillKind::Spell,
         }
     }
 
     /// Mana cost when invoking this skill.  Zero for physical skills.
     pub fn mana_cost(self) -> i32 {
         match self {
-            Skill::Kick | Skill::Bash | Skill::Backstab => 0,
+            Skill::Kick | Skill::Bash | Skill::Backstab
+                | Skill::Sneak | Skill::Hide | Skill::Steal => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
             Skill::BurningHands => 12,
             Skill::Sanctuary    => 10,
             Skill::Harm         => 10,
+            Skill::WordOfRecall => 20,
         }
     }
 
@@ -114,6 +130,13 @@ impl Skill {
             Skill::BurningHands => &[Class::MagicUser],
             Skill::Sanctuary    => &[Class::Cleric],
             Skill::Harm         => &[Class::Cleric],
+            Skill::Sneak        => &[Class::Thief],
+            Skill::Hide         => &[Class::Thief],
+            Skill::Steal        => &[Class::Thief],
+            // Word of recall is Cleric-only here, but in CircleMUD it's
+            // shared between Cleric and MagicUser (and trivially castable
+            // by all in many forks).  Keep Cleric-only for now.
+            Skill::WordOfRecall => &[Class::Cleric, Class::MagicUser],
         }
     }
 
@@ -133,6 +156,10 @@ impl Skill {
             Skill::BurningHands => "burning-hands",
             Skill::Sanctuary    => "sanctuary",
             Skill::Harm         => "harm",
+            Skill::Sneak        => "sneak",
+            Skill::Hide         => "hide",
+            Skill::Steal        => "steal",
+            Skill::WordOfRecall => "word-of-recall",
         }
     }
 
@@ -145,9 +172,11 @@ impl Skill {
 /// All known skills — iteration order for `skills` command + persistence.
 pub const ALL_SKILLS: &[Skill] = &[
     Skill::Kick, Skill::Bash, Skill::Backstab,
+    Skill::Sneak, Skill::Hide, Skill::Steal,
     Skill::MagicMissile, Skill::CureLight,
     Skill::Bless, Skill::BurningHands,
     Skill::Sanctuary, Skill::Harm,
+    Skill::WordOfRecall,
 ];
 
 // ---------------------------------------------------------------------------
@@ -218,6 +247,23 @@ pub struct Character {
     /// Active temporary affects (buffs/debuffs).  Not persisted across
     /// sessions.
     pub affects:      Vec<Affect>,
+    /// Stealth flags.  `sneaking` suppresses leave/arrive broadcasts on
+    /// movement; `hidden` removes the character from the room listing.
+    /// Both break on the next overt action (attack/cast/say).
+    pub sneaking:     bool,
+    pub hidden:       bool,
+}
+
+impl Character {
+    /// Reveal: drop both stealth flags.  Called from any overt action.
+    /// Returns true if we *were* hidden (caller uses this to broadcast
+    /// "X steps out of the shadows").
+    pub fn reveal(&mut self) -> bool {
+        let was_hidden = self.hidden;
+        self.sneaking = false;
+        self.hidden   = false;
+        was_hidden
+    }
 }
 
 /// STR-based damage modifier — mirrors str_app[].todam in constants.c
