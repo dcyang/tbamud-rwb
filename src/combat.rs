@@ -41,6 +41,44 @@ pub fn spawn(world: Arc<Mutex<World>>, chars: SharedChars) {
 /// One combat round.  Resolves all player→mob attacks first, then all
 /// mob→player counter-attacks.
 async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
+    // ----- Phase 0: tick mob affects (Poison etc) -------------------------
+    // Returns the list of (mob_id, room, mob_name, dead) for any mob that
+    // either had an expired effect (broadcast "looks better") or was
+    // killed outright by DoT damage.
+    let mob_effect_outcomes: Vec<(u32, crate::world::RoomVnum, String, bool, Vec<crate::character::Skill>)> = {
+        let mut w = world.lock().await;
+        let mut out = Vec::new();
+        // Snapshot ids so we can mutate w.mob_instances entries one by one.
+        let mids: Vec<u32> = w.mob_instances.iter()
+            .filter(|m| !m.affects.is_empty())
+            .map(|m| m.id).collect();
+        for mid in mids {
+            let expired = if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
+                m.tick_affects()
+            } else { continue; };
+            if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
+                let room = m.in_room;
+                let name = w.mob_protos.get(&m.vnum)
+                    .map(|p| p.short_descr.clone())
+                    .unwrap_or_else(|| "the creature".to_string());
+                let dead = m.hp <= 0;
+                out.push((mid, room, name, dead, expired));
+            }
+        }
+        out
+    };
+    for (mid, room, name, dead, expired) in mob_effect_outcomes {
+        let cl = chars.lock().await;
+        if !expired.is_empty() {
+            cl.broadcast_room(room, None, &format!("{name} looks better.\r\n"));
+        }
+        drop(cl);
+        if dead {
+            // DoT-only kill — no XP attribution (no clear killer).
+            kill_mob(mid, room, &name, "the venom", world, chars).await;
+        }
+    }
+
     // ----- Phase 1: snapshot all fighters --------------------------------
     // Avoid holding two locks; collect intents then mutate.
     let player_intents: Vec<PlayerIntent> = {

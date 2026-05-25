@@ -42,6 +42,7 @@ pub enum Skill {
     Identify,
     DetectInvis,
     DetectMagic,
+    Poison,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +78,7 @@ impl Skill {
             "identify"     => Some(Skill::Identify),
             "detectinvis" | "detectinvisible" => Some(Skill::DetectInvis),
             "detectmagic"                     => Some(Skill::DetectMagic),
+            "poison"                          => Some(Skill::Poison),
             _ => None,
         }
     }
@@ -101,6 +103,7 @@ impl Skill {
             Skill::Identify     => "identify",
             Skill::DetectInvis  => "detect invis",
             Skill::DetectMagic  => "detect magic",
+            Skill::Poison       => "poison",
         }
     }
 
@@ -112,7 +115,8 @@ impl Skill {
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
                 | Skill::WordOfRecall | Skill::Identify
-                | Skill::DetectInvis  | Skill::DetectMagic  => SkillKind::Spell,
+                | Skill::DetectInvis  | Skill::DetectMagic
+                | Skill::Poison       => SkillKind::Spell,
         }
     }
 
@@ -131,6 +135,7 @@ impl Skill {
             Skill::Identify     => 15,
             Skill::DetectInvis  => 10,
             Skill::DetectMagic  => 8,
+            Skill::Poison       => 12,
         }
     }
 
@@ -157,6 +162,7 @@ impl Skill {
             Skill::Identify     => &[Class::MagicUser],
             Skill::DetectInvis  => &[Class::MagicUser, Class::Cleric],
             Skill::DetectMagic  => &[Class::MagicUser, Class::Cleric],
+            Skill::Poison       => &[Class::MagicUser, Class::Cleric],
         }
     }
 
@@ -184,6 +190,7 @@ impl Skill {
             Skill::Identify     => "identify",
             Skill::DetectInvis  => "detect-invis",
             Skill::DetectMagic  => "detect-magic",
+            Skill::Poison       => "poison",
         }
     }
 
@@ -202,6 +209,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Sanctuary, Skill::Harm,
     Skill::WordOfRecall, Skill::Identify,
     Skill::DetectInvis, Skill::DetectMagic,
+    Skill::Poison,
 ];
 
 // ---------------------------------------------------------------------------
@@ -218,6 +226,8 @@ pub struct Affect {
     pub to_dam:        i32,
     /// Percent damage reduction on incoming attacks (0..=75).
     pub dmg_reduction: i32,
+    /// Recurring damage per combat tick (Poison etc).  Zero for buffs.
+    pub dot_damage:    i32,
 }
 
 impl Affect {

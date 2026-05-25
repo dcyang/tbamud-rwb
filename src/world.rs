@@ -419,6 +419,37 @@ pub struct MobInstance {
     /// DG trigger vnums attached to this mob (assigned via the T zone
     /// reset command).
     pub triggers:  Vec<TriggerVnum>,
+    /// Active timed effects (Poison etc).  Ticked by the combat loop.
+    pub affects:   Vec<crate::character::Affect>,
+}
+
+impl MobInstance {
+    /// Refresh or push a new affect on this mob (same-skill stacks
+    /// refresh, otherwise push). Mirrors Character::apply_affect.
+    pub fn apply_affect(&mut self, a: crate::character::Affect) {
+        if let Some(existing) = self.affects.iter_mut().find(|x| x.skill == a.skill) {
+            *existing = a;
+        } else {
+            self.affects.push(a);
+        }
+    }
+
+    /// Decrement all affect durations by one tick, applying any
+    /// `dot_damage` to `self.hp`.  Returns the list of skills that just
+    /// expired (caller broadcasts the "looks better" line).
+    pub fn tick_affects(&mut self) -> Vec<crate::character::Skill> {
+        let mut expired = Vec::new();
+        let mut total_dot = 0;
+        for a in self.affects.iter_mut() {
+            total_dot += a.dot_damage;
+            a.duration -= 1;
+        }
+        if total_dot > 0 { self.hp -= total_dot; }
+        self.affects.retain(|a| {
+            if a.duration <= 0 { expired.push(a.skill); false } else { true }
+        });
+        expired
+    }
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep

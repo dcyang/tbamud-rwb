@@ -2069,6 +2069,7 @@ async fn do_cast(
         crate::character::Skill::Identify     => cast_identify(target, me, world).await,
         crate::character::Skill::DetectInvis  => cast_detect_invis(me),
         crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
+        crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -2148,6 +2149,7 @@ fn cast_detect_invis(me: &mut Character) -> CmdOutput {
         to_hit:        0,
         to_dam:        0,
         dmg_reduction: 0,
+        dot_damage:    0,
     };
     me.mana -= crate::character::Skill::DetectInvis.mana_cost();
     me.apply_affect(aff);
@@ -2384,6 +2386,7 @@ async fn cast_bless(
         to_hit:        1,
         to_dam:        1,
         dmg_reduction: 0,
+        dot_damage:    0,
     };
 
     if let Some(ph) = target_handle {
@@ -2445,6 +2448,7 @@ async fn cast_sanctuary(
         to_hit:        0,
         to_dam:        0,
         dmg_reduction: 50,
+        dot_damage:    0,
     };
 
     if let Some(ph) = target_handle {
@@ -2598,6 +2602,70 @@ async fn cast_harm(
         return CmdOutput::text(msg);
     }
     CmdOutput::text(to_me)
+}
+
+/// `cast poison <target>` — apply a Poison affect to a mob in the
+/// caster's room.  Duration scales mildly with learned%; damage is a
+/// flat 3/tick.  Refuses on missing target or no matching mob.
+async fn cast_poison(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    if target_kw.is_empty() {
+        return CmdOutput::text("\r\nCast poison on whom?\r\n");
+    }
+    me.mana -= crate::character::Skill::Poison.mana_cost();
+
+    let kw = target_kw.to_ascii_lowercase();
+    let target_mid: Option<u32> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+                Some(mid)
+            } else { None }
+        }))
+    };
+    let Some(mid) = target_mid else {
+        return CmdOutput::text(format!("\r\nYou see no '{target_kw}' here.\r\n"));
+    };
+
+    // Hit chance scales with learned%.  Misses still consume mana.
+    let hit_chance = (70 + learned as i32 / 5).min(95);
+    if rand::thread_rng().gen_range(0..100) >= hit_chance {
+        return CmdOutput::text("\r\nThe poison fails to take.\r\n");
+    }
+
+    // Apply the affect + grab mob name for the broadcast.
+    let mob_name = {
+        let mut w = world.lock().await;
+        let aff = crate::character::Affect {
+            skill:         crate::character::Skill::Poison,
+            duration:      5 + (learned as i32 / 20),  // ~10–15s at 100%
+            to_hit:        0,
+            to_dam:        0,
+            dmg_reduction: 0,
+            dot_damage:    3,
+        };
+        let vnum = {
+            let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) else {
+                return CmdOutput::text("\r\nYour target is gone.\r\n");
+            };
+            m.apply_affect(aff);
+            m.vnum
+        };
+        w.mob_protos.get(&vnum).map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".to_string())
+    };
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} looks ill.\r\n", mob_name));
+    CmdOutput::text(format!("\r\n{mob_name} looks ill.\r\n"))
 }
 
 async fn cast_identify(

@@ -1336,6 +1336,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         fighting: None,
                         remembers: Vec::new(),
                         triggers: Vec::new(),
+                        affects: Vec::new(),
                     });
                     last_mob_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
