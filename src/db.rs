@@ -18,7 +18,7 @@ use crate::{
     players::asciiflag_conv,
     world::{
         Direction, Exit, ExtraDescr, MobInstance, MobProto, ObjInstance, ObjProto,
-        Quest, ResetCmd, Room, Shop, World, Zone,
+        Quest, ResetCmd, Room, Shop, Trigger, World, Zone,
     },
 };
 
@@ -104,6 +104,69 @@ fn parse_shop_file(path: &PathBuf, world: &mut World) -> Result<()> {
             buys_types,
             profit_buy,
             profit_sell,
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trigger file parser
+// ---------------------------------------------------------------------------
+
+/// Parse a `.trg` file containing DG trigger scripts.
+/// Format (per record):
+///   #<vnum>
+///   <name>~
+///   <attach_type> <type_letter> <narg>
+///   <arg>~                        (may be just `~`)
+///   <commands...>
+///   ~
+fn parse_trigger_file(path: &PathBuf, world: &mut World) -> Result<()> {
+    let mut s = Stream::from_file(path)?;
+    loop {
+        s.skip_blanks();
+        let header = match s.next_line() {
+            Some(h) => h.trim().to_string(),
+            None    => return Ok(()),
+        };
+        if header == "$" || header == "$~" { return Ok(()); }
+        let vnum: i32 = header.trim_start_matches('#').trim()
+            .parse().with_context(|| format!("bad trigger header: {header:?}"))?;
+
+        let name = s.read_tilde_string()?;
+
+        // Numeric/type line: "<attach_type> <type_letter> <narg>"
+        let line = s.next_line()
+            .ok_or_else(|| anyhow!("trigger {vnum}: missing type line"))?;
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 3 {
+            // Drain commands until ~
+            while let Some(l) = s.next_line() {
+                if l.trim() == "~" { break; }
+            }
+            tracing::warn!(vnum, "trigger has malformed type line, skipping");
+            continue;
+        }
+        let attach_type: i32 = toks[0].parse().unwrap_or(-1);
+        let trigger_type: char = toks[1].chars().next().unwrap_or('?');
+        let narg: i32 = toks[2].parse().unwrap_or(0);
+
+        let arg = s.read_tilde_string()?;
+
+        // Commands until a lone `~` line.
+        let mut commands = Vec::new();
+        while let Some(l) = s.next_line() {
+            if l.trim() == "~" { break; }
+            commands.push(l);
+        }
+
+        world.triggers.insert(vnum, Trigger {
+            vnum,
+            name:        name.trim().to_string(),
+            attach_type,
+            trigger_type,
+            narg,
+            arg:         arg.trim().to_string(),
+            commands,
         });
     }
 }
@@ -274,6 +337,18 @@ pub fn load_world(data_dir: &str) -> Result<World> {
             .with_context(|| format!("Parsing mob file {}", path.display()))?;
     }
     tracing::info!(count = world.mob_protos.len(), "Loaded mob prototypes");
+
+    // --- Triggers ----------------------------------------------------------
+    let trg_dir = format!("{data_dir}/world/trg");
+    if std::path::Path::new(&format!("{trg_dir}/index")).exists() {
+        for fname in read_index(&trg_dir)? {
+            let path = PathBuf::from(&trg_dir).join(&fname);
+            if let Err(e) = parse_trigger_file(&path, &mut world) {
+                tracing::warn!(path = %path.display(), error = %e, "Trigger parse error, skipping");
+            }
+        }
+        tracing::info!(count = world.triggers.len(), "Loaded triggers");
+    }
 
     // --- Quests ------------------------------------------------------------
     let qst_dir = format!("{data_dir}/world/qst");
@@ -643,8 +718,8 @@ fn parse_zone_file(path: &PathBuf, world: &mut World) -> Result<()> {
         let rest = rest.split('\t').next().unwrap_or(rest);
         let toks: Vec<&str> = rest.split_whitespace().collect();
 
-        // T and V commands have different shapes; we skip them for now.
-        if first == 'T' || first == 'V' {
+        // V commands set variables — we skip them for now.
+        if first == 'V' {
             continue;
         }
         if toks.len() < 3 {
@@ -948,6 +1023,8 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
     let mut next_obj_id: u32 = world.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
     // Track the most-recently-loaded mob instance id for 'G' (give to mob).
     let mut last_mob_id: Option<u32> = None;
+    let mut last_obj_id: Option<u32> = None;
+    let mut last_room_vnum: Option<crate::world::RoomVnum> = None;
 
     for cmd in &cmds {
         if cmd.if_flag != 0 && !last_cmd_ok {
@@ -980,8 +1057,10 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         hp, max_hp: hp,
                         fighting: None,
                         remembers: Vec::new(),
+                        triggers: Vec::new(),
                     });
                     last_mob_id = Some(id);
+                    last_room_vnum = Some(cmd.arg3);
                     last_cmd_ok = true;
                 } else {
                     last_cmd_ok = false;
@@ -1006,6 +1085,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         corpse_of: None,
                         decay_in: None,
                     });
+                    last_obj_id = Some(id);
                     last_cmd_ok = true;
                 } else if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
                     let id = next_obj_id; next_obj_id += 1;
@@ -1016,6 +1096,8 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         corpse_of: None,
                         decay_in: None,
                     });
+                    last_obj_id = Some(id);
+                    last_room_vnum = Some(cmd.arg3);
                     last_cmd_ok = true;
                 } else {
                     last_cmd_ok = false;
@@ -1098,6 +1180,42 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 // Door state — skipped until door-flag handling lands; counts
                 // as success so subsequent if-conditioned commands proceed.
                 last_cmd_ok = true;
+            }
+            'T' => {
+                // Attach trigger arg2 to the last-loaded entity.
+                // arg1 = attach_type (0 mob, 1 obj, 2 room), arg2 = trig vnum.
+                if !world.triggers.contains_key(&cmd.arg2) {
+                    last_cmd_ok = false;
+                    continue;
+                }
+                match cmd.arg1 {
+                    0 /* mob */ => {
+                        if let Some(mid) = last_mob_id {
+                            if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mid) {
+                                m.triggers.push(cmd.arg2);
+                                last_cmd_ok = true;
+                            } else { last_cmd_ok = false; }
+                        } else { last_cmd_ok = false; }
+                    }
+                    1 /* obj */ => {
+                        if let Some(oid) = last_obj_id {
+                            // Object trigger storage TBD — we don't yet
+                            // execute obj triggers, but we silently accept
+                            // them so the parser stays aligned.
+                            let _ = oid;
+                            last_cmd_ok = true;
+                        } else { last_cmd_ok = false; }
+                    }
+                    2 /* room */ => {
+                        if let Some(rv) = last_room_vnum {
+                            if let Some(r) = world.rooms.get_mut(&rv) {
+                                r.triggers.push(cmd.arg2);
+                                last_cmd_ok = true;
+                            } else { last_cmd_ok = false; }
+                        } else { last_cmd_ok = false; }
+                    }
+                    _ => { last_cmd_ok = false; }
+                }
             }
             _ => { last_cmd_ok = false; }
         }

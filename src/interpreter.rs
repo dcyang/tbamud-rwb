@@ -2951,12 +2951,99 @@ async fn do_move(
         }
     }
 
+    // Fire greet triggers on mobs in the destination room.
+    fire_greet_triggers(me, target, world, chars).await;
+
     // Show the new room — and append any quest-room hit.
     let mut view = render_room(target, Some(me.id), world, chars).await;
     if let Some(qmsg) = quest_check_room(me, target, world).await {
         view.push_str(&qmsg);
     }
     CmdOutput::text(view)
+}
+
+/// When `me` enters `room`, fire any greet (`g`) triggers attached to
+/// mobs there.  Variable substitution and control-flow commands are not
+/// yet interpreted; only `say <text>` lines are spoken.  Lines starting
+/// with `*` (comments) or `if`/`end`/`wait` are silently skipped.
+async fn fire_greet_triggers(
+    me: &Character,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    use rand::Rng;
+    // Snapshot the triggers + their host mob shortdescr.
+    let speeches: Vec<(String, String)> = {
+        let w = world.lock().await;
+        let mut out = Vec::new();
+        let Some(r) = w.rooms.get(&room) else { return; };
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            let Some(proto) = w.mob_protos.get(&m.vnum) else { continue; };
+            let mob_name = proto.short_descr.clone();
+            for &tvnum in &m.triggers {
+                let Some(t) = w.triggers.get(&tvnum) else { continue; };
+                if t.trigger_type != 'g' { continue; }
+                // narg = percent chance to fire (100 = always).
+                if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
+                    continue;
+                }
+                // Walk the commands, picking out `say` lines.
+                for raw in &t.commands {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('*') { continue; }
+                    // Skip control-flow / waits / commented-out stuff.
+                    if line.starts_with("if ") || line == "end" || line == "else"
+                        || line.starts_with("while ")
+                        || line.starts_with("wait ")
+                        || line.starts_with("eval ")
+                        || line.starts_with("set ")
+                    { continue; }
+                    if let Some(rest) = line.strip_prefix("say ") {
+                        // Variable substitution stub: replace %actor.name%
+                        // with the player's name, drop other %...% tokens.
+                        let said = substitute_vars(rest, &me.name);
+                        out.push((mob_name.clone(), said));
+                    } else if let Some(rest) = line.strip_prefix("mecho ") {
+                        // mecho echoes raw text to the room.
+                        let said = substitute_vars(rest, &me.name);
+                        out.push((mob_name.clone(), format!("(mecho) {said}")));
+                    }
+                }
+            }
+        }
+        out
+    };
+    if speeches.is_empty() { return; }
+    let cl = chars.lock().await;
+    for (mob_name, said) in speeches {
+        cl.broadcast_room(room, None, &format!("{mob_name} says, '{said}'\r\n"));
+    }
+}
+
+/// Minimal trigger-language variable substitution: replaces `%actor.name%`
+/// with the player's name; strips other `%foo%` tokens to keep output
+/// readable until a real interpreter lands.
+fn substitute_vars(s: &str, actor_name: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut iter = s.chars().peekable();
+    while let Some(c) = iter.next() {
+        if c != '%' { out.push(c); continue; }
+        // Read until the next %.
+        let mut var = String::new();
+        while let Some(&nc) = iter.peek() {
+            iter.next();
+            if nc == '%' { break; }
+            var.push(nc);
+        }
+        match var.as_str() {
+            "actor.name" => out.push_str(actor_name),
+            "" => out.push('%'),  // literal %% → %
+            _ => { /* drop unknown vars */ }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

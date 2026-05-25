@@ -104,6 +104,7 @@ pub struct Room {
     pub extras:      Vec<ExtraDescr>,
     pub mobs:        Vec<u32>,    // mob instance ids
     pub objects:     Vec<u32>,    // object instance ids
+    pub triggers:    Vec<TriggerVnum>, // attached DG triggers
 }
 
 /// A single zone reset command. Mirrors `reset_com` in structs.h.
@@ -248,6 +249,31 @@ pub struct MobProto {
 }
 
 // ---------------------------------------------------------------------------
+// DG triggers (minimal MVP — only GREET attached to mobs is interpreted)
+// ---------------------------------------------------------------------------
+
+pub type TriggerVnum = i32;
+
+/// `attach_type`: where this trigger can be attached.
+pub const TRIG_ATTACH_MOB:  i32 = 0;
+pub const TRIG_ATTACH_OBJ:  i32 = 1;
+pub const TRIG_ATTACH_ROOM: i32 = 2;
+
+/// One trigger script from a `.trg` file.  Mirrors `trig_data` in
+/// dg_scripts.h (minimal subset).  The `commands` field holds the raw
+/// script lines, which the interpreter consumes one at a time.
+#[derive(Debug, Clone, Default)]
+pub struct Trigger {
+    pub vnum:         TriggerVnum,
+    pub name:         String,
+    pub attach_type:  i32,    // 0 = mob, 1 = obj, 2 = room
+    pub trigger_type: char,   // 'g' = GREET, 'd' = SPEECH, ... (currently only 'g' fires)
+    pub narg:         i32,    // percent chance to fire (100 = always)
+    pub arg:          String, // keywords / phrase the trigger matches on
+    pub commands:     Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Quests
 // ---------------------------------------------------------------------------
 
@@ -318,6 +344,9 @@ pub struct MobInstance {
     /// Player ids the mob remembers (used by MOB_MEMORY mobs).  Capped
     /// in practice by gameplay since most fights end with one corpse.
     pub remembers: Vec<u32>,
+    /// DG trigger vnums attached to this mob (assigned via the T zone
+    /// reset command).
+    pub triggers:  Vec<TriggerVnum>,
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep
@@ -333,6 +362,7 @@ pub struct World {
     pub mob_instances: Vec<MobInstance>,
     pub shops:         Vec<Shop>,
     pub quests:        BTreeMap<QuestVnum, Quest>,
+    pub triggers:      BTreeMap<TriggerVnum, Trigger>,
 }
 
 impl World {
