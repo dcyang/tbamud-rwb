@@ -70,6 +70,7 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick",
     "drink", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell",
+    "goto", "transfer", "purge", "shutdown",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -179,6 +180,10 @@ pub async fn dispatch_command(
         Some("follow")    => do_follow(rest, me, chars).await,
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
+        Some("goto")      => do_goto(rest, me, world, chars).await,
+        Some("transfer")  => do_transfer(rest, me, world, chars).await,
+        Some("purge")     => do_purge(me, world, chars).await,
+        Some("shutdown")  => do_shutdown(me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -754,6 +759,167 @@ async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     }
     let _ = delivered;
     CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Immortal toolkit (LVL_IMMORT = 34+).  Gated on me.level >= LVL_IMMORT;
+// mortals get "Huh?!" so the existence of the verb stays hidden.
+// ---------------------------------------------------------------------------
+
+const LVL_IMMORT: i32 = 34;
+
+fn immort_huh() -> CmdOutput {
+    CmdOutput::text("\r\nHuh?!\r\n".to_string())
+}
+
+/// `goto <room-vnum|player>` — teleport to a room (by vnum) or to a
+/// player's current room.  Broadcasts a disappear/appear pair so other
+/// players can react.
+async fn do_goto(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nGoto where?\r\n".to_string());
+    }
+    // Numeric → room vnum. Otherwise, look up a player by name.
+    let target_room = if let Ok(vnum) = arg.parse::<i32>() {
+        // Validate the room exists.
+        let w = world.lock().await;
+        if !w.rooms.contains_key(&vnum) {
+            return CmdOutput::text(format!("\r\nNo room with vnum {vnum}.\r\n"));
+        }
+        vnum
+    } else {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        match h {
+            Some(p) => p.current_room,
+            None    => return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string()),
+        }
+    };
+    let from_room = me.current_room;
+    if target_room == from_room {
+        return CmdOutput::text("\r\nYou're already there.\r\n".to_string());
+    }
+    me.current_room = target_room;
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, target_room);
+        cl.broadcast_room(from_room, Some(me.id),
+            &format!("{} vanishes in a puff of smoke.\r\n", me.name));
+        cl.broadcast_room(target_room, Some(me.id),
+            &format!("{} arrives in a puff of smoke.\r\n", me.name));
+    }
+    let view = render_room(target_room, Some(me.id), world, chars).await;
+    CmdOutput::text(view)
+}
+
+/// `transfer <player>` — yank the named player to the caller's room.
+/// Refuses on self and on offline targets.
+async fn do_transfer(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nTransfer whom?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    if ph.id == me.id {
+        return CmdOutput::text("\r\nThat doesn't make sense.\r\n".to_string());
+    }
+    let to_room = me.current_room;
+    let from_room = {
+        let mut c = ph.character.lock().await;
+        let f = c.current_room;
+        c.current_room = to_room;
+        f
+    };
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(ph.id, to_room);
+        cl.broadcast_room(from_room, Some(ph.id),
+            &format!("{} is summoned away by an unseen force.\r\n", ph.name));
+        cl.broadcast_room(to_room, Some(ph.id),
+            &format!("{} arrives, summoned by {}.\r\n", ph.name, me.name));
+    }
+    let _ = ph.send.send(format!("\r\n{} summons you.\r\n", me.name));
+    let view = render_room(to_room, Some(ph.id), world, chars).await;
+    let _ = ph.send.send(view);
+    CmdOutput::text(format!("\r\nYou transfer {} here.\r\n", ph.name))
+}
+
+/// `purge` — extract every mob and floor object in the caller's room.
+/// Carried/equipped items are untouched; mob inventories are extracted
+/// alongside the mob (matches stock CircleMUD).
+async fn do_purge(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let room = me.current_room;
+    let (n_mobs, n_objs) = {
+        let mut w = world.lock().await;
+        // Snapshot lists so we can drop the room borrow before mutating
+        // the parallel vectors.
+        let mobs: Vec<u32> = w.rooms.get(&room).map(|r| r.mobs.clone()).unwrap_or_default();
+        let objs: Vec<u32> = w.rooms.get(&room).map(|r| r.objects.clone()).unwrap_or_default();
+        // Drop in-room references first.
+        if let Some(r) = w.rooms.get_mut(&room) {
+            r.mobs.clear();
+            r.objects.clear();
+        }
+        // For each mob, also extract its inventory.
+        let mut mob_invs: Vec<u32> = Vec::new();
+        for &mid in &mobs {
+            if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
+                mob_invs.extend(m.inventory.iter().copied());
+            }
+        }
+        w.mob_instances.retain(|m| !mobs.contains(&m.id));
+        w.obj_instances.retain(|o| !objs.contains(&o.id) && !mob_invs.contains(&o.id));
+        (mobs.len(), objs.len())
+    };
+    let cl = chars.lock().await;
+    cl.broadcast_room(room, Some(me.id),
+        &format!("{} disintegrates everything in the room with a wave.\r\n", me.name));
+    CmdOutput::text(format!(
+        "\r\nPurged: {} mobs, {} floor objects.\r\n", n_mobs, n_objs
+    ))
+}
+
+/// `shutdown` — graceful exit. Broadcasts a notice to every online
+/// player, then `std::process::exit(0)`. We don't currently have a
+/// "save everyone" hook on shutdown (auto-save handles ongoing state).
+async fn do_shutdown(me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let notice = format!("\r\n*** {} is shutting down the world. ***\r\n", me.name);
+    {
+        let cl = chars.lock().await;
+        for ph in cl.iter() {
+            let _ = ph.send.send(notice.clone());
+        }
+    }
+    tracing::warn!(by = %me.name, "Shutdown requested by immortal");
+    // Give the writer tasks a moment to flush the notice.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    std::process::exit(0);
 }
 
 async fn do_where(
