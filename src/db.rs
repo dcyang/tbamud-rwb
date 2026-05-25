@@ -418,6 +418,48 @@ pub fn spawn_wander_tick(
     });
 }
 
+/// Synchronous helper: scavenger mobs in rooms with ground objects pick
+/// one up (50% chance each tick).  Mob skips its own corpse and any
+/// objects already in its inventory.
+fn scavenge_pass(w: &mut World) {
+    use rand::{Rng, seq::SliceRandom};
+    let mut rng = rand::thread_rng();
+    // Snapshot ids first to avoid borrow conflicts during mutation.
+    let scavengers: Vec<(u32, crate::world::RoomVnum)> = w.mob_instances.iter()
+        .filter_map(|m| {
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.mob_flags[0] & crate::world::MOB_SCAVENGER == 0 { return None; }
+            if m.fighting.is_some() { return None; }
+            Some((m.id, m.in_room))
+        })
+        .collect();
+    for (mob_id, room_vnum) in scavengers {
+        if rng.gen_range(0..100) >= 50 { continue; }
+        // Get the room's ground items.
+        let ground: Vec<u32> = w.rooms.get(&room_vnum)
+            .map(|r| r.objects.clone())
+            .unwrap_or_default();
+        if ground.is_empty() { continue; }
+        // Pick a random one (skip corpses — too gross even for scavengers).
+        let candidates: Vec<u32> = ground.into_iter()
+            .filter(|iid| w.obj_instances.iter()
+                .find(|o| o.id == *iid)
+                .map(|o| o.corpse_of.is_none()).unwrap_or(false))
+            .collect();
+        let Some(&iid) = candidates.choose(&mut rng) else { continue; };
+        // Move from room to mob's inventory.
+        if let Some(r) = w.rooms.get_mut(&room_vnum) {
+            r.objects.retain(|&i| i != iid);
+        }
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.in_room = crate::world::NOWHERE;
+        }
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.inventory.push(iid);
+        }
+    }
+}
+
 /// Synchronous helper: pick wander targets for all eligible mobs.  Keeps
 /// the !Send `rand::thread_rng` out of the async future.
 fn compute_wander_moves(
@@ -462,6 +504,14 @@ async fn wander_pass(
     {
         let w = world.lock().await;
         moves = compute_wander_moves(&w);
+    }
+
+    // Scavenger pass: any mob with MOB_SCAVENGER, in a room with loot, has
+    // a 50% chance to grab one ground item.  Independent of wandering so
+    // sentinel-scavengers still hoard.
+    {
+        let mut w = world.lock().await;
+        scavenge_pass(&mut w);
     }
 
     if moves.is_empty() { return; }

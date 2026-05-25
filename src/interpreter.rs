@@ -3138,53 +3138,86 @@ fn execute_script(
         vars:        std::collections::HashMap::new(),
     };
     let mut out = Vec::new();
-    // Stack of if/else frames so blocks can nest.  Each frame records
-    // whether its branch is currently being skipped and whether we've
-    // crossed into the `else` half (so a second `else` does nothing).
-    #[derive(Clone, Copy)]
-    struct IfFrame { skip: bool, in_else: bool }
-    let mut stack: Vec<IfFrame> = Vec::new();
-    let currently_skipping = |st: &[IfFrame]| st.iter().any(|f| f.skip);
+    // Frame stack — supports nested if/else AND while loops.  Each frame
+    // tracks whether the current block is being skipped.  While frames
+    // additionally remember the loop's entry pc and condition text so
+    // they can iterate.
+    #[derive(Clone)]
+    enum Frame {
+        If    { skip: bool, in_else: bool },
+        While { skip: bool, start_pc: usize, cond: String, iters: i32 },
+    }
+    let frame_skip = |f: &Frame| match f {
+        Frame::If { skip, .. } => *skip,
+        Frame::While { skip, .. } => *skip,
+    };
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut pc: usize = 0;
+    // Safety net: scripts that loop forever shouldn't lock the server.
+    let mut total_iters: i32 = 0;
+    const MAX_TOTAL_ITERS: i32 = 2000;
 
-    for raw in &t.commands {
+    while pc < t.commands.len() {
+        let raw = &t.commands[pc];
         let line = raw.trim();
+        pc += 1;
         if line.is_empty() || line.starts_with('*') { continue; }
+        total_iters += 1;
+        if total_iters > MAX_TOTAL_ITERS { break; }
 
         // Block control: handled regardless of skip state.
         if line == "end" {
+            // If the closing frame is a While whose cond is still true,
+            // iterate by jumping back to start_pc+1.  Otherwise pop.
+            if let Some(Frame::While { skip, start_pc, cond, iters }) = stack.last() {
+                if !*skip && *iters < 100 && eval_condition(cond, &ctx) {
+                    let sp = *start_pc;
+                    if let Some(Frame::While { iters, .. }) = stack.last_mut() {
+                        *iters += 1;
+                    }
+                    pc = sp + 1;
+                    continue;
+                }
+            }
             stack.pop();
             continue;
         }
         if line == "else" {
-            // Only flip the innermost frame; ignore if already in else.
-            if let Some(top) = stack.last_mut() {
-                if !top.in_else {
-                    top.in_else = true;
-                    // Flip skip-state — but only if no outer frame is also
-                    // skipping; otherwise we stay skipped regardless.
-                    top.skip = !top.skip;
+            // Only flip the innermost If frame; ignore on While frames.
+            if let Some(Frame::If { skip, in_else }) = stack.last_mut() {
+                if !*in_else {
+                    *in_else = true;
+                    *skip = !*skip;
                 }
             }
             continue;
         }
         if let Some(cond) = line.strip_prefix("if ") {
-            // If we're already inside a skipped outer block, the inner
-            // condition is irrelevant — the whole nested block is dead.
-            let outer_skipping = stack.iter().any(|f| f.skip);
-            let frame_skip = if outer_skipping {
-                true
-            } else {
-                !eval_condition(cond, &ctx)
-            };
-            stack.push(IfFrame { skip: frame_skip, in_else: false });
+            let outer_skipping = stack.iter().any(frame_skip);
+            let frame_skip_val = if outer_skipping { true } else { !eval_condition(cond, &ctx) };
+            stack.push(Frame::If { skip: frame_skip_val, in_else: false });
             continue;
         }
-        if currently_skipping(&stack) { continue; }
+        if let Some(cond) = line.strip_prefix("while ") {
+            let outer_skipping = stack.iter().any(frame_skip);
+            let cond_text = cond.to_string();
+            let frame_skip_val = if outer_skipping {
+                true
+            } else {
+                !eval_condition(&cond_text, &ctx)
+            };
+            stack.push(Frame::While {
+                skip: frame_skip_val,
+                start_pc: pc - 1,   // index of the `while` line itself
+                cond: cond_text,
+                iters: 0,
+            });
+            continue;
+        }
+        if stack.iter().any(frame_skip) { continue; }
 
-        // Skip while/eval/wait — not implemented yet.  Drop the line.
-        if line.starts_with("while ") || line.starts_with("wait ")
-            || line.starts_with("eval ")
-        { continue; }
+        // Skip `wait` for now — needs per-script async to do properly.
+        if line.starts_with("wait ") { continue; }
 
         // set <var> <expr>
         if let Some(rest) = line.strip_prefix("set ") {
@@ -3192,6 +3225,18 @@ fn execute_script(
             if let (Some(var), Some(val)) = (parts.next(), parts.next()) {
                 let expanded = substitute(&ctx, val);
                 ctx.vars.insert(var.to_string(), expanded);
+            }
+            continue;
+        }
+
+        // eval <var> <expr> — evaluate a binary arithmetic expression
+        // and store the integer result; falls back to substituted text
+        // if either operand isn't numeric.
+        if let Some(rest) = line.strip_prefix("eval ") {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let (Some(var), Some(expr)) = (parts.next(), parts.next()) {
+                let result = eval_expr(&ctx, expr);
+                ctx.vars.insert(var.to_string(), result);
             }
             continue;
         }
@@ -3272,6 +3317,29 @@ fn resolve_var(ctx: &ScriptCtx, name: &str) -> String {
         // User-set vars or unknown.
         other => ctx.vars.get(other).cloned().unwrap_or_default(),
     }
+}
+
+/// Evaluate `<a> <op> <b>` integer arithmetic.  Operators: +, -, *, /, %.
+/// Falls back to the substituted text if either operand isn't an integer.
+/// Division by zero yields "0".
+fn eval_expr(ctx: &ScriptCtx, expr: &str) -> String {
+    let sub = substitute(ctx, expr);
+    let tokens: Vec<&str> = sub.split_whitespace().collect();
+    if tokens.len() != 3 {
+        return sub;
+    }
+    let (Ok(a), Ok(b)) = (tokens[0].parse::<i64>(), tokens[2].parse::<i64>()) else {
+        return sub;
+    };
+    let v = match tokens[1] {
+        "+" => a + b,
+        "-" => a - b,
+        "*" => a * b,
+        "/" => if b == 0 { 0 } else { a / b },
+        "%" => if b == 0 { 0 } else { a % b },
+        _   => return sub,
+    };
+    v.to_string()
 }
 
 /// Evaluate a condition. Supports a single comparison or two terms joined
