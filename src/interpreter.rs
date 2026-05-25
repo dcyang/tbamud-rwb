@@ -111,7 +111,7 @@ pub async fn dispatch_command(
         Some("get")       => do_get(rest, me, world, chars).await,
         Some("drop")      => do_drop(rest, me, world, chars).await,
         Some("put")       => do_put(rest, me, world, chars).await,
-        Some("say")       => do_say(rest, me, chars).await,
+        Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
         Some("tell")      => do_tell(rest, me, chars).await,
         Some("who")       => do_who(me, chars).await,
         Some("score")     => do_score(me, world).await,
@@ -523,17 +523,38 @@ async fn do_drop(
     CmdOutput::text(format!("\r\nYou drop {}.\r\n", name))
 }
 
-async fn do_say(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+async fn do_say(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nYak yak yak...\r\n");
     }
     me.reveal();
-    let cl = chars.lock().await;
-    cl.broadcast_room(
-        me.current_room, Some(me.id),
-        &format!("{} says, '{arg}'\r\n", me.name),
-    );
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} says, '{arg}'\r\n", me.name),
+        );
+    }
     CmdOutput::text(format!("\r\nYou say, '{arg}'\r\n"))
+}
+
+/// Public say wrapper used by the command dispatcher.  Fires any SPEECH
+/// triggers in the room (mobs reacting to the player's words).
+async fn do_say_with_triggers(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    let out = do_say(arg, me, chars).await;
+    if !arg.is_empty() {
+        fire_mob_triggers(&me.name, me.current_room, 'd', Some(arg), world, chars).await;
+    }
+    out
 }
 
 async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
@@ -1333,6 +1354,8 @@ async fn do_skill(
     }
 
     if mob_dead {
+        // Fire DEATH triggers before extraction.
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
         // Look up XP first, then extract mob and spawn corpse.
         let xp = {
             let w = world.lock().await;
@@ -1557,6 +1580,8 @@ async fn cast_magic_missile(
     }
 
     if mob_dead {
+        // Fire DEATH triggers before extraction.
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
         let xp = {
             let w = world.lock().await;
             w.mob_instances.iter().find(|m| m.id == mob_id)
@@ -1864,6 +1889,8 @@ async fn cast_harm(
     }
 
     if mob_dead {
+        // Fire DEATH triggers before extraction.
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
         let xp = {
             let w = world.lock().await;
             w.mob_instances.iter().find(|m| m.id == mob_id)
@@ -2103,6 +2130,8 @@ async fn cast_burning_hands(
         to_me.push_str(&format!("Flames sear {mob_name} for {dmg} damage!\r\n"));
 
         if mob_dead {
+            // Fire DEATH triggers before extraction.
+            fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
             let xp = {
                 let w = world.lock().await;
                 w.mob_instances.iter().find(|m| m.id == mob_id)
@@ -2962,64 +2991,212 @@ async fn do_move(
     CmdOutput::text(view)
 }
 
-/// When `me` enters `room`, fire any greet (`g`) triggers attached to
-/// mobs there.  Variable substitution and control-flow commands are not
-/// yet interpreted; only `say <text>` lines are spoken.  Lines starting
-/// with `*` (comments) or `if`/`end`/`wait` are silently skipped.
-async fn fire_greet_triggers(
-    me: &Character,
+/// One output line from an executed trigger script.  Different DG
+/// command verbs map to different presentation styles.
+enum ScriptOut {
+    /// "mob_name says, '...'"
+    Say { mob_name: String, text: String },
+    /// "mob_name <text>" — used by both `memote` and `mecho` (mecho is raw
+    /// room broadcast, treated identically here for simplicity).
+    Echo { text: String },
+    /// Spawn an object of this vnum into the mob's room.
+    Load { vnum: i32, room: RoomVnum },
+}
+
+/// Execute one trigger script.  Returns a list of pending side-effects
+/// to apply under the chars lock.  Variable substitution and most
+/// control-flow are still stubbed.
+fn execute_script(
+    t: &crate::world::Trigger,
+    actor_name: &str,
+    mob_name: &str,
+    self_room: RoomVnum,
+) -> Vec<ScriptOut> {
+    use rand::Rng;
+    if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for raw in &t.commands {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('*') { continue; }
+        if line.starts_with("if ") || line == "end" || line == "else"
+            || line.starts_with("while ")
+            || line.starts_with("wait ")
+            || line.starts_with("eval ")
+            || line.starts_with("set ")
+        { continue; }
+        if let Some(rest) = line.strip_prefix("say ") {
+            out.push(ScriptOut::Say {
+                mob_name: mob_name.to_string(),
+                text:     substitute_vars(rest, actor_name),
+            });
+        } else if let Some(rest) = line.strip_prefix("memote ") {
+            let body = substitute_vars(rest, actor_name);
+            out.push(ScriptOut::Echo { text: format!("{mob_name} {body}\r\n") });
+        } else if let Some(rest) = line.strip_prefix("mecho ") {
+            out.push(ScriptOut::Echo { text: format!("{}\r\n", substitute_vars(rest, actor_name)) });
+        } else if let Some(rest) = line.strip_prefix("mload obj ") {
+            if let Ok(vnum) = rest.trim().parse::<i32>() {
+                out.push(ScriptOut::Load { vnum, room: self_room });
+            }
+        } else if let Some(rest) = line.strip_prefix("mload ") {
+            // Plain `mload <vnum>` defaults to object load.
+            if let Ok(vnum) = rest.trim().parse::<i32>() {
+                out.push(ScriptOut::Load { vnum, room: self_room });
+            }
+        }
+    }
+    out
+}
+
+/// Apply a list of script outputs: broadcasts speech/echoes to the room,
+/// and spawns any loaded objects into their target rooms.
+async fn apply_script_outputs(
+    outputs: Vec<ScriptOut>,
     room: RoomVnum,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
-    use rand::Rng;
-    // Snapshot the triggers + their host mob shortdescr.
-    let speeches: Vec<(String, String)> = {
+    if outputs.is_empty() { return; }
+    let cl = chars.lock().await;
+    let mut load_queue: Vec<(i32, RoomVnum)> = Vec::new();
+    for out in outputs {
+        match out {
+            ScriptOut::Say { mob_name, text } => {
+                cl.broadcast_room(room, None, &format!("{mob_name} says, '{text}'\r\n"));
+            }
+            ScriptOut::Echo { text } => {
+                cl.broadcast_room(room, None, &text);
+            }
+            ScriptOut::Load { vnum, room } => {
+                load_queue.push((vnum, room));
+            }
+        }
+    }
+    drop(cl);
+    if !load_queue.is_empty() {
+        let mut w = world.lock().await;
+        for (vnum, rv) in load_queue {
+            if let Some(iid) = w.spawn_obj(vnum) {
+                if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                    o.in_room = rv;
+                }
+                if let Some(r) = w.rooms.get_mut(&rv) {
+                    r.objects.push(iid);
+                }
+            }
+        }
+    }
+}
+
+/// Fire all triggers of the given type attached to mobs in `room`.
+/// `keyword_filter`, when Some, restricts to triggers whose `arg`
+/// contains the keyword (used by SPEECH triggers).
+async fn fire_mob_triggers(
+    actor_name: &str,
+    room: RoomVnum,
+    trigger_type: char,
+    keyword_filter: Option<&str>,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let outputs: Vec<ScriptOut> = {
         let w = world.lock().await;
-        let mut out = Vec::new();
         let Some(r) = w.rooms.get(&room) else { return; };
+        let mut acc: Vec<ScriptOut> = Vec::new();
         for &mid in &r.mobs {
             let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
             let Some(proto) = w.mob_protos.get(&m.vnum) else { continue; };
             let mob_name = proto.short_descr.clone();
             for &tvnum in &m.triggers {
                 let Some(t) = w.triggers.get(&tvnum) else { continue; };
-                if t.trigger_type != 'g' { continue; }
-                // narg = percent chance to fire (100 = always).
-                if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
-                    continue;
+                if t.trigger_type != trigger_type { continue; }
+                if let Some(kw) = keyword_filter {
+                    // SPEECH triggers: arg is the keyword(s) to match in
+                    // the actor's speech.  CircleMUD's matching is loose:
+                    // any keyword from arg appearing as a word in the text.
+                    let arg_low = t.arg.to_ascii_lowercase();
+                    let text_low = kw.to_ascii_lowercase();
+                    let any_match = arg_low.split_whitespace()
+                        .any(|w| text_low.split_whitespace().any(|t| t == w));
+                    if !any_match { continue; }
                 }
-                // Walk the commands, picking out `say` lines.
-                for raw in &t.commands {
-                    let line = raw.trim();
-                    if line.is_empty() || line.starts_with('*') { continue; }
-                    // Skip control-flow / waits / commented-out stuff.
-                    if line.starts_with("if ") || line == "end" || line == "else"
-                        || line.starts_with("while ")
-                        || line.starts_with("wait ")
-                        || line.starts_with("eval ")
-                        || line.starts_with("set ")
-                    { continue; }
-                    if let Some(rest) = line.strip_prefix("say ") {
-                        // Variable substitution stub: replace %actor.name%
-                        // with the player's name, drop other %...% tokens.
-                        let said = substitute_vars(rest, &me.name);
-                        out.push((mob_name.clone(), said));
-                    } else if let Some(rest) = line.strip_prefix("mecho ") {
-                        // mecho echoes raw text to the room.
-                        let said = substitute_vars(rest, &me.name);
-                        out.push((mob_name.clone(), format!("(mecho) {said}")));
-                    }
-                }
+                acc.extend(execute_script(t, actor_name, &mob_name, room));
             }
         }
-        out
+        acc
     };
-    if speeches.is_empty() { return; }
-    let cl = chars.lock().await;
-    for (mob_name, said) in speeches {
-        cl.broadcast_room(room, None, &format!("{mob_name} says, '{said}'\r\n"));
-    }
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Fire all triggers of the given type attached directly to a room.
+async fn fire_room_triggers(
+    actor_name: &str,
+    room: RoomVnum,
+    trigger_type: char,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let outputs: Vec<ScriptOut> = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&room) else { return; };
+        let room_name = r.name.clone();
+        let mut acc: Vec<ScriptOut> = Vec::new();
+        for &tvnum in &r.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != trigger_type { continue; }
+            acc.extend(execute_script(t, actor_name, &room_name, room));
+        }
+        acc
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Run DEATH (type 'f') triggers for a specific mob *before* it is
+/// extracted from the world.  Used so dying-mob scripts (last words,
+/// loot drops via `mload`) execute against the still-live instance.
+pub async fn fire_mob_death_triggers(
+    mob_id: u32,
+    killer_name: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let outputs: Vec<ScriptOut> = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
+            return;
+        };
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'f' { continue; }
+            acc.extend(execute_script(t, killer_name, &mob_name, mob_room));
+        }
+        acc
+    };
+    if outputs.is_empty() { return; }
+    // Take the mob's room for delivery before extraction.
+    let mob_room = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|m| m.id == mob_id).map(|m| m.in_room).unwrap_or(crate::world::NOWHERE)
+    };
+    apply_script_outputs(outputs, mob_room, world, chars).await;
+}
+
+/// Convenience: greet triggers from both mob and room sources, plus the
+/// quest-room hook.
+async fn fire_greet_triggers(
+    me: &Character,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    fire_mob_triggers(&me.name, room, 'g', None, world, chars).await;
+    fire_room_triggers(&me.name, room, 'g', world, chars).await;
 }
 
 /// Minimal trigger-language variable substitution: replaces `%actor.name%`

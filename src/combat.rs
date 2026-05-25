@@ -564,6 +564,8 @@ async fn kill_mob(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
+    // Fire any DEATH triggers BEFORE the mob is extracted.
+    crate::interpreter::fire_mob_death_triggers(mob_id, killer_name, world, chars).await;
     {
         let mut w = world.lock().await;
         let inv: Vec<u32> = w.mob_instances.iter()
