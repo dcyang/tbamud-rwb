@@ -99,6 +99,7 @@ pub struct Exit {
 /// listed.
 pub const ROOM_DEATH:    u32 = 1 << 1;
 pub const ROOM_PEACEFUL: u32 = 1 << 4;
+pub const ROOM_NOMAGIC:  u32 = 1 << 7;
 pub const ROOM_GODROOM:  u32 = 1 << 10;
 
 /// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
@@ -269,6 +270,8 @@ pub const ITEM_WEAPON:    i32 = 5;
 pub const ITEM_ARMOR:     i32 = 9;
 pub const ITEM_POTION:    i32 = 10;
 pub const ITEM_CONTAINER: i32 = 15;
+pub const ITEM_DRINKCON:  i32 = 17;
+pub const ITEM_FOOD:      i32 = 19;
 
 /// MOB_* bitflag positions in `MobProto.mob_flags[0]`.  Mirrors the
 /// MOB_* defines in structs.h.

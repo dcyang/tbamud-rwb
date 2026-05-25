@@ -68,7 +68,7 @@ const COMMANDS: &[&str] = &[
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick",
-    "drink", "recite", "use", "zap", "light", "extinguish",
+    "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell",
     "goto", "transfer", "purge", "shutdown", "stat",
     // Single-letter aliases not handled by prefix
@@ -171,7 +171,9 @@ pub async fn dispatch_command(
         Some("lock")      => do_door(rest, me, world, chars, DoorOp::Lock).await,
         Some("unlock")    => do_door(rest, me, world, chars, DoorOp::Unlock).await,
         Some("pick")      => do_pick(rest, me, world, chars).await,
-        Some("drink")     => do_drink(rest, me, world, chars).await,
+        Some("quaff")     => do_quaff(rest, me, world, chars).await,
+        Some("drink")     => do_drink_container(rest, me, world, chars).await,
+        Some("eat")       => do_eat(rest, me, world, chars).await,
         Some("recite")    => do_recite(rest, me, world, chars).await,
         Some("use")       => do_use(rest, me, world, chars).await,
         Some("zap")       => do_zap(rest, me, world, chars).await,
@@ -1994,6 +1996,17 @@ async fn do_cast(
     if arg.is_empty() {
         return CmdOutput::text("\r\nCast which spell? Try `cast magic-missile fido` or `cast cure-light`.\r\n");
     }
+    // ROOM_NOMAGIC: refuse before any class/learned check so the spell
+    // name isn't even resolved.
+    {
+        let w = world.lock().await;
+        if w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_NOMAGIC != 0)
+            .unwrap_or(false)
+        {
+            return CmdOutput::text("\r\nYour magic fizzles out and dies.\r\n");
+        }
+    }
     me.reveal();
 
     // Accept either `cast '<spell name>' target` or `cast <hyphenated-spell> target`.
@@ -3342,7 +3355,9 @@ async fn find_consumable(
     None
 }
 
-async fn do_drink(
+/// `quaff <potion-kw>` — drink a potion (ITEM_POTION). CircleMUD splits
+/// potion vs. drink-container; drink is for ITEM_DRINKCON below.
+async fn do_quaff(
     arg: &str,
     me: &mut Character,
     world: &Arc<Mutex<World>>,
@@ -3351,10 +3366,10 @@ async fn do_drink(
     use crate::world::ITEM_POTION;
     let arg = arg.trim();
     if arg.is_empty() {
-        return CmdOutput::text("\r\nDrink what?\r\n".to_string());
+        return CmdOutput::text("\r\nQuaff what?\r\n".to_string());
     }
     let Some((iid, short, value)) = find_consumable(me, world, arg, ITEM_POTION).await else {
-        return CmdOutput::text("\r\nYou have nothing like that to drink.\r\n".to_string());
+        return CmdOutput::text("\r\nYou have nothing like that to quaff.\r\n".to_string());
     };
 
     let cl = chars.lock().await;
@@ -3369,13 +3384,103 @@ async fn do_drink(
         let s = apply_item_spell(value[slot], "", me, world, chars).await;
         text.push_str(&s);
     }
-    // Consume the potion.
     me.inventory.retain(|&i| i != iid);
     {
         let mut w = world.lock().await;
         w.obj_instances.retain(|o| o.id != iid);
     }
     CmdOutput::text(text)
+}
+
+/// `drink <kw>` — sip from a drink container (ITEM_DRINKCON). value[1]
+/// is current sips; decrement by one per command. value[0] is capacity
+/// (informational). The container itself stays in inventory.
+async fn do_drink_container(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_DRINKCON;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nDrink what?\r\n".to_string());
+    }
+    let kw = arg.to_ascii_lowercase();
+    // Search inventory and the room's floor.
+    let found_vnum_short: Option<(crate::world::ObjVnum, String)> = {
+        let w = world.lock().await;
+        let pool: Vec<u32> = me.inventory.iter().copied()
+            .chain(w.rooms.get(&me.current_room).map(|r| r.objects.clone()).unwrap_or_default())
+            .collect();
+        let mut out: Option<(crate::world::ObjVnum, String)> = None;
+        for iid in pool {
+            let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+            if p.item_type != ITEM_DRINKCON { continue; }
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+                out = Some((o.vnum, p.short_description.clone()));
+                break;
+            }
+        }
+        out
+    };
+    let Some((vnum, short)) = found_vnum_short else {
+        return CmdOutput::text("\r\nYou see no such drink container.\r\n".to_string());
+    };
+    // Drain one sip from the prototype (matches stock CircleMUD shared
+    // state — sips drained by one player affect every instance, but
+    // that's consistent with our wand/staff handling).
+    let (sips_after, capacity) = {
+        let mut w = world.lock().await;
+        let Some(p) = w.obj_protos.get_mut(&vnum) else {
+            return CmdOutput::text("\r\nThe container shimmers and is gone.\r\n".to_string());
+        };
+        if p.value[1] <= 0 {
+            return CmdOutput::text(format!("\r\n{} is empty.\r\n", short));
+        }
+        p.value[1] -= 1;
+        (p.value[1], p.value[0])
+    };
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} drinks from {}.\r\n", me.name, short));
+    drop(cl);
+    let mut text = format!("\r\nYou drink from {}.\r\n", short);
+    if sips_after == 0 {
+        text.push_str(&format!("{} is now empty.\r\n", short));
+    }
+    let _ = capacity;
+    CmdOutput::text(text)
+}
+
+/// `eat <kw>` — consume an ITEM_FOOD in inventory.  Flavor text + room
+/// broadcast; the object is extracted on use.  value[0] is the filling
+/// in hours, saved for future hunger tracking (no decay tick yet).
+async fn do_eat(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_FOOD;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nEat what?\r\n".to_string());
+    }
+    let Some((iid, short, _v)) = find_consumable(me, world, arg, ITEM_FOOD).await else {
+        return CmdOutput::text("\r\nYou have no such food.\r\n".to_string());
+    };
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} eats {}.\r\n", me.name, short));
+    drop(cl);
+    me.inventory.retain(|&i| i != iid);
+    {
+        let mut w = world.lock().await;
+        w.obj_instances.retain(|o| o.id != iid);
+    }
+    CmdOutput::text(format!("\r\nYou eat {}.\r\n", short))
 }
 
 async fn do_recite(
