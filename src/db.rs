@@ -1185,6 +1185,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         decay_in: None,
                         triggers: Vec::new(),
                         timer: init_timer,
+                        light_lit: false,
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -1198,6 +1199,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         decay_in: None,
                         triggers: Vec::new(),
                         timer: init_timer,
+                        light_lit: false,
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -1233,6 +1235,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     decay_in: None,
                     triggers: Vec::new(),
                     timer: init_timer,
+                        light_lit: false,
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -1266,6 +1269,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     decay_in: None,
                     triggers: Vec::new(),
                     timer: init_timer,
+                        light_lit: false,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {

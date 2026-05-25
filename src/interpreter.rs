@@ -68,7 +68,7 @@ const COMMANDS: &[&str] = &[
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick",
-    "drink", "recite",
+    "drink", "recite", "use", "zap", "light", "extinguish",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -171,6 +171,10 @@ pub async fn dispatch_command(
         Some("pick")      => do_pick(rest, me, world, chars).await,
         Some("drink")     => do_drink(rest, me, world, chars).await,
         Some("recite")    => do_recite(rest, me, world, chars).await,
+        Some("use")       => do_use(rest, me, world, chars).await,
+        Some("zap")       => do_zap(rest, me, world, chars).await,
+        Some("light")     => do_light(rest, me, world, chars, true).await,
+        Some("extinguish")=> do_light(rest, me, world, chars, false).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2946,6 +2950,201 @@ async fn do_recite(
         w.obj_instances.retain(|o| o.id != iid);
     }
     CmdOutput::text(text)
+}
+
+/// Wand: cast value[3] spell on a single target (or self), decrement
+/// value[2] charges, extract only when charges hit zero.  The proto's
+/// `value` is read-only across calls, so the per-instance charge count
+/// would normally need its own field — but since wands deplete during
+/// gameplay and aren't carried across reboot, we mutate `proto.value[2]`
+/// directly. This matches stock CircleMUD which also shares the proto
+/// state across all instances of a wand vnum.
+async fn do_use(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_WAND;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nUse what?\r\n".to_string());
+    }
+    let (wand_kw, target) = match arg.find(char::is_whitespace) {
+        Some(i) => (&arg[..i], arg[i..].trim()),
+        None    => (arg, ""),
+    };
+    let Some((iid, short, value)) = find_consumable(me, world, wand_kw, ITEM_WAND).await else {
+        return CmdOutput::text("\r\nYou have no such wand.\r\n".to_string());
+    };
+    if value[2] <= 0 {
+        return CmdOutput::text(format!("\r\n{} seems to be drained.\r\n", short));
+    }
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} points {} at {}.\r\n",
+            me.name, short,
+            if target.is_empty() { "themself" } else { target }));
+    drop(cl);
+
+    let spell_vnum = value[3];
+    let mut text = format!("\r\nYou point {} at {}.\r\n", short,
+        if target.is_empty() { "yourself" } else { target });
+    let s = apply_item_spell(spell_vnum, target, me, world, chars).await;
+    text.push_str(&s);
+
+    // Decrement charges in the prototype. When this hits 0 the wand is
+    // drained but not destroyed — matches CircleMUD parity (the empty
+    // wand can be sold/identified before being thrown away).
+    let drained = {
+        let mut w = world.lock().await;
+        if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+            let vnum = o.vnum;
+            if let Some(p) = w.obj_protos.get_mut(&vnum) {
+                p.value[2] -= 1;
+                p.value[2] <= 0
+            } else { false }
+        } else { false }
+    };
+    if drained {
+        text.push_str("\r\nYou hear a faint crackle — the wand goes inert.\r\n");
+    }
+    CmdOutput::text(text)
+}
+
+/// Staff: cast value[3] spell on each mob in the player's current room
+/// (area effect). Same charge decrement as wand.
+async fn do_zap(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_STAFF;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nZap with what?\r\n".to_string());
+    }
+    let Some((iid, short, value)) = find_consumable(me, world, arg, ITEM_STAFF).await else {
+        return CmdOutput::text("\r\nYou have no such staff.\r\n".to_string());
+    };
+    if value[2] <= 0 {
+        return CmdOutput::text(format!("\r\n{} seems to be drained.\r\n", short));
+    }
+
+    // Snapshot mob keyword list so apply_item_spell can dispatch each
+    // cast independently without holding the world lock.
+    let targets: Vec<String> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room)
+            .map(|r| r.mobs.iter()
+                .filter_map(|&mid| w.mob_instances.iter().find(|m| m.id == mid))
+                .filter_map(|m| w.mob_protos.get(&m.vnum))
+                .filter_map(|p| p.name.split_whitespace().next().map(|s| s.to_string()))
+                .collect())
+            .unwrap_or_default()
+    };
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} taps {} on the ground.\r\n", me.name, short));
+    drop(cl);
+
+    let spell_vnum = value[3];
+    let mut text = format!("\r\nYou tap {} on the ground.\r\n", short);
+    if targets.is_empty() {
+        let s = apply_item_spell(spell_vnum, "", me, world, chars).await;
+        text.push_str(&s);
+    } else {
+        for kw in &targets {
+            let s = apply_item_spell(spell_vnum, kw, me, world, chars).await;
+            text.push_str(&s);
+        }
+    }
+
+    let drained = {
+        let mut w = world.lock().await;
+        if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+            let vnum = o.vnum;
+            if let Some(p) = w.obj_protos.get_mut(&vnum) {
+                p.value[2] -= 1;
+                p.value[2] <= 0
+            } else { false }
+        } else { false }
+    };
+    if drained {
+        text.push_str("\r\nYou hear a faint crackle — the staff goes inert.\r\n");
+    }
+    CmdOutput::text(text)
+}
+
+/// `light` / `extinguish`: toggle the `light_lit` state on an ITEM_LIGHT
+/// in inventory or in the current room. Broadcasts the change so other
+/// players can see it.
+async fn do_light(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    on: bool,
+) -> CmdOutput {
+    use crate::world::ITEM_LIGHT;
+    let verb = if on { "light" } else { "extinguish" };
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text(format!("\r\n{} what?\r\n", capitalize_first(verb)));
+    }
+    let kw = arg.to_ascii_lowercase();
+
+    // Search inventory first, then the current room's floor.
+    let (iid, short) = {
+        let w = world.lock().await;
+        let pool: Vec<u32> = me.inventory.iter().copied()
+            .chain(w.rooms.get(&me.current_room)
+                .map(|r| r.objects.clone()).unwrap_or_default())
+            .collect();
+        let mut found: Option<(u32, String)> = None;
+        for iid in pool {
+            let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+            if p.item_type != ITEM_LIGHT { continue; }
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+                found = Some((iid, p.short_description.clone()));
+                break;
+            }
+        }
+        match found {
+            Some(v) => v,
+            None => return CmdOutput::text(format!("\r\nYou see no such light here.\r\n")),
+        }
+    };
+
+    // Toggle the lit state under a fresh lock.  Refuse no-op transitions.
+    let already = {
+        let mut w = world.lock().await;
+        let o = match w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            Some(o) => o,
+            None    => return CmdOutput::text("\r\nIt's gone now.\r\n".to_string()),
+        };
+        if o.light_lit == on { true } else { o.light_lit = on; false }
+    };
+    if already {
+        return CmdOutput::text(format!(
+            "\r\n{} is already {}.\r\n",
+            short, if on { "lit" } else { "out" },
+        ));
+    }
+    let cl = chars.lock().await;
+    let broadcast = if on {
+        format!("{} lights {}.\r\n", me.name, short)
+    } else {
+        format!("{} extinguishes {}.\r\n", me.name, short)
+    };
+    cl.broadcast_room(me.current_room, Some(me.id), &broadcast);
+    CmdOutput::text(format!(
+        "\r\nYou {} {}.\r\n",
+        verb, short,
+    ))
 }
 
 fn capitalize_first(s: &str) -> String {

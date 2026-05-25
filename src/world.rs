@@ -214,6 +214,9 @@ pub struct ObjInstance {
     /// it reaches zero, OTRIG_TIMER ('f' OBJ trigger) fires before the
     /// object is extracted.
     pub timer: Option<i32>,
+    /// For ITEM_LIGHT only: whether the light source is currently lit.
+    /// `false` for everything else; toggled by `light`/`extinguish`.
+    pub light_lit: bool,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -227,6 +230,8 @@ pub const CORPSE_DECAY_SECS: i32 = 300;
 /// gameplay (containers, weapons, armor).
 pub const ITEM_LIGHT:     i32 = 1;
 pub const ITEM_SCROLL:    i32 = 2;
+pub const ITEM_WAND:      i32 = 3;
+pub const ITEM_STAFF:     i32 = 4;
 pub const ITEM_WEAPON:    i32 = 5;
 pub const ITEM_ARMOR:     i32 = 9;
 pub const ITEM_POTION:    i32 = 10;
@@ -500,6 +505,7 @@ impl World {
             corpse_of: Some(mob_short.to_string()),
             decay_in: Some(CORPSE_DECAY_SECS),
             timer: None,
+            light_lit: false,
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -527,6 +533,7 @@ impl World {
             decay_in: None,
             triggers: Vec::new(),
             timer,
+            light_lit: false,
         });
         Some(id)
     }
