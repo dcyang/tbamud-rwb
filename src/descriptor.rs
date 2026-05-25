@@ -9,15 +9,17 @@ use bytes::{BufMut, BytesMut};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::Mutex,
+    sync::{mpsc, Mutex},
 };
 use tracing::{debug, info, warn};
 
 use crate::{
+    character::{Character, PlayerHandle, SharedChars},
+    interpreter,
     login::{GameTexts, LoginSession},
     players::PlayerDb,
     telnet,
-    world::{Direction, Room, World},
+    world::World,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,7 +74,8 @@ pub async fn handle_connection(
     players: Arc<Mutex<PlayerDb>>,
     texts: Arc<GameTexts>,
     xnames: Arc<Vec<String>>,
-    world: Arc<World>,
+    world: Arc<Mutex<World>>,
+    chars: SharedChars,
 ) -> Result<()> {
     let host = peer.ip().to_string();
     info!(id, host = %host, "Connection accepted");
@@ -179,20 +182,31 @@ pub async fn handle_connection(
 
             if output.entered_game {
                 info!(id, host = %host, "Player entered game");
-                // Determine starting room: immortals get the immort start,
-                // mortals get the mortal start, with fallbacks in start_room().
                 let immortal = session.level >= 34;
-                let start = world.start_room(immortal);
+                let start = world.lock().await.start_room(immortal);
+
                 let pname = session.player.as_ref()
                     .map(|p| p.name.clone())
                     .or_else(|| session.player_name.clone())
                     .unwrap_or_else(|| "Someone".to_string());
-                handle_game_loop(
-                    id, &host, &mut stream,
-                    Arc::clone(&world),
-                    pname,
-                    start,
-                ).await?;
+
+                // Build the character. id reuses the connection id for now.
+                let me = Character {
+                    id:           id as u32,
+                    name:         pname.clone(),
+                    level:        session.level,
+                    sex:          session.player.as_ref()
+                                    .map(|p| p.sex)
+                                    .unwrap_or(crate::players::Sex::Neutral),
+                    class:        session.player.as_ref()
+                                    .map(|p| p.class)
+                                    .unwrap_or(crate::players::Class::Undefined),
+                    current_room: start,
+                    inventory:    Vec::new(),
+                    gold:         0,
+                };
+
+                run_game_session(id, host.clone(), stream, me, world, chars).await?;
                 return Ok(());
             }
         }
@@ -203,37 +217,70 @@ pub async fn handle_connection(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal in-game command loop
+// In-game session: split socket, spawn writer task, register player, run
+// the command-interpreter loop.
 // ---------------------------------------------------------------------------
 
-/// In-game command loop.  Supports `look`, the six movement commands, and
-/// `quit`.  Acts as a tiny stand-in for command_interpreter() in interpreter.c
-/// until that's fully ported.
-async fn handle_game_loop(
+/// Run a player's in-game session from the moment they enter the world
+/// until they quit or disconnect.
+async fn run_game_session(
     id: usize,
-    host: &str,
-    stream: &mut TcpStream,
-    world: Arc<World>,
-    name: String,
-    start_room: crate::world::RoomVnum,
+    host: String,
+    stream: TcpStream,
+    mut me: Character,
+    world: Arc<Mutex<World>>,
+    chars: SharedChars,
 ) -> Result<()> {
-    let mut current = start_room;
+    // Split TCP for concurrent read/write
+    let (mut read_half, mut write_half) = stream.into_split();
 
-    // Show the starting room
-    if let Some(r) = world.room(current) {
-        stream.write_all(render_room(r, &world).as_bytes()).await?;
-    } else {
-        stream.write_all(b"\r\nYou are nowhere. The world has not loaded properly.\r\n").await?;
+    // Outbound channel: other connections push messages via this, the writer
+    // task drains it. Bound is unbounded for now; bursts during say/who are
+    // tiny and we'd rather drop bytes on close than spin on send pressure.
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // Register in shared player list so others can find us.
+    {
+        let mut cl = chars.lock().await;
+        cl.add(PlayerHandle {
+            id:           me.id,
+            name:         me.name.clone(),
+            level:        me.level,
+            current_room: me.current_room,
+            send:         tx.clone(),
+        });
+        // Broadcast arrival to the start room.
+        cl.broadcast_room(
+            me.current_room, Some(me.id),
+            &format!("{} has entered the world.\r\n", me.name),
+        );
     }
-    stream.write_all(b"\r\n> ").await?;
 
+    // Send the welcome + initial room view via the channel so it goes through
+    // the same writer task as everything else.
+    let _ = tx.send("\r\nWelcome to tbaMUD!  May your visit here be... Enlightening\r\n".to_string());
+    let _ = tx.send(interpreter::render_room(me.current_room, Some(me.id), &world, &chars).await);
+    let _ = tx.send("\r\n> ".to_string());
+
+    // Writer task: drains the channel to the socket. Exits when the channel
+    // closes (all senders dropped) or the socket errors.
+    let writer = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if write_half.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Reader/dispatcher loop
     let mut raw_buf = BytesMut::with_capacity(4096);
     let mut read_tmp = [0u8; 1024];
+    let mut quit = false;
 
-    loop {
-        let n = match stream.read(&mut read_tmp).await {
+    'outer: loop {
+        let n = match read_half.read(&mut read_tmp).await {
             Ok(0) => {
-                info!(id, host = %host, name = %name, "EOF in game loop");
+                info!(id, host = %host, name = %me.name, "EOF in game loop");
                 break;
             }
             Ok(n) => n,
@@ -247,6 +294,7 @@ async fn handle_game_loop(
         let clean = telnet::strip_telnet(&raw_buf);
         raw_buf.clear();
 
+        // Split on CR/LF, treating paired \r\n / \n\r as one delimiter.
         let mut lines: Vec<String> = Vec::new();
         let mut i = 0;
         let mut line_start = 0;
@@ -254,8 +302,7 @@ async fn handle_game_loop(
             let b = clean[i];
             if b == b'\r' || b == b'\n' {
                 let chunk = &clean[line_start..i];
-                let text = String::from_utf8_lossy(chunk).into_owned();
-                lines.push(text);
+                lines.push(String::from_utf8_lossy(chunk).into_owned());
                 if i + 1 < clean.len()
                     && (clean[i + 1] == b'\r' || clean[i + 1] == b'\n')
                     && clean[i + 1] != b
@@ -271,119 +318,40 @@ async fn handle_game_loop(
         }
 
         for line in lines {
-            let cmd = line.trim();
-            if cmd.is_empty() {
-                stream.write_all(b"> ").await?;
+            let line = line.trim();
+            if line.is_empty() {
+                let _ = tx.send("> ".to_string());
                 continue;
             }
-
-            let reply = execute_command(cmd, &mut current, &world);
-            stream.write_all(reply.as_bytes()).await?;
-
-            if cmd.eq_ignore_ascii_case("quit") {
-                return Ok(());
+            debug!(id, name = %me.name, cmd = %line, "command");
+            let out = interpreter::dispatch_command(line, &mut me, &world, &chars).await;
+            if !out.text.is_empty() {
+                let _ = tx.send(out.text);
             }
-            stream.write_all(b"\r\n> ").await?;
+            if out.quit {
+                quit = true;
+                break 'outer;
+            }
+            let _ = tx.send("\r\n> ".to_string());
         }
     }
+
+    // Tear down: remove from registry, broadcast departure, drop sender so
+    // the writer task exits naturally.
+    let from_room = me.current_room;
+    {
+        let mut cl = chars.lock().await;
+        cl.remove(me.id);
+        let verb = if quit { "leaves" } else { "vanishes into thin air" };
+        cl.broadcast_room(
+            from_room, None,
+            &format!("{} {}.\r\n", me.name, verb),
+        );
+    }
+
+    drop(tx);
+    let _ = writer.await;
+
+    info!(id, name = %me.name, "session ended");
     Ok(())
-}
-
-/// Process a single command line.  Returns the text to write back (no
-/// trailing prompt).
-fn execute_command(cmd: &str, current: &mut crate::world::RoomVnum, world: &World) -> String {
-    let lower = cmd.to_ascii_lowercase();
-
-    // Movement
-    if let Some(dir) = Direction::parse(&lower) {
-        return do_move(dir, current, world);
-    }
-
-    match lower.as_str() {
-        "l" | "look" => match world.room(*current) {
-            Some(r) => render_room(r, world),
-            None => "\r\nYou are nowhere.".to_string(),
-        },
-        "quit" => "Goodbye.\r\n".to_string(),
-        _ => format!("\r\nHuh?!? ({cmd})"),
-    }
-}
-
-/// Attempt to move in the given direction from the current room.
-fn do_move(
-    dir: Direction,
-    current: &mut crate::world::RoomVnum,
-    world: &World,
-) -> String {
-    let Some(room) = world.room(*current) else {
-        return "\r\nYou are nowhere; you cannot move.".to_string();
-    };
-
-    match &room.exits[dir as usize] {
-        Some(exit) if exit.to_room != crate::world::NOWHERE
-            && world.rooms.contains_key(&exit.to_room) =>
-        {
-            *current = exit.to_room;
-            match world.room(*current) {
-                Some(r) => render_room(r, world),
-                None    => "\r\nYou stumble into the void.".to_string(),
-            }
-        }
-        _ => format!("\r\nAlas, you cannot go that way..."),
-    }
-}
-
-/// Render a room's name, description, obvious exits, objects on the ground,
-/// and mobs present.  Mirrors look_at_room() in act.informative.c (minimal
-/// subset — no light/sneak/invisibility, no colour).
-fn render_room(r: &Room, world: &World) -> String {
-    let mut s = String::with_capacity(r.description.len() + 512);
-    s.push_str("\r\n");
-    s.push_str(&r.name);
-    s.push_str("\r\n");
-    for line in r.description.split('\n') {
-        s.push_str(line);
-        s.push_str("\r\n");
-    }
-
-    // Obvious exits
-    let exits: Vec<&str> = Direction::ALL.iter()
-        .filter(|d| r.exits[**d as usize].as_ref()
-            .map(|e| e.to_room != crate::world::NOWHERE)
-            .unwrap_or(false))
-        .map(|d| d.name())
-        .collect();
-    if exits.is_empty() {
-        s.push_str("Obvious exits: none.\r\n");
-    } else {
-        s.push_str("Obvious exits: ");
-        s.push_str(&exits.join(", "));
-        s.push_str(".\r\n");
-    }
-
-    // Objects on the ground — use prototype's long description (the "lies
-    // here" line). Mirror the "list_obj_to_char(LIST_NORMAL)" branch.
-    for &iid in &r.objects {
-        if let Some(inst) = world.obj_instances.iter().find(|o| o.id == iid) {
-            if let Some(proto) = world.obj_protos.get(&inst.vnum) {
-                if !proto.description.is_empty() {
-                    s.push_str(&proto.description);
-                    s.push_str("\r\n");
-                }
-            }
-        }
-    }
-
-    // Mobs in room — use prototype long_descr (the "is here" line).
-    for &iid in &r.mobs {
-        if let Some(inst) = world.mob_instances.iter().find(|m| m.id == iid) {
-            if let Some(proto) = world.mob_protos.get(&inst.vnum) {
-                if !proto.long_descr.is_empty() {
-                    s.push_str(proto.long_descr.trim_end());
-                    s.push_str("\r\n");
-                }
-            }
-        }
-    }
-    s
 }

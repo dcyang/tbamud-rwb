@@ -8,6 +8,7 @@ use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 
 use crate::{
+    character::CharacterList,
     config::Config,
     db,
     descriptor,
@@ -39,12 +40,14 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Load optional xnames ban list ---------------------------------------
     let xnames = Arc::new(load_xnames(&config.dir));
 
-    // --- Load world (zones + rooms) ------------------------------------------
-    // Mirrors boot_world() in db.c (rooms + zones only — mobs/objs/triggers
-    // are deferred to a later checkpoint).
-    let world: Arc<World> = Arc::new(
+    // --- Load world (zones + rooms + obj/mob protos + run resets) -----------
+    let world: Arc<Mutex<World>> = Arc::new(Mutex::new(
         db::load_world(&config.dir).context("Failed to load world")?,
-    );
+    ));
+
+    // --- Shared online-player registry --------------------------------------
+    let chars: Arc<Mutex<CharacterList>> =
+        Arc::new(Mutex::new(CharacterList::default()));
 
     // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
@@ -72,10 +75,11 @@ pub async fn run(config: Config) -> Result<()> {
         let texts    = Arc::clone(&texts);
         let xnames   = Arc::clone(&xnames);
         let world    = Arc::clone(&world);
+        let chars    = Arc::clone(&chars);
 
         tokio::spawn(async move {
             if let Err(e) = descriptor::handle_connection(
-                id, stream, peer, greeting, players, texts, xnames, world,
+                id, stream, peer, greeting, players, texts, xnames, world, chars,
             ).await {
                 tracing::warn!(id, error = %e, "Connection task error");
             }

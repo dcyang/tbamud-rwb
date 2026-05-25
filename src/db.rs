@@ -560,6 +560,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     room.mobs.push(id);
                     world.mob_instances.push(MobInstance {
                         id, vnum: cmd.arg1, in_room: cmd.arg3,
+                        inventory: Vec::new(),
                     });
                     last_mob_id = Some(id);
                     last_cmd_ok = true;
@@ -596,13 +597,14 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 }
             }
             'G' | 'E' => {
-                // For now, both G (give) and E (equip) just attach the obj to
-                // the last-loaded mob's room. Full inventory/equipment lists
-                // come with the character system.
-                if last_mob_id.is_none() {
+                // G = give-to-mob (inventory); E = equip-to-mob (wear slot).
+                // We don't model wear slots yet, so E falls back to G —
+                // the item goes into the mob's inventory either way and is
+                // not visible on the ground.
+                let Some(mob_id) = last_mob_id else {
                     last_cmd_ok = false;
                     continue;
-                }
+                };
                 if !world.obj_protos.contains_key(&cmd.arg1) {
                     last_cmd_ok = false;
                     continue;
@@ -611,21 +613,12 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     last_cmd_ok = false;
                     continue;
                 }
-                // For inventory-less stub, just load into the mob's room.
-                let mob_id = last_mob_id.unwrap();
-                let mob_room = world.mob_instances.iter()
-                    .find(|m| m.id == mob_id)
-                    .map(|m| m.in_room);
-                if let Some(rv) = mob_room {
-                    if rv != crate::world::NOWHERE {
-                        let id = next_obj_id; next_obj_id += 1;
-                        if let Some(r) = world.rooms.get_mut(&rv) {
-                            r.objects.push(id);
-                        }
-                        world.obj_instances.push(ObjInstance {
-                            id, vnum: cmd.arg1, in_room: rv,
-                        });
-                    }
+                let id = next_obj_id; next_obj_id += 1;
+                world.obj_instances.push(ObjInstance {
+                    id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
+                });
+                if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                    m.inventory.push(id);
                 }
                 last_cmd_ok = true;
             }

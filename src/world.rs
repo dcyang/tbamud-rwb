@@ -206,11 +206,13 @@ pub struct MobProto {
 }
 
 /// A live mob instance in the world.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MobInstance {
     pub id:    u32,
     pub vnum:  MobVnum,
     pub in_room: RoomVnum,
+    /// Object instance ids carried/equipped by this mob.
+    pub inventory: Vec<u32>,
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep

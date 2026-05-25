@@ -1,9 +1,11 @@
 /// Entry point for the tbaMUD Rust rewrite.
 /// Mirrors main() in comm.c: parse CLI arguments, set up logging, and start the server.
 
+mod character;
 mod config;
 mod db;
 mod descriptor;
+mod interpreter;
 mod login;
 mod players;
 mod server;
