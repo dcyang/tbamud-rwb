@@ -3257,6 +3257,36 @@ struct ScriptCtx<'a> {
     vars:          std::collections::HashMap<String, String>,
 }
 
+/// Owned snapshot of the dynamic state of an executing script.  Used to
+/// suspend at a `wait` and resume after the sleep elapses.
+#[derive(Clone)]
+struct ResumeState {
+    pc:     usize,
+    vars:   std::collections::HashMap<String, String>,
+    frames: Vec<Frame>,
+}
+
+/// Frame variant used by both if/else and while loops.  Moved out of
+/// `execute_script` so it can be stored in `ResumeState`.
+#[derive(Clone)]
+enum Frame {
+    If    { skip: bool, in_else: bool },
+    While { skip: bool, start_pc: usize, cond: String, iters: i32 },
+}
+
+/// Return value of a single script chunk.  `Done` means the script ran
+/// to completion in this chunk.  `Paused` means we hit `wait N sec` —
+/// caller should flush outputs, sleep `wait_secs`, then call again with
+/// `Some(resume)`.
+enum ScriptResult {
+    Done(Vec<ScriptOut>),
+    Paused {
+        outputs:   Vec<ScriptOut>,
+        wait_secs: u64,
+        resume:    ResumeState,
+    },
+}
+
 /// Bundle of trigger inputs to keep the `execute_script` signature sane
 /// as more variables enter the picture.  Numeric fields default to 0
 /// when not available to the caller.
@@ -3282,17 +3312,76 @@ pub struct ScriptInputs {
 ///   - `%var%` substitution (built-in + user-set)
 ///   - `say` / `mecho` / `memote` / `mload [obj] <vnum>`
 /// Nested if, while/loops, eval expressions are still skipped silently.
+/// Run a trigger script, returning the outputs that should be applied
+/// immediately. If the script hits a `wait`, the remainder is spawned as
+/// a background tokio task that sleeps and resumes through subsequent
+/// chunks. Callers don't need to be aware of suspension.
 fn execute_script(
     t: &crate::world::Trigger,
     actor_name: &str,
     mob_name: &str,
     self_room: RoomVnum,
     inputs: &ScriptInputs,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
 ) -> Vec<ScriptOut> {
-    use rand::Rng;
-    if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
-        return Vec::new();
+    match execute_script_chunk(t, actor_name, mob_name, self_room, inputs, None) {
+        ScriptResult::Done(out) => out,
+        ScriptResult::Paused { outputs, wait_secs, resume } => {
+            // Clone everything the resume task needs to live for the
+            // duration of its sleeps.
+            let trig   = t.clone();
+            let actor  = actor_name.to_string();
+            let mob    = mob_name.to_string();
+            let inputs = inputs.clone();
+            let world  = Arc::clone(world);
+            let chars  = Arc::clone(chars);
+            tokio::spawn(async move {
+                let mut state = resume;
+                let mut secs  = wait_secs;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+                    let res = execute_script_chunk(
+                        &trig, &actor, &mob, self_room, &inputs, Some(state),
+                    );
+                    match res {
+                        ScriptResult::Done(out) => {
+                            apply_script_outputs(out, self_room, &world, &chars).await;
+                            return;
+                        }
+                        ScriptResult::Paused { outputs, wait_secs, resume: ns } => {
+                            apply_script_outputs(outputs, self_room, &world, &chars).await;
+                            state = ns;
+                            secs  = wait_secs;
+                        }
+                    }
+                }
+            });
+            outputs
+        }
     }
+}
+
+/// Chunked execution: runs the script from `state` (or from scratch when
+/// state is None) until completion or until a `wait N sec` is reached.
+/// `Paused` carries an opaque `ResumeState` to feed back in.
+fn execute_script_chunk(
+    t: &crate::world::Trigger,
+    actor_name: &str,
+    mob_name: &str,
+    self_room: RoomVnum,
+    inputs: &ScriptInputs,
+    state: Option<ResumeState>,
+) -> ScriptResult {
+    use rand::Rng;
+    // Probability gate only applies on the FIRST chunk (state is None).
+    if state.is_none() && t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
+        return ScriptResult::Done(Vec::new());
+    }
+    let (mut pc, mut vars, mut stack) = match state {
+        Some(s) => (s.pc, s.vars, s.frames),
+        None    => (0, std::collections::HashMap::new(), Vec::new()),
+    };
     let mut ctx = ScriptCtx {
         actor_name,
         actor_hp:      inputs.actor_hp,
@@ -3308,24 +3397,13 @@ fn execute_script(
         self_room,
         room_people:   inputs.room_people,
         direction:     inputs.direction.clone(),
-        vars:          std::collections::HashMap::new(),
+        vars,
     };
     let mut out = Vec::new();
-    // Frame stack — supports nested if/else AND while loops.  Each frame
-    // tracks whether the current block is being skipped.  While frames
-    // additionally remember the loop's entry pc and condition text so
-    // they can iterate.
-    #[derive(Clone)]
-    enum Frame {
-        If    { skip: bool, in_else: bool },
-        While { skip: bool, start_pc: usize, cond: String, iters: i32 },
-    }
     let frame_skip = |f: &Frame| match f {
         Frame::If { skip, .. } => *skip,
         Frame::While { skip, .. } => *skip,
     };
-    let mut stack: Vec<Frame> = Vec::new();
-    let mut pc: usize = 0;
     // Safety net: scripts that loop forever shouldn't lock the server.
     let mut total_iters: i32 = 0;
     const MAX_TOTAL_ITERS: i32 = 2000;
@@ -3389,8 +3467,22 @@ fn execute_script(
         }
         if stack.iter().any(frame_skip) { continue; }
 
-        // Skip `wait` for now — needs per-script async to do properly.
-        if line.starts_with("wait ") { continue; }
+        // `wait <N> sec` — suspend the script for N seconds.  Encode
+        // the remaining state into a ResumeState; caller awaits the
+        // sleep then re-invokes execute_script_chunk with `Some(state)`.
+        if let Some(rest) = line.strip_prefix("wait ") {
+            let secs = parse_wait_seconds(&substitute(&ctx, rest));
+            let vars_taken = std::mem::take(&mut ctx.vars);
+            return ScriptResult::Paused {
+                outputs:   out,
+                wait_secs: secs,
+                resume:    ResumeState {
+                    pc,
+                    vars:   vars_taken,
+                    frames: stack,
+                },
+            };
+        }
 
         // set <var> <expr>
         if let Some(rest) = line.strip_prefix("set ") {
@@ -3470,7 +3562,18 @@ fn execute_script(
             }
         }
     }
-    out
+    ScriptResult::Done(out)
+}
+
+/// Parse the number-of-seconds operand from a `wait` line.  Accepts
+/// `wait 5`, `wait 5 sec`, `wait 5 seconds`, and `wait 5s`.  Falls back
+/// to 1 second on parse failure (matches CircleMUD's default).
+fn parse_wait_seconds(s: &str) -> u64 {
+    let s = s.trim();
+    // Strip trailing unit suffix if present.
+    let s = s.strip_suffix(" seconds").or_else(|| s.strip_suffix(" sec"))
+        .or_else(|| s.strip_suffix("s")).unwrap_or(s);
+    s.trim().parse::<u64>().unwrap_or(1)
 }
 
 /// Substitute %var% tokens in `s` against the context's built-ins and
@@ -3782,7 +3885,7 @@ async fn fire_mob_triggers(
                     room_people: 0,
                     ..Default::default()
                 };
-                acc.extend(execute_script(t, actor_name, &mob_name, room, &inputs));
+                acc.extend(execute_script(t, actor_name, &mob_name, room, &inputs, world, chars));
             }
         }
         acc
@@ -3806,7 +3909,7 @@ async fn fire_room_triggers(
         for &tvnum in &r.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != trigger_type { continue; }
-            acc.extend(execute_script(t, actor_name, &room_name, room, &ScriptInputs::default()));
+            acc.extend(execute_script(t, actor_name, &room_name, room, &ScriptInputs::default(), world, chars));
         }
         acc
     };
@@ -3837,7 +3940,7 @@ async fn fire_obj_triggers(
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.attach_type != crate::world::TRIG_ATTACH_OBJ { continue; }
             if t.trigger_type != trigger_type { continue; }
-            acc.extend(execute_script(t, actor_name, &obj_name, room, &ScriptInputs::default()));
+            acc.extend(execute_script(t, actor_name, &obj_name, room, &ScriptInputs::default(), world, chars));
         }
         acc
     };
@@ -3900,6 +4003,29 @@ pub async fn fire_obj_give_triggers(
     fire_obj_triggers(obj_iid, actor_name, room, 'i', world, chars).await;
 }
 
+/// TIMER trigger ('f' on objects) — fires when an object's per-instance
+/// timer counts down to zero, immediately before the object is
+/// extracted by `spawn_obj_timer_tick`. The object name is used as the
+/// actor identity for the script (no player actor in this context).
+pub async fn fire_obj_timer_triggers(
+    obj_iid: u32,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    // Pull the object's short_description for use as the actor name —
+    // the OTRIG_TIMER context has no triggering player.
+    let actor_name = {
+        let w = world.lock().await;
+        w.obj_instances.iter()
+            .find(|o| o.id == obj_iid)
+            .and_then(|o| w.obj_protos.get(&o.vnum))
+            .map(|p| p.short_description.clone())
+            .unwrap_or_else(|| "an object".to_string())
+    };
+    fire_obj_triggers(obj_iid, &actor_name, room, 'f', world, chars).await;
+}
+
 /// LOAD trigger ('m' on objects) — fires when the object is freshly
 /// spawned at runtime (mload, quest reward, shop buy). Not fired for
 /// objects restored from a player's saved inventory.
@@ -3938,7 +4064,7 @@ pub async fn fire_mob_fight_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'k' { continue; }
-            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs));
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs, world, chars));
         }
         (acc, mob_room)
     };
@@ -3965,7 +4091,7 @@ pub async fn fire_mob_entry_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'i' { continue; }
-            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, &ScriptInputs::default()));
+            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, &ScriptInputs::default(), world, chars));
         }
         (acc, mob_room)
     };
@@ -4003,7 +4129,7 @@ pub async fn fire_mob_bribe_triggers(
             if t.trigger_type != 'l' { continue; }
             // CircleMUD's BRIBE narg is the minimum gold threshold to fire.
             if (gold_amount as i32) < t.narg { continue; }
-            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs));
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs, world, chars));
         }
         (acc, mob_room)
     };
@@ -4040,7 +4166,7 @@ pub async fn fire_mob_receive_triggers(
                     .any(|w| obj_low.split_whitespace().any(|o| o == w));
                 if !any_match { continue; }
             }
-            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &ScriptInputs::default()));
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &ScriptInputs::default(), world, chars));
         }
         (acc, mob_room)
     };
@@ -4068,7 +4194,7 @@ pub async fn fire_mob_death_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'f' { continue; }
-            acc.extend(execute_script(t, killer_name, &mob_name, mob_room, &ScriptInputs::default()));
+            acc.extend(execute_script(t, killer_name, &mob_name, mob_room, &ScriptInputs::default(), world, chars));
         }
         acc
     };
@@ -4300,3 +4426,24 @@ fn obj_keyword_matches(w: &World, vnum: ObjVnum, key: &str) -> bool {
 
 #[allow(dead_code)]
 fn _silence_unused(c: CharacterList) -> CharacterList { c }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_wait_seconds;
+
+    #[test]
+    fn wait_seconds_parses_common_forms() {
+        assert_eq!(parse_wait_seconds("5"),         5);
+        assert_eq!(parse_wait_seconds("5 sec"),     5);
+        assert_eq!(parse_wait_seconds("5 seconds"), 5);
+        assert_eq!(parse_wait_seconds("5s"),        5);
+        assert_eq!(parse_wait_seconds("  10  sec"), 10);
+    }
+
+    #[test]
+    fn wait_seconds_fallback_on_garbage() {
+        // unparseable input → safe default (don't hang forever).
+        assert!(parse_wait_seconds("forever") >= 1);
+        assert!(parse_wait_seconds("") >= 1);
+    }
+}

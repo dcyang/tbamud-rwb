@@ -188,6 +188,11 @@ pub struct ObjInstance {
     /// DG trigger vnums attached to this object.  Populated by the T zone
     /// reset command with attach_type=1 (OBJ).
     pub triggers: Vec<TriggerVnum>,
+    /// Per-instance timer (seconds) for non-corpse objects with a
+    /// prototype `timer` > 0 — counted down by the obj-timer tick. When
+    /// it reaches zero, OTRIG_TIMER ('f' OBJ trigger) fires before the
+    /// object is extracted.
+    pub timer: Option<i32>,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -471,6 +476,7 @@ impl World {
             triggers: Vec::new(),
             corpse_of: Some(mob_short.to_string()),
             decay_in: Some(CORPSE_DECAY_SECS),
+            timer: None,
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -482,16 +488,65 @@ impl World {
     /// in limbo (`NOWHERE`).  Returns the instance id, or None if the vnum
     /// has no prototype.  Used by login to restore persisted inventories.
     pub fn spawn_obj(&mut self, vnum: ObjVnum) -> Option<u32> {
-        if !self.obj_protos.contains_key(&vnum) { return None; }
+        let proto_timer = self.obj_protos.get(&vnum)?.timer;
         let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
+        // proto.timer is in MUD-hours; convert to seconds (~75s per
+        // mud-hour). Only values >0 enable an active timer.
+        let timer = if proto_timer > 0 {
+            Some(proto_timer.saturating_mul(75))
+        } else {
+            None
+        };
         self.obj_instances.push(ObjInstance {
             id, vnum, in_room: NOWHERE,
             contents: Vec::new(),
-                        corpse_of: None,
-                        decay_in: None,
-                        triggers: Vec::new(),
+            corpse_of: None,
+            decay_in: None,
+            triggers: Vec::new(),
+            timer,
         });
         Some(id)
+    }
+
+    /// Decrement instance `timer` fields on a tick. Returns the list of
+    /// (instance_id, room, vnum) for objects whose timer hit zero — the
+    /// caller is responsible for firing OTRIG_TIMER and extracting.
+    pub fn obj_timer_tick(&mut self, seconds: i32) -> Vec<(u32, RoomVnum, ObjVnum)> {
+        let mut expired = Vec::new();
+        for o in self.obj_instances.iter_mut() {
+            if let Some(t) = o.timer {
+                let next = t - seconds;
+                if next <= 0 {
+                    o.timer = Some(0);
+                    expired.push((o.id, o.in_room, o.vnum));
+                } else {
+                    o.timer = Some(next);
+                }
+            }
+        }
+        expired
+    }
+
+    /// Extract a single object instance from the world. Container
+    /// contents drop to the object's room (mirrors corpse decay). Used
+    /// after OTRIG_TIMER has fired.
+    pub fn extract_obj(&mut self, id: u32) {
+        let (room, contents) = match self.obj_instances.iter().find(|o| o.id == id) {
+            Some(o) => (o.in_room, o.contents.clone()),
+            None => return,
+        };
+        if room != NOWHERE {
+            if let Some(r) = self.rooms.get_mut(&room) {
+                r.objects.retain(|&i| i != id);
+                for &cid in &contents { r.objects.push(cid); }
+            }
+            for &cid in &contents {
+                if let Some(child) = self.obj_instances.iter_mut().find(|o| o.id == cid) {
+                    child.in_room = room;
+                }
+            }
+        }
+        self.obj_instances.retain(|o| o.id != id);
     }
 
     /// Pick a start room: prefer the configured mortal start, fall back to

@@ -59,6 +59,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn corpse/decay tick -------------------------------------------
     db::spawn_decay_tick(Arc::clone(&world));
 
+    // --- Spawn per-object timer tick (OTRIG_TIMER) -------------------------
+    db::spawn_obj_timer_tick(Arc::clone(&world), Arc::clone(&chars));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

@@ -571,6 +571,45 @@ pub fn spawn_decay_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
     });
 }
 
+/// Background task that ticks per-instance object timers (the OTRIG_TIMER
+/// mechanism). Each prototype's `timer` field (in MUD-hours) seeds a
+/// per-instance countdown when the object spawns; on expiry, the object's
+/// 'f' OBJ trigger fires (if any) before the instance is extracted.
+pub fn spawn_obj_timer_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const TICK_SECONDS: u64 = 60;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let expired = {
+                let mut w = world.lock().await;
+                w.obj_timer_tick(TICK_SECONDS as i32)
+            };
+            if expired.is_empty() { continue; }
+            for (iid, room, _vnum) in &expired {
+                if *room != crate::world::NOWHERE {
+                    crate::interpreter::fire_obj_timer_triggers(
+                        *iid, *room, &world, &chars,
+                    ).await;
+                }
+            }
+            let mut w = world.lock().await;
+            for (iid, _, _) in expired {
+                w.extract_obj(iid);
+            }
+        }
+    });
+}
+
 /// Background task that re-runs reset_zone() for every zone on a fixed
 /// interval.  reset_zone respects each command's `max_existing` cap, so
 /// rooms whose mobs/objects are already populated stay unchanged — only
@@ -1134,6 +1173,8 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     last_cmd_ok = false;
                     continue;
                 }
+                let proto_timer = world.obj_protos.get(&cmd.arg1).map(|p| p.timer).unwrap_or(0);
+                let init_timer = if proto_timer > 0 { Some(proto_timer.saturating_mul(75)) } else { None };
                 if cmd.arg3 == -1 {
                     // Limbo / nowhere — load but don't place.
                     let id = next_obj_id; next_obj_id += 1;
@@ -1143,6 +1184,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         corpse_of: None,
                         decay_in: None,
                         triggers: Vec::new(),
+                        timer: init_timer,
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -1155,6 +1197,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         corpse_of: None,
                         decay_in: None,
                         triggers: Vec::new(),
+                        timer: init_timer,
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -1180,13 +1223,16 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     last_cmd_ok = false;
                     continue;
                 }
+                let proto_timer = world.obj_protos.get(&cmd.arg1).map(|p| p.timer).unwrap_or(0);
+                let init_timer = if proto_timer > 0 { Some(proto_timer.saturating_mul(75)) } else { None };
                 let id = next_obj_id; next_obj_id += 1;
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
-                        corpse_of: None,
-                        decay_in: None,
-                        triggers: Vec::new(),
+                    corpse_of: None,
+                    decay_in: None,
+                    triggers: Vec::new(),
+                    timer: init_timer,
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -1210,13 +1256,16 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                 let target_iid = world.obj_instances.iter().rev()
                     .find(|o| o.vnum == cmd.arg3)
                     .map(|o| o.id);
+                let proto_timer = world.obj_protos.get(&cmd.arg1).map(|p| p.timer).unwrap_or(0);
+                let init_timer = if proto_timer > 0 { Some(proto_timer.saturating_mul(75)) } else { None };
                 let id = next_obj_id; next_obj_id += 1;
                 world.obj_instances.push(ObjInstance {
                     id, vnum: cmd.arg1, in_room: crate::world::NOWHERE,
                     contents: Vec::new(),
-                        corpse_of: None,
-                        decay_in: None,
-                        triggers: Vec::new(),
+                    corpse_of: None,
+                    decay_in: None,
+                    triggers: Vec::new(),
+                    timer: init_timer,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {
