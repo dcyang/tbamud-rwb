@@ -50,6 +50,10 @@ pub enum Skill {
     CureCritic,
     Strength,
     Armor,
+    Haste,
+    Slow,
+    Dodge,
+    Parry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,10 @@ impl Skill {
             "curecritic" | "curecritical"     => Some(Skill::CureCritic),
             "strength"                        => Some(Skill::Strength),
             "armor"                           => Some(Skill::Armor),
+            "haste"                           => Some(Skill::Haste),
+            "slow"                            => Some(Skill::Slow),
+            "dodge"                           => Some(Skill::Dodge),
+            "parry"                           => Some(Skill::Parry),
             _ => None,
         }
     }
@@ -125,13 +133,18 @@ impl Skill {
             Skill::CureCritic   => "cure critic",
             Skill::Strength     => "strength",
             Skill::Armor        => "armor",
+            Skill::Haste        => "haste",
+            Skill::Slow         => "slow",
+            Skill::Dodge        => "dodge",
+            Skill::Parry        => "parry",
         }
     }
 
     pub fn kind(self) -> SkillKind {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
-                | Skill::Sneak | Skill::Hide | Skill::Steal => SkillKind::Physical,
+                | Skill::Sneak | Skill::Hide | Skill::Steal
+                | Skill::Dodge | Skill::Parry => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
@@ -139,7 +152,7 @@ impl Skill {
                 | Skill::DetectInvis  | Skill::DetectMagic
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
-                | Skill::Strength     | Skill::Armor
+                | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
                                       => SkillKind::Spell,
         }
     }
@@ -148,7 +161,8 @@ impl Skill {
     pub fn mana_cost(self) -> i32 {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
-                | Skill::Sneak | Skill::Hide | Skill::Steal => 0,
+                | Skill::Sneak | Skill::Hide | Skill::Steal
+                | Skill::Dodge | Skill::Parry => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
@@ -167,6 +181,8 @@ impl Skill {
             Skill::CureCritic   => 14,
             Skill::Strength     => 8,
             Skill::Armor        => 10,
+            Skill::Haste        => 15,
+            Skill::Slow         => 12,
         }
     }
 
@@ -201,6 +217,10 @@ impl Skill {
             Skill::CureCritic   => &[Class::Cleric],
             Skill::Strength     => &[Class::MagicUser],
             Skill::Armor        => &[Class::Cleric],
+            Skill::Haste        => &[Class::MagicUser],
+            Skill::Slow         => &[Class::MagicUser],
+            Skill::Dodge        => &[Class::Warrior, Class::Thief],
+            Skill::Parry        => &[Class::Warrior],
         }
     }
 
@@ -236,6 +256,10 @@ impl Skill {
             Skill::CureCritic   => "cure-critic",
             Skill::Strength     => "strength",
             Skill::Armor        => "armor",
+            Skill::Haste        => "haste",
+            Skill::Slow         => "slow",
+            Skill::Dodge        => "dodge",
+            Skill::Parry        => "parry",
         }
     }
 
@@ -256,7 +280,8 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::DetectInvis, Skill::DetectMagic,
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
-    Skill::Strength, Skill::Armor,
+    Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow,
+    Skill::Dodge, Skill::Parry,
 ];
 
 // ---------------------------------------------------------------------------

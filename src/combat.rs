@@ -99,6 +99,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     dex_score:     me.dex,
                     hit_bonus:     me.affect_hit_bonus() + me.bonus_hitroll,
                     dam_bonus:     me.affect_dam_bonus() + me.bonus_damroll,
+                    has_haste:     me.affects.iter().any(|a| a.skill == crate::character::Skill::Haste),
                 });
             }
         }
@@ -107,7 +108,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
 
     // ----- Phase 2: resolve player attacks (multi-attack by level/class) --
     for intent in player_intents {
-        let n = num_attacks(intent.level, intent.class);
+        let n = num_attacks(intent.level, intent.class, intent.has_haste);
         for _ in 0..n {
             // Stop early if the attacker stopped fighting between swings
             // (target died on a prior iteration → fighting cleared by
@@ -130,12 +131,19 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
 
     // ----- Phase 3: snapshot mob attackers -------------------------------
     // Mobs with an active Sleep affect skip their swing this round; their
-    // intent never makes it into the snapshot. Blindness is honored later
-    // inside resolve_mob_attack via the affect lookup.
+    // intent never makes it into the snapshot. Slow gives a 50% chance to
+    // skip per tick.  Blindness is honored later inside resolve_mob_attack
+    // via the affect lookup.
     let mob_intents: Vec<MobIntent> = {
+        use rand::Rng;
         let w = world.lock().await;
         w.mob_instances.iter()
             .filter(|m| !m.affects.iter().any(|a| a.skill == crate::character::Skill::Sleep))
+            .filter(|m| {
+                if m.affects.iter().any(|a| a.skill == crate::character::Skill::Slow) {
+                    rand::thread_rng().gen_range(0..100) >= 50
+                } else { true }
+            })
             .filter_map(|m| {
                 m.fighting.map(|tgt| MobIntent {
                     attacker_id:   m.id,
@@ -297,12 +305,39 @@ struct PlayerIntent {
     dex_score:     i32,
     hit_bonus:     i32,
     dam_bonus:     i32,
+    has_haste:     bool,
+}
+
+/// Defender-side passive-skill learn bump: roll `chance_pct`%, on hit
+/// add 1 to the named skill (capped at 100) and notify the defender.
+/// Used by Dodge/Parry success branches.
+async fn bump_defensive_skill(
+    ph: &crate::character::PlayerHandle,
+    skill: crate::character::Skill,
+    chance_pct: i32,
+) {
+    use rand::Rng;
+    if rand::thread_rng().gen_range(0..100) >= chance_pct { return; }
+    let bumped = {
+        let mut c = ph.character.lock().await;
+        let cur = *c.skills.get(&skill).unwrap_or(&0);
+        if cur >= 100 { return; }
+        let next = (cur + 1).min(100);
+        c.skills.insert(skill, next);
+        true
+    };
+    if bumped {
+        let _ = ph.send.send(format!(
+            "\r\nYou feel more skilled at {}.\r\n", skill.name(),
+        ));
+    }
 }
 
 /// Number of attacks per combat round.  Warriors gain extras at lvl 8 /
-/// 16 / 24; thieves at lvl 16.  Other classes are stuck at 1.
-fn num_attacks(level: i32, class: Class) -> i32 {
-    match class {
+/// 16 / 24; thieves at lvl 16.  Other classes are stuck at 1.  Haste
+/// (any class) grants +1 attack per round on top.
+fn num_attacks(level: i32, class: Class, has_haste: bool) -> i32 {
+    let base = match class {
         Class::Warrior => {
             if      level >= 24 { 4 }
             else if level >= 16 { 3 }
@@ -311,7 +346,8 @@ fn num_attacks(level: i32, class: Class) -> i32 {
         }
         Class::Thief => if level >= 16 { 2 } else { 1 },
         _ => 1,
-    }
+    };
+    base + if has_haste { 1 } else { 0 }
 }
 
 struct MobIntent {
@@ -653,6 +689,36 @@ async fn resolve_mob_attack(
         let cl = chars.lock().await;
         cl.broadcast_room(m.room, Some(m.target.id),
             &format!("\r\n{short} swings blindly at {} and misses.\r\n", ph.name));
+        return;
+    }
+
+    // Defender dodge/parry rolls — pure miss chances rolled before the
+    // damage calc.  Chance = learned/2, capped at 40 so neither skill
+    // becomes auto-dodge at 100%.  Parry also requires a wielded weapon.
+    let (dodge_pct, parry_pct, has_weapon, short, defender_name) = {
+        let c = ph.character.lock().await;
+        let dodge = *c.skills.get(&crate::character::Skill::Dodge).unwrap_or(&0) as i32;
+        let parry = *c.skills.get(&crate::character::Skill::Parry).unwrap_or(&0) as i32;
+        let has_weapon = c.equipment[WEAR_WIELD].is_some();
+        let w = world.lock().await;
+        let short = w.mob_protos.get(&m.attacker_vnum)
+            .map(|p| p.short_descr.clone()).unwrap_or_else(|| "Something".into());
+        ((dodge / 2).min(40), (parry / 2).min(40), has_weapon, short, c.name.clone())
+    };
+    if dodge_pct > 0 && rand::thread_rng().gen_range(0..100) < dodge_pct {
+        bump_defensive_skill(&ph, crate::character::Skill::Dodge, 5).await;
+        let _ = ph.send.send(format!("\r\nYou dodge {short}'s swing!\r\n"));
+        let cl = chars.lock().await;
+        cl.broadcast_room(m.room, Some(m.target.id),
+            &format!("\r\n{defender_name} dodges {short}'s swing.\r\n"));
+        return;
+    }
+    if has_weapon && parry_pct > 0 && rand::thread_rng().gen_range(0..100) < parry_pct {
+        bump_defensive_skill(&ph, crate::character::Skill::Parry, 5).await;
+        let _ = ph.send.send(format!("\r\nYou parry {short}'s attack!\r\n"));
+        let cl = chars.lock().await;
+        cl.broadcast_room(m.room, Some(m.target.id),
+            &format!("\r\n{defender_name} parries {short}'s attack.\r\n"));
         return;
     }
 

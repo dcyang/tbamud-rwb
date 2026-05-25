@@ -2167,10 +2167,15 @@ async fn do_skill(
         if let Some(qmsg) = quest_check_save(me, world).await {
             msg.push_str(&qmsg);
         }
+        if let Some(bump) = learn_attempt(me, skill, 5) { msg.push_str(&bump); }
         return CmdOutput::text(msg);
     }
 
-    CmdOutput::text(to_me)
+    let mut out = to_me;
+    if hit {
+        if let Some(bump) = learn_attempt(me, skill, 5) { out.push_str(&bump); }
+    }
+    CmdOutput::text(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,6 +2266,8 @@ async fn do_cast(
         crate::character::Skill::CureCritic   => cast_cure_critic(target, me, chars, learned).await,
         crate::character::Skill::Strength     => cast_buff(target, me, chars, learned, crate::character::Skill::Strength).await,
         crate::character::Skill::Armor        => cast_buff(target, me, chars, learned, crate::character::Skill::Armor).await,
+        crate::character::Skill::Haste        => cast_buff(target, me, chars, learned, crate::character::Skill::Haste).await,
+        crate::character::Skill::Slow         => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Slow).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -2908,6 +2915,11 @@ async fn cast_debuff(
             "{} gropes around blindly.\r\n",
             "{} cannot see anything.\r\n",
         ),
+        crate::character::Skill::Slow => (
+            6 + learned as i32 / 10,
+            "{} slows down noticeably.\r\n",
+            "{} starts moving in slow motion.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported debuff.\r\n"),
     };
     let mob_name = {
@@ -3107,6 +3119,12 @@ async fn cast_buff(
             0, 20,
             "A shimmering layer of force wraps around you.\r\n",
             "A shimmering layer of force wraps around {}.\r\n",
+        ),
+        crate::character::Skill::Haste => (
+            5 + learned as i32 / 15,
+            0, 0,
+            "Time seems to slow around you as you move with sudden speed.\r\n",
+            "{} moves with sudden speed.\r\n",
         ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
@@ -3419,11 +3437,15 @@ fn do_sneak(me: &mut Character) -> CmdOutput {
         );
     }
     me.sneaking = !me.sneaking;
-    if me.sneaking {
-        CmdOutput::text("\r\nYou are now sneaking quietly.\r\n")
+    let mut out = if me.sneaking {
+        "\r\nYou are now sneaking quietly.\r\n".to_string()
     } else {
-        CmdOutput::text("\r\nYou stop sneaking.\r\n")
+        "\r\nYou stop sneaking.\r\n".to_string()
+    };
+    if me.sneaking {
+        if let Some(bump) = learn_attempt(me, Skill::Sneak, 3) { out.push_str(&bump); }
     }
+    CmdOutput::text(out)
 }
 
 fn do_hide(me: &mut Character) -> CmdOutput {
@@ -3441,7 +3463,9 @@ fn do_hide(me: &mut Character) -> CmdOutput {
     let success = rand::thread_rng().gen_range(0..100) < chance;
     if success {
         me.hidden = true;
-        CmdOutput::text("\r\nYou attempt to hide yourself.\r\n")
+        let mut out = "\r\nYou attempt to hide yourself.\r\n".to_string();
+        if let Some(bump) = learn_attempt(me, Skill::Hide, 5) { out.push_str(&bump); }
+        CmdOutput::text(out)
     } else {
         // Failure tries to look secretive but ultimately fails — same
         // message either way: the player can't easily tell.
@@ -3540,9 +3564,9 @@ async fn do_steal(
         };
         let take = (level / 4).max(1) as i64;
         me.gold += take;
-        return CmdOutput::text(format!(
-            "\r\nYou lift {take} gold from {mob_name}.\r\n",
-        ));
+        let mut out = format!("\r\nYou lift {take} gold from {mob_name}.\r\n");
+        if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); }
+        return CmdOutput::text(out);
     }
 
     // Otherwise: try to steal a named item from mob inventory.
@@ -3576,9 +3600,9 @@ async fn do_steal(
         ));
     };
     me.inventory.push(iid);
-    CmdOutput::text(format!(
-        "\r\nYou deftly lift {short} from {mob_name}.\r\n",
-    ))
+    let mut out = format!("\r\nYou deftly lift {short} from {mob_name}.\r\n");
+    if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); }
+    CmdOutput::text(out)
 }
 
 async fn do_flee(
@@ -3818,6 +3842,20 @@ async fn do_search(
     CmdOutput::text(s)
 }
 
+/// Roll a learn% improvement on a skill after a successful use.  Caps
+/// at 100. Returns a player-facing line on a bump (which the caller is
+/// free to append to its output), or None on a no-op.  `chance_pct` is
+/// the per-use probability of gaining one point.
+fn learn_attempt(me: &mut Character, skill: Skill, chance_pct: i32) -> Option<String> {
+    use rand::Rng;
+    let cur = *me.skills.get(&skill).unwrap_or(&0);
+    if cur >= 100 { return None; }
+    if rand::thread_rng().gen_range(0..100) >= chance_pct { return None; }
+    let next = (cur + 1).min(100);
+    me.skills.insert(skill, next);
+    Some(format!("You feel more skilled at {}.\r\n", skill.name()))
+}
+
 async fn do_pick(
     arg: &str,
     me: &mut Character,
@@ -3874,10 +3912,14 @@ async fn do_pick(
         let mut w = world.lock().await;
         mutate_door(&mut w, me.current_room, dir, 0, EX_LOCKED);
     }
-    let cl = chars.lock().await;
-    cl.broadcast_room(me.current_room, Some(me.id),
-        &format!("{} picks the lock on the {kw_short}.\r\n", me.name));
-    CmdOutput::text(format!("\r\nThe lock clicks open.\r\n"))
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} picks the lock on the {kw_short}.\r\n", me.name));
+    }
+    let mut out = "\r\nThe lock clicks open.\r\n".to_string();
+    if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    CmdOutput::text(out)
 }
 
 /// True if `key_vnum` is non-negative and the player has an instance of
