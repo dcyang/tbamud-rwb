@@ -39,6 +39,7 @@ pub enum Skill {
     Steal,
     WordOfRecall,
     Identify,
+    DetectInvis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +72,7 @@ impl Skill {
             "steal"        => Some(Skill::Steal),
             "wordofrecall" => Some(Skill::WordOfRecall),
             "identify"     => Some(Skill::Identify),
+            "detectinvis" | "detectinvisible" => Some(Skill::DetectInvis),
             _ => None,
         }
     }
@@ -92,6 +94,7 @@ impl Skill {
             Skill::Steal        => "steal",
             Skill::WordOfRecall => "word of recall",
             Skill::Identify     => "identify",
+            Skill::DetectInvis  => "detect invis",
         }
     }
 
@@ -102,7 +105,8 @@ impl Skill {
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
-                | Skill::WordOfRecall | Skill::Identify     => SkillKind::Spell,
+                | Skill::WordOfRecall | Skill::Identify
+                | Skill::DetectInvis                        => SkillKind::Spell,
         }
     }
 
@@ -119,6 +123,7 @@ impl Skill {
             Skill::Harm         => 10,
             Skill::WordOfRecall => 20,
             Skill::Identify     => 15,
+            Skill::DetectInvis  => 10,
         }
     }
 
@@ -142,6 +147,7 @@ impl Skill {
             // by all in many forks).  Keep Cleric-only for now.
             Skill::WordOfRecall => &[Class::Cleric, Class::MagicUser],
             Skill::Identify     => &[Class::MagicUser],
+            Skill::DetectInvis  => &[Class::MagicUser, Class::Cleric],
         }
     }
 
@@ -166,6 +172,7 @@ impl Skill {
             Skill::Steal        => "steal",
             Skill::WordOfRecall => "word-of-recall",
             Skill::Identify     => "identify",
+            Skill::DetectInvis  => "detect-invis",
         }
     }
 
@@ -183,6 +190,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Bless, Skill::BurningHands,
     Skill::Sanctuary, Skill::Harm,
     Skill::WordOfRecall, Skill::Identify,
+    Skill::DetectInvis,
 ];
 
 // ---------------------------------------------------------------------------

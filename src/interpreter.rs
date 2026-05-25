@@ -1392,8 +1392,26 @@ async fn do_cast(
         crate::character::Skill::Harm         => cast_harm(target, me, world, chars, learned).await,
         crate::character::Skill::WordOfRecall => cast_word_of_recall(me, world, chars).await,
         crate::character::Skill::Identify     => cast_identify(target, me, world).await,
+        crate::character::Skill::DetectInvis  => cast_detect_invis(me),
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
+}
+
+fn cast_detect_invis(me: &mut Character) -> CmdOutput {
+    // Adds a long-duration Affect that signals render_room to skip the
+    // hidden-player filter for this viewer.
+    let aff = crate::character::Affect {
+        skill:         crate::character::Skill::DetectInvis,
+        duration:      12,   // ~24s of clear vision
+        to_hit:        0,
+        to_dam:        0,
+        dmg_reduction: 0,
+    };
+    me.mana -= crate::character::Skill::DetectInvis.mana_cost();
+    me.apply_affect(aff);
+    CmdOutput::text(
+        "\r\nYour eyes tingle. You can sense things that wish to remain unseen.\r\n",
+    )
 }
 
 async fn cast_magic_missile(
@@ -2939,15 +2957,31 @@ pub async fn render_room(
     }
     drop(w);
 
-    // Other players in this room (skip hidden players).
+    // Other players in this room (skip hidden players unless we have
+    // Detect-Invis active).
     let cl = chars.lock().await;
+    let see_hidden = if let Some(vid) = viewer_id {
+        match cl.iter().find(|p| p.id == vid) {
+            Some(p) => {
+                let c = p.character.lock().await;
+                c.affects.iter().any(|a| a.skill == crate::character::Skill::DetectInvis)
+            }
+            None => false,
+        }
+    } else { false };
+
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        // Briefly lock the character to check the `hidden` flag.
-        let hidden = p.character.lock().await.hidden;
-        if hidden { continue; }
-        s.push_str(&format!("{} is standing here.\r\n", p.name));
+        if !see_hidden {
+            let hidden = p.character.lock().await.hidden;
+            if hidden { continue; }
+        }
+        let hidden_tag = if see_hidden {
+            let c = p.character.lock().await;
+            if c.hidden { " (hidden)" } else { "" }
+        } else { "" };
+        s.push_str(&format!("{} is standing here.{hidden_tag}\r\n", p.name));
     }
 
     s

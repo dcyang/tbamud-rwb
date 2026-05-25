@@ -884,6 +884,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         inventory: Vec::new(),
                         hp, max_hp: hp,
                         fighting: None,
+                        remembers: Vec::new(),
                     });
                     last_mob_id = Some(id);
                     last_cmd_ok = true;

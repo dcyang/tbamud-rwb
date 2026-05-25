@@ -116,8 +116,8 @@ async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
     };
     if live_players.is_empty() { return; }
 
-    // Identify all aggressive mob instances that have no current target
-    // and have at least one non-hidden player in their room.
+    // Identify all aggressive (or memory-grudged) mob instances that
+    // have no current target and have an appropriate player in-room.
     let intents: Vec<(u32, u32, crate::world::RoomVnum, String)> = {
         let w = world.lock().await;
         let mut v = Vec::new();
@@ -127,10 +127,23 @@ async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                 Some(p) => p,
                 None    => continue,
             };
-            if proto.mob_flags[0] & crate::world::MOB_AGGRESSIVE == 0 {
+            let is_aggro  = proto.mob_flags[0] & crate::world::MOB_AGGRESSIVE != 0;
+            let has_memory = proto.mob_flags[0] & crate::world::MOB_MEMORY     != 0;
+
+            // First check memory: any remembered player in this room is a
+            // priority target, even if not normally aggressive.
+            let mem_target = if has_memory && !m.remembers.is_empty() {
+                live_players.iter().find(|(pid, room, _)| {
+                    *room == m.in_room && m.remembers.contains(pid)
+                }).map(|&(pid, _, _)| pid)
+            } else { None };
+
+            if let Some(pid) = mem_target {
+                v.push((m.id, pid, m.in_room, proto.short_descr.clone()));
                 continue;
             }
-            // Find a non-hidden player in this mob's room.
+            if !is_aggro { continue; }
+            // Non-hidden player in this mob's room.
             let target = live_players.iter()
                 .find(|(_, room, hidden)| *room == m.in_room && !hidden);
             if let Some(&(pid, _, _)) = target {
@@ -248,10 +261,10 @@ async fn resolve_player_attack(
         (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1)
     };
 
-    let (target_name, target_dead, target_room) = {
+    let (target_name, target_dead, target_room, has_memory, is_wimpy, low_hp) = {
         let mut w = world.lock().await;
 
-        // Read-only first: existence, room, proto name.
+        // Read-only first: existence, room, proto name + flags.
         let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == p.target.id) {
             Some(m) => (m.vnum, m.in_room),
             None => {
@@ -265,19 +278,29 @@ async fn resolve_player_attack(
             clear_player_fighting(p.attacker_id, chars).await;
             return;
         }
-        let proto_name = w.mob_protos.get(&vnum)
-            .map(|pr| pr.short_descr.clone())
-            .unwrap_or_else(|| "the creature".into());
+        let (proto_name, has_memory, is_wimpy) = match w.mob_protos.get(&vnum) {
+            Some(pr) => (
+                pr.short_descr.clone(),
+                pr.mob_flags[0] & crate::world::MOB_MEMORY != 0,
+                pr.mob_flags[0] & crate::world::MOB_WIMPY  != 0,
+            ),
+            None => ("the creature".into(), false, false),
+        };
 
-        // Now the mutation.
+        // Mutation: damage + remember attacker.
         let m = w.mob_instances.iter_mut().find(|m| m.id == p.target.id).unwrap();
         m.hp -= dmg;
         let dead = m.hp <= 0;
         if !dead && m.fighting.is_none() {
             m.fighting = Some(Target { id: p.attacker_id, is_player: true });
         }
-        (proto_name, dead, in_room)
+        if has_memory && !m.remembers.contains(&p.attacker_id) {
+            m.remembers.push(p.attacker_id);
+        }
+        let low_hp = !dead && m.hp <= m.max_hp / 6;
+        (proto_name, dead, in_room, has_memory, is_wimpy, low_hp)
     };
+    let _ = has_memory;
 
     // Build per-recipient messages.
     let to_attacker = format!(
@@ -311,7 +334,58 @@ async fn resolve_player_attack(
         award_xp(p.attacker_id, xp, chars).await;
         // Quest progress.
         notify_quest_kill(p.attacker_id, killed_vnum, world, chars).await;
+        return;
     }
+
+    // Wimpy mob check: low HP + MOB_WIMPY → mob flees.
+    if is_wimpy && low_hp {
+        mob_flee(p.target.id, &target_name, world, chars).await;
+        clear_player_fighting(p.attacker_id, chars).await;
+    }
+}
+
+/// A mob attempts to flee in a random valid direction.  Clears its
+/// fighting state, broadcasts "X flees!" to both rooms, and physically
+/// moves the mob between room.mobs lists.  No-op if no valid exit.
+async fn mob_flee(
+    mob_id: u32,
+    mob_name: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    use rand::seq::SliceRandom;
+    let (from_room, target_room) = {
+        let mut w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { return; };
+        let from = m.in_room;
+        // Pick a random exit.
+        let candidates: Vec<crate::world::RoomVnum> = w.rooms.get(&from)
+            .map(|r| r.exits.iter()
+                .filter_map(|e| e.as_ref())
+                .filter(|e| e.to_room != crate::world::NOWHERE
+                          && w.rooms.contains_key(&e.to_room))
+                .map(|e| e.to_room)
+                .collect())
+            .unwrap_or_default();
+        let Some(&to) = candidates.choose(&mut rand::thread_rng()) else {
+            return;
+        };
+        // Move the mob.
+        if let Some(r) = w.rooms.get_mut(&from) {
+            r.mobs.retain(|&id| id != mob_id);
+        }
+        if let Some(r) = w.rooms.get_mut(&to) {
+            r.mobs.push(mob_id);
+        }
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.in_room  = to;
+            m.fighting = None;
+        }
+        (from, to)
+    };
+    let cl = chars.lock().await;
+    cl.broadcast_room(from_room, None, &format!("{mob_name} flees, severely wounded!\r\n"));
+    cl.broadcast_room(target_room, None, &format!("{mob_name} arrives, fleeing in panic.\r\n"));
 }
 
 /// Push a "Quest objective complete" message to a player if their active

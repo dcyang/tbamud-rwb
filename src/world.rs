@@ -208,6 +208,9 @@ pub const MOB_SCAVENGER:  u32 = 1 << 2;
 pub const MOB_ISNPC:      u32 = 1 << 3;
 pub const MOB_AWARE:      u32 = 1 << 4;
 pub const MOB_AGGRESSIVE: u32 = 1 << 5;
+pub const MOB_STAY_ZONE:  u32 = 1 << 6;
+pub const MOB_WIMPY:      u32 = 1 << 7;
+pub const MOB_MEMORY:     u32 = 1 << 11;
 
 // ---------------------------------------------------------------------------
 // Mob prototypes & instances
@@ -312,6 +315,9 @@ pub struct MobInstance {
     /// Opponent — same Target shape as `Character.fighting` to keep the
     /// combat tick uniform. The player id here is a PlayerHandle.id.
     pub fighting:  Option<crate::character::Target>,
+    /// Player ids the mob remembers (used by MOB_MEMORY mobs).  Capped
+    /// in practice by gameplay since most fights end with one corpse.
+    pub remembers: Vec<u32>,
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep
