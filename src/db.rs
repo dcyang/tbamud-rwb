@@ -981,10 +981,19 @@ fn parse_object_file(path: &PathBuf, world: &mut World) -> Result<()> {
                     });
                 }
                 Some('A') => {
-                    // 'A' then a line "<location> <modifier>" — we don't use
-                    // affects yet but must consume two lines to stay in sync.
+                    // 'A' then a line "<location> <modifier>" — fill into
+                    // ObjProto.affected so wear-time stat bonuses can apply.
                     let _ = s.next_line(); // 'A'
-                    let _ = s.next_line(); // values
+                    if let Some(values_line) = s.next_line() {
+                        let toks: Vec<&str> = values_line.split_whitespace().collect();
+                        if toks.len() >= 2 {
+                            let location: i32 = toks[0].parse().unwrap_or(0);
+                            let modifier: i32 = toks[1].parse().unwrap_or(0);
+                            if location != crate::world::APPLY_NONE && modifier != 0 {
+                                o.affected.push(crate::world::ObjAffect { location, modifier });
+                            }
+                        }
+                    }
                 }
                 Some('T') => {
                     let _ = s.next_line(); // DG trigger — skip

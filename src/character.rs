@@ -285,6 +285,14 @@ pub struct Character {
     /// Vnums of quests this character has already completed.  Used for
     /// prereq checks and to prevent re-collecting one-shot rewards.
     pub completed_quests: Vec<i32>,
+    /// Accumulated hitroll bonus from worn equipment's APPLY_HITROLL.
+    /// Applied by `apply_obj_affects` on wear and rolled back on remove.
+    pub bonus_hitroll: i32,
+    /// Accumulated damroll bonus from worn equipment's APPLY_DAMROLL.
+    pub bonus_damroll: i32,
+    /// Accumulated AC bonus from APPLY_AC modifiers on worn equipment.
+    /// Added to `total_ac` alongside the armor's value[0].
+    pub bonus_ac:      i32,
     /// Character id of the leader this character is currently following,
     /// or `None` if they aren't following anyone. Set by `follow`,
     /// cleared by `follow self` or by the leader logging off.

@@ -56,7 +56,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     target:        tgt,
                     weapon_iid:    me.equipment[WEAR_WIELD],
                     str_score:     me.str_,
-                    dam_bonus:     me.affect_dam_bonus(),
+                    dam_bonus:     me.affect_dam_bonus() + me.bonus_damroll,
                 });
             }
         }

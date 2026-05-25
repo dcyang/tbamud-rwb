@@ -188,6 +188,9 @@ pub struct ObjProto {
     pub level:             i32,
     pub timer:             i32,
     pub extras:            Vec<ExtraDescr>,
+    /// Apply-stat modifiers, parsed from `A` records.  Up to 6 in stock
+    /// CircleMUD; we store them as a Vec for simplicity.
+    pub affected:          Vec<ObjAffect>,
 }
 
 /// A live object instance in the world.
@@ -228,6 +231,29 @@ pub const CORPSE_DECAY_SECS: i32 = 300;
 
 /// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
 /// gameplay (containers, weapons, armor).
+/// APPLY_* (object affect locations) — mirror constants.c.  Listed here
+/// are the slots `apply_obj_affects()` currently honors; unknown values
+/// are tolerated and ignored at apply-time.
+pub const APPLY_NONE:    i32 = 0;
+pub const APPLY_STR:     i32 = 1;
+pub const APPLY_DEX:     i32 = 2;
+pub const APPLY_INT:     i32 = 3;
+pub const APPLY_WIS:     i32 = 4;
+pub const APPLY_CON:     i32 = 5;
+pub const APPLY_CHA:     i32 = 6;
+pub const APPLY_MANA:    i32 = 12;
+pub const APPLY_HIT:     i32 = 13;
+pub const APPLY_AC:      i32 = 17;
+pub const APPLY_HITROLL: i32 = 18;
+pub const APPLY_DAMROLL: i32 = 19;
+
+/// One (location, modifier) entry from an object's `A` record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ObjAffect {
+    pub location: i32,
+    pub modifier: i32,
+}
+
 pub const ITEM_LIGHT:     i32 = 1;
 pub const ITEM_SCROLL:    i32 = 2;
 pub const ITEM_WAND:      i32 = 3;

@@ -1387,7 +1387,7 @@ pub async fn total_ac(me: &Character, world: &Arc<Mutex<World>>) -> i32 {
             }
         }
     }
-    total
+    total + me.bonus_ac
 }
 
 async fn do_kill(
@@ -3324,6 +3324,49 @@ async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 // Equipment commands
 // ---------------------------------------------------------------------------
 
+/// Apply (or unapply) an object's `A`-record modifiers to a Character.
+/// `direction` is +1 on wear/wield, -1 on remove. Stats clamp to >=0 at
+/// the end so removing a STR+1 ring while debuffed doesn't underflow
+/// into nonsense — but the bonus_* caches are unclamped (negative is
+/// fine, it just means the cumulative bonus is below baseline).
+fn apply_obj_affects(me: &mut Character, affects: &[crate::world::ObjAffect], direction: i32) {
+    use crate::world::*;
+    for a in affects {
+        let delta = a.modifier * direction;
+        match a.location {
+            APPLY_STR => me.str_ = (me.str_ + delta).max(0),
+            APPLY_DEX => me.dex  = (me.dex  + delta).max(0),
+            APPLY_INT => me.int_ = (me.int_ + delta).max(0),
+            APPLY_WIS => me.wis  = (me.wis  + delta).max(0),
+            APPLY_CON => me.con  = (me.con  + delta).max(0),
+            APPLY_CHA => me.cha  = (me.cha  + delta).max(0),
+            APPLY_HIT => {
+                me.max_hp = (me.max_hp + delta).max(1);
+                me.hp = me.hp.min(me.max_hp);
+            }
+            APPLY_MANA => {
+                me.max_mana = (me.max_mana + delta).max(0);
+                me.mana = me.mana.min(me.max_mana);
+            }
+            APPLY_HITROLL => me.bonus_hitroll += delta,
+            APPLY_DAMROLL => me.bonus_damroll += delta,
+            APPLY_AC      => me.bonus_ac      += delta,
+            _ => {} // unsupported APPLY_* — ignore silently
+        }
+    }
+}
+
+/// Snapshot an object's affected list under a brief world lock — used
+/// by the wear/wield/remove paths to avoid holding the lock across
+/// `apply_obj_affects` (which mutates `me`).
+async fn snapshot_obj_affects(iid: u32, world: &Arc<Mutex<World>>) -> Vec<crate::world::ObjAffect> {
+    let w = world.lock().await;
+    w.obj_instances.iter().find(|o| o.id == iid)
+        .and_then(|o| w.obj_protos.get(&o.vnum))
+        .map(|p| p.affected.clone())
+        .unwrap_or_default()
+}
+
 async fn do_wield(
     arg: &str,
     me: &mut Character,
@@ -3357,6 +3400,8 @@ async fn do_wield(
 
     me.inventory.remove(idx);
     me.equipment[WEAR_WIELD] = Some(iid);
+    let affects = snapshot_obj_affects(iid, world).await;
+    apply_obj_affects(me, &affects, 1);
     fire_obj_wear_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou wield {short}.\r\n"))
 }
@@ -3401,6 +3446,8 @@ async fn do_wear(
 
     me.inventory.remove(idx);
     me.equipment[slot] = Some(iid);
+    let affects = snapshot_obj_affects(iid, world).await;
+    apply_obj_affects(me, &affects, 1);
     fire_obj_wear_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou wear {short} {}.\r\n", wear_pos_name(slot)))
 }
@@ -3437,6 +3484,8 @@ async fn do_remove(
 
     me.equipment[slot] = None;
     me.inventory.push(iid);
+    let affects = snapshot_obj_affects(iid, world).await;
+    apply_obj_affects(me, &affects, -1);
     fire_obj_remove_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou stop using {short}.\r\n"))
 }
@@ -3459,19 +3508,19 @@ async fn do_examine(
     // Quick item-type sniffing: find a matching object and report its type.
     let key = arg.to_ascii_lowercase();
     let w = world.lock().await;
-    let proto_info: Option<(i32, [i32; 4])> = me.inventory.iter()
+    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>)> = me.inventory.iter()
         .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
         .find_map(|&iid| {
             let o = w.obj_instances.iter().find(|o| o.id == iid)?;
             let p = w.obj_protos.get(&o.vnum)?;
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
-                Some((p.item_type, p.value))
+                Some((p.item_type, p.value, p.affected.clone()))
             } else {
                 None
             }
         });
 
-    if let Some((ty, vals)) = proto_info {
+    if let Some((ty, vals, affs)) = proto_info {
         let kind = item_type_name(ty);
         let extra = match ty {
             // ITEM_WEAPON: value[1] dice count, value[2] dice size, value[3] damage type
@@ -3484,9 +3533,38 @@ async fn do_examine(
         };
         let mut out = base.text;
         out.push_str(&extra);
+        if !affs.is_empty() {
+            out.push_str("Affects:\r\n");
+            for a in &affs {
+                let name = apply_name(a.location);
+                let sign = if a.modifier >= 0 { "+" } else { "" };
+                out.push_str(&format!("  {} by {sign}{}\r\n", name, a.modifier));
+            }
+        }
         return CmdOutput::text(out);
     }
     base
+}
+
+/// Human-readable label for an APPLY_* location.  Returns "?" for
+/// values outside the supported set (apply_obj_affects ignores those at
+/// apply-time too).
+fn apply_name(loc: i32) -> &'static str {
+    use crate::world::*;
+    match loc {
+        APPLY_STR     => "STR",
+        APPLY_DEX     => "DEX",
+        APPLY_INT     => "INT",
+        APPLY_WIS     => "WIS",
+        APPLY_CON     => "CON",
+        APPLY_CHA     => "CHA",
+        APPLY_HIT     => "max HP",
+        APPLY_MANA    => "max mana",
+        APPLY_AC      => "AC",
+        APPLY_HITROLL => "hitroll",
+        APPLY_DAMROLL => "damroll",
+        _             => "?",
+    }
 }
 
 async fn do_give(

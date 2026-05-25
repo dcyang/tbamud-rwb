@@ -256,6 +256,9 @@ pub async fn handle_connection(
                     active_quest:    p_ref.and_then(|p| p.active_quest),
                     quest_progress:  p_ref.map(|p| p.quest_progress).unwrap_or(0),
                     completed_quests: p_ref.map(|p| p.completed_quests.clone()).unwrap_or_default(),
+                    bonus_hitroll:    0,
+                    bonus_damroll:    0,
+                    bonus_ac:         0,
                     following:        None,
                     grouped:          false,
                 };
