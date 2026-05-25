@@ -291,6 +291,9 @@ async fn do_get(
         }
     };
 
+    // Capture the object's vnum for quest-pickup hook.
+    let picked_vnum = w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum);
+
     // Mutate world: remove from room, add to player's inventory list,
     // update the instance's in_room.
     if let Some(r) = w.rooms.get_mut(&me.current_room) {
@@ -308,8 +311,15 @@ async fn do_get(
         me.current_room, Some(me.id),
         &format!("{} picks up {}.\r\n", me.name, name),
     );
+    drop(cl);
 
-    CmdOutput::text(format!("\r\nYou get {}.\r\n", name))
+    let mut msg = format!("\r\nYou get {}.\r\n", name);
+    if let Some(vnum) = picked_vnum {
+        if let Some(qmsg) = quest_check_pickup(me, vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+    }
+    CmdOutput::text(msg)
 }
 
 /// Find a container (in inventory or in the current room) by keyword.
@@ -380,6 +390,9 @@ async fn do_get_from_container(
         }
     };
 
+    // Capture child vnum for quest hook.
+    let child_vnum = w.obj_instances.iter().find(|o| o.id == child_iid).map(|o| o.vnum);
+
     // Remove from container, add to player's inventory.
     if let Some(container) = w.obj_instances.iter_mut().find(|o| o.id == container_iid) {
         container.contents.remove(idx_in_container);
@@ -392,8 +405,15 @@ async fn do_get_from_container(
         me.current_room, Some(me.id),
         &format!("{} gets {} from {}.\r\n", me.name, child_short, container_name),
     );
+    drop(cl);
 
-    CmdOutput::text(format!("\r\nYou get {} from {}.\r\n", child_short, container_name))
+    let mut msg = format!("\r\nYou get {} from {}.\r\n", child_short, container_name);
+    if let Some(vnum) = child_vnum {
+        if let Some(qmsg) = quest_check_pickup(me, vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+    }
+    CmdOutput::text(msg)
 }
 
 async fn do_put(
@@ -804,6 +824,72 @@ pub async fn quest_check_kill(
     Some(format!(
         "\r\n*** Quest objective complete: you have slain {mob_name}! Return to the questmaster. ***\r\n",
     ))
+}
+
+/// AQ_OBJ_FIND: completes when the player picks up an object matching the
+/// target vnum.  Returns a player-facing message if progress was made.
+pub async fn quest_check_pickup(
+    me: &mut Character,
+    obj_vnum: i32,
+    world: &Arc<Mutex<World>>,
+) -> Option<String> {
+    let qv = me.active_quest?;
+    let w = world.lock().await;
+    let q = w.quests.get(&qv)?;
+    if q.kind != crate::world::AQ_OBJ_FIND { return None; }
+    if q.target != obj_vnum { return None; }
+    if me.quest_progress >= 1 { return None; }
+    me.quest_progress = 1;
+    let short = w.obj_protos.get(&obj_vnum)
+        .map(|p| p.short_description.clone())
+        .unwrap_or_else(|| "the item".to_string());
+    Some(format!(
+        "\r\n*** Quest objective complete: you have found {short}! Return to the questmaster. ***\r\n",
+    ))
+}
+
+/// AQ_ROOM_FIND: completes when the player enters a room matching the
+/// target room vnum.
+pub async fn quest_check_room(
+    me: &mut Character,
+    room_vnum: i32,
+    world: &Arc<Mutex<World>>,
+) -> Option<String> {
+    let qv = me.active_quest?;
+    let w = world.lock().await;
+    let q = w.quests.get(&qv)?;
+    if q.kind != crate::world::AQ_ROOM_FIND { return None; }
+    if q.target != room_vnum { return None; }
+    if me.quest_progress >= 1 { return None; }
+    me.quest_progress = 1;
+    let room_name = w.rooms.get(&room_vnum)
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "the destination".to_string());
+    Some(format!(
+        "\r\n*** Quest objective complete: you have reached {room_name}! Return to the questmaster. ***\r\n",
+    ))
+}
+
+/// AQ_OBJ_RETURN: completes when the player gives the target object to
+/// the target recipient mob (quest.target = obj vnum, quest.value[5] =
+/// recipient mob vnum).
+pub async fn quest_check_give(
+    me: &mut Character,
+    given_obj_vnum: i32,
+    given_to_mob_vnum: i32,
+    world: &Arc<Mutex<World>>,
+) -> Option<String> {
+    let qv = me.active_quest?;
+    let w = world.lock().await;
+    let q = w.quests.get(&qv)?;
+    if q.kind != crate::world::AQ_OBJ_RETURN { return None; }
+    if q.target != given_obj_vnum { return None; }
+    if q.value[5] != given_to_mob_vnum { return None; }
+    if me.quest_progress >= 1 { return None; }
+    me.quest_progress = 1;
+    Some(
+        "\r\n*** Quest objective complete: you have delivered the item! Return to the questmaster. ***\r\n".to_string()
+    )
 }
 
 fn do_quest_abandon(me: &mut Character, _world: &Arc<Mutex<World>>) -> CmdOutput {
@@ -2353,17 +2439,19 @@ async fn do_give(
     let room_mobs: Vec<u32> = w.rooms.get(&me.current_room)
         .map(|r| r.mobs.clone())
         .unwrap_or_default();
-    let mob_match: Option<(u32, String)> = room_mobs.iter().find_map(|&mid| {
+    let mob_match: Option<(u32, i32, String)> = room_mobs.iter().find_map(|&mid| {
         let m = w.mob_instances.iter().find(|m| m.id == mid)?;
         let p = w.mob_protos.get(&m.vnum)?;
         if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&tlow)) {
-            Some((mid, p.short_descr.clone()))
+            Some((mid, m.vnum, p.short_descr.clone()))
         } else {
             None
         }
     });
 
-    if let Some((mid, mname)) = mob_match {
+    if let Some((mid, mob_vnum, mname)) = mob_match {
+        // Capture obj vnum for the quest hook.
+        let obj_vnum = w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum);
         me.inventory.remove(idx);
         if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
             m.inventory.push(iid);
@@ -2374,7 +2462,15 @@ async fn do_give(
             me.current_room, Some(me.id),
             &format!("{} gives {} to {}.\r\n", me.name, short, mname),
         );
-        return CmdOutput::text(format!("\r\nYou give {} to {}.\r\n", short, mname));
+        drop(cl);
+
+        let mut msg = format!("\r\nYou give {} to {}.\r\n", short, mname);
+        if let Some(ov) = obj_vnum {
+            if let Some(qmsg) = quest_check_give(me, ov, mob_vnum, world).await {
+                msg.push_str(&qmsg);
+            }
+        }
+        return CmdOutput::text(msg);
     }
 
     CmdOutput::text(format!("\r\nNo one called '{target_kw}' is here.\r\n"))
@@ -2659,8 +2755,12 @@ async fn do_move(
         }
     }
 
-    // Show the new room
-    CmdOutput::text(render_room(target, Some(me.id), world, chars).await)
+    // Show the new room — and append any quest-room hit.
+    let mut view = render_room(target, Some(me.id), world, chars).await;
+    if let Some(qmsg) = quest_check_room(me, target, world).await {
+        view.push_str(&qmsg);
+    }
+    CmdOutput::text(view)
 }
 
 // ---------------------------------------------------------------------------

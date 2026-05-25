@@ -1,0 +1,11 @@
+#999
+Errand to Market Square~
+Could you please pop down to the market square and check the price of flour for me?~
+The baker wants you to visit the market square (room 3014) and check on flour prices.~
+Thank you for your help!  Take this for your trouble.~
+Maybe next time, then.~
+1 3001 0 3014 -1 -1 -1
+0 0 0 0 0 0 0
+50 100 -1
+S
+$~
