@@ -129,6 +129,12 @@ pub struct PlayerRecord {
     pub cha:           i32,
     /// Skill name → practice percent (0..=100).
     pub skills:        std::collections::HashMap<String, u8>,
+    /// Currently-active quest vnum (None if no quest in progress).
+    pub active_quest:  Option<i32>,
+    /// Progress on the active quest (kill counter, etc).
+    pub quest_progress: i32,
+    /// Vnums of quests already completed.
+    pub completed_quests: Vec<i32>,
 }
 
 impl PlayerRecord {
@@ -308,6 +314,22 @@ impl PlayerDb {
                         }
                     }
                 }
+                "Qst" => {
+                    // "Qst: <vnum> <progress>" — active quest
+                    let mut parts = val.split_ascii_whitespace();
+                    if let (Some(v), Some(p)) = (parts.next(), parts.next()) {
+                        if let (Ok(vn), Ok(pr)) = (v.parse::<i32>(), p.parse::<i32>()) {
+                            rec.active_quest = Some(vn);
+                            rec.quest_progress = pr;
+                        }
+                    }
+                }
+                "Qcmp" => {
+                    // "Qcmp: <vnum>" — one entry per completed quest
+                    if let Ok(v) = val.parse::<i32>() {
+                        rec.completed_quests.push(v);
+                    }
+                }
                 _ => {}
             }
         }
@@ -374,6 +396,12 @@ impl PlayerDb {
         sk_names.sort();
         for name in sk_names {
             writeln!(f, "Skil: {} {}", name, rec.skills[name])?;
+        }
+        if let Some(qv) = rec.active_quest {
+            writeln!(f, "Qst : {} {}", qv, rec.quest_progress)?;
+        }
+        for qv in &rec.completed_quests {
+            writeln!(f, "Qcmp: {qv}")?;
         }
 
         Ok(())

@@ -252,6 +252,14 @@ pub struct Character {
     /// Both break on the next overt action (attack/cast/say).
     pub sneaking:     bool,
     pub hidden:       bool,
+    /// Active quest the character is currently working on (the quest's vnum).
+    pub active_quest: Option<i32>,
+    /// Per-active-quest progress counter (kill counter for AQ_MOB_KILL,
+    /// 0/1 for one-shots like AQ_OBJ_FIND).
+    pub quest_progress: i32,
+    /// Vnums of quests this character has already completed.  Used for
+    /// prereq checks and to prevent re-collecting one-shot rewards.
+    pub completed_quests: Vec<i32>,
 }
 
 impl Character {

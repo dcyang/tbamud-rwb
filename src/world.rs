@@ -236,6 +236,43 @@ pub struct MobProto {
 }
 
 // ---------------------------------------------------------------------------
+// Quests
+// ---------------------------------------------------------------------------
+
+pub type QuestVnum = i32;
+
+/// Quest-type constants — mirror AQ_* in quest.h.
+pub const AQ_OBJ_FIND:   i32 = 0;
+pub const AQ_ROOM_FIND:  i32 = 1;
+pub const AQ_MOB_FIND:   i32 = 2;
+pub const AQ_MOB_KILL:   i32 = 3;
+pub const AQ_MOB_SAVE:   i32 = 4;
+pub const AQ_OBJ_RETURN: i32 = 5;
+pub const AQ_ROOM_CLEAR: i32 = 6;
+
+/// One quest entry from a .qst file.  Mirrors `aq_data` in quest.h.
+#[derive(Debug, Clone, Default)]
+pub struct Quest {
+    pub vnum:        QuestVnum,
+    pub name:        String,
+    pub desc:        String,
+    pub info:        String,
+    pub done:        String,
+    pub quit:        String,
+    pub kind:        i32,         // AQ_* type
+    pub flags:       u32,
+    pub qm:          MobVnum,     // quest-master mob vnum
+    pub target:      i32,         // mob vnum / room vnum / obj vnum depending on kind
+    pub prev_quest:  QuestVnum,
+    pub next_quest:  QuestVnum,
+    pub prereq:      QuestVnum,
+    pub value:       [i32; 7],
+    pub gold_reward: i32,
+    pub exp_reward:  i32,
+    pub obj_reward:  ObjVnum,
+}
+
+// ---------------------------------------------------------------------------
 // Shops
 // ---------------------------------------------------------------------------
 
@@ -280,6 +317,7 @@ pub struct World {
     pub obj_instances: Vec<ObjInstance>,
     pub mob_instances: Vec<MobInstance>,
     pub shops:         Vec<Shop>,
+    pub quests:        BTreeMap<QuestVnum, Quest>,
 }
 
 impl World {

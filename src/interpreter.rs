@@ -44,6 +44,7 @@ const COMMANDS: &[&str] = &[
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
+    "quest",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
@@ -126,6 +127,7 @@ pub async fn dispatch_command(
         Some("skills")    => do_skills(me),
         Some("practice")  => do_practice(rest, me),
         Some("affects")   => do_affects(me),
+        Some("quest")     => do_quest(rest, me, world, chars).await,
         Some("give")      => do_give(rest, me, world, chars).await,
         Some("examine")   => do_examine(rest, me, world, chars).await,
         Some("list")      => do_list(me, world).await,
@@ -551,6 +553,268 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     CmdOutput::text(s)
 }
 
+// ---------------------------------------------------------------------------
+// Quest command
+// ---------------------------------------------------------------------------
+
+async fn do_quest(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
+    let sub = parts.first().copied().unwrap_or("").to_ascii_lowercase();
+    let rest = parts.get(1).map(|s| s.trim()).unwrap_or("");
+    match sub.as_str() {
+        "" | "help" => CmdOutput::text(
+            "\r\nQuest commands:\r\n  \
+             quest list             - show quests available from a questmaster here\r\n  \
+             quest info <vnum>      - details for a quest\r\n  \
+             quest join <vnum>      - accept a quest\r\n  \
+             quest status           - show your active quest\r\n  \
+             quest complete         - turn in a completed quest (at the giver)\r\n  \
+             quest abandon          - give up the current quest\r\n",
+        ),
+        "list"     => do_quest_list(me, world).await,
+        "info"     => do_quest_info(rest, world).await,
+        "join"     => do_quest_join(rest, me, world, chars).await,
+        "status"   => do_quest_status(me, world).await,
+        "complete" => do_quest_complete(me, world, chars).await,
+        "abandon"  => do_quest_abandon(me, world),
+        _ => CmdOutput::text(format!("\r\nUnknown quest subcommand: {sub}\r\n")),
+    }
+}
+
+async fn do_quest_list(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let w = world.lock().await;
+    // Find all mobs in this room — for each, list the quests where qm == that mob.
+    let room_mob_vnums: Vec<i32> = w.rooms.get(&me.current_room)
+        .map(|r| r.mobs.iter()
+            .filter_map(|&mid| w.mob_instances.iter().find(|m| m.id == mid).map(|m| m.vnum))
+            .collect())
+        .unwrap_or_default();
+    if room_mob_vnums.is_empty() {
+        return CmdOutput::text("\r\nThere is no questmaster here.\r\n");
+    }
+    let mut s = String::from("\r\nQuests available here:\r\n");
+    let mut found_any = false;
+    for q in w.quests.values() {
+        if !room_mob_vnums.contains(&q.qm) { continue; }
+        // Skip quests the player has already completed AND that aren't repeatable.
+        let repeatable = q.flags & 1 != 0;
+        if !repeatable && me.completed_quests.contains(&q.vnum) {
+            continue;
+        }
+        found_any = true;
+        s.push_str(&format!("  [{:>5}] {}\r\n", q.vnum, q.name));
+    }
+    if !found_any {
+        s.push_str("  (none — try another questmaster)\r\n");
+    }
+    CmdOutput::text(s)
+}
+
+async fn do_quest_info(arg: &str, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Ok(vnum): Result<i32, _> = arg.parse() else {
+        return CmdOutput::text("\r\nUse: quest info <vnum>\r\n");
+    };
+    let w = world.lock().await;
+    let Some(q) = w.quests.get(&vnum) else {
+        return CmdOutput::text(format!("\r\nNo quest #{vnum}.\r\n"));
+    };
+    let kind_str = match q.kind {
+        crate::world::AQ_OBJ_FIND   => format!("retrieve object #{}", q.target),
+        crate::world::AQ_ROOM_FIND  => format!("visit room #{}", q.target),
+        crate::world::AQ_MOB_FIND   => format!("locate mob #{}", q.target),
+        crate::world::AQ_MOB_KILL   => format!("slay mob #{}", q.target),
+        crate::world::AQ_MOB_SAVE   => format!("rescue mob #{}", q.target),
+        crate::world::AQ_OBJ_RETURN => format!("return object #{} to mob #{}", q.target, q.value[5]),
+        crate::world::AQ_ROOM_CLEAR => format!("clear room #{}", q.target),
+        _ => "unknown".to_string(),
+    };
+    let s = format!(
+        "\r\n=== Quest #{} — {} ===\r\n{}\r\nObjective: {}\r\nReward: {} gold, {} exp{}\r\n",
+        q.vnum, q.name, q.info, kind_str,
+        q.gold_reward, q.exp_reward,
+        if q.obj_reward >= 0 { format!(", obj #{}", q.obj_reward) } else { String::new() },
+    );
+    CmdOutput::text(s)
+}
+
+async fn do_quest_join(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let Ok(vnum): Result<i32, _> = arg.parse() else {
+        return CmdOutput::text("\r\nUse: quest join <vnum>\r\n");
+    };
+    if me.active_quest.is_some() {
+        return CmdOutput::text(
+            "\r\nYou already have an active quest. Use `quest abandon` first.\r\n",
+        );
+    }
+    let q_info: Option<(i32, String, i32)> = {
+        let w = world.lock().await;
+        let Some(q) = w.quests.get(&vnum) else {
+            return CmdOutput::text(format!("\r\nNo quest #{vnum}.\r\n"));
+        };
+        // Questmaster must be in the room.
+        let room_mob_vnums: Vec<i32> = w.rooms.get(&me.current_room)
+            .map(|r| r.mobs.iter()
+                .filter_map(|&mid| w.mob_instances.iter().find(|m| m.id == mid).map(|m| m.vnum))
+                .collect())
+            .unwrap_or_default();
+        if !room_mob_vnums.contains(&q.qm) {
+            return CmdOutput::text(
+                "\r\nThe questmaster for that quest is not here.\r\n",
+            );
+        }
+        // Prereq check.
+        if q.prereq != -1 && !me.completed_quests.contains(&q.prereq) {
+            return CmdOutput::text(format!(
+                "\r\nYou must first complete quest #{} before taking this one.\r\n",
+                q.prereq,
+            ));
+        }
+        // Repeatable check.
+        let repeatable = q.flags & 1 != 0;
+        if !repeatable && me.completed_quests.contains(&q.vnum) {
+            return CmdOutput::text("\r\nYou have already completed that quest.\r\n");
+        }
+        Some((q.vnum, q.desc.clone(), q.qm))
+    };
+    let (vnum, desc, _qm) = q_info.unwrap();
+    me.active_quest = Some(vnum);
+    me.quest_progress = 0;
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} accepts a quest.\r\n", me.name));
+    CmdOutput::text(format!(
+        "\r\nYou accept the quest.\r\n{desc}\r\n",
+    ))
+}
+
+async fn do_quest_status(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(vnum) = me.active_quest else {
+        return CmdOutput::text("\r\nYou have no active quest.\r\n");
+    };
+    let w = world.lock().await;
+    let Some(q) = w.quests.get(&vnum) else {
+        return CmdOutput::text("\r\nYour quest's data has been lost.\r\n");
+    };
+    let done = matches!(q.kind,
+        crate::world::AQ_MOB_KILL | crate::world::AQ_OBJ_FIND | crate::world::AQ_OBJ_RETURN
+    ) && me.quest_progress >= 1;
+    let s = format!(
+        "\r\n=== Active Quest #{} — {} ===\r\n{}\r\nProgress: {} {}\r\n",
+        q.vnum, q.name, q.info,
+        me.quest_progress,
+        if done { "(COMPLETE — return to the questmaster)" } else { "" },
+    );
+    CmdOutput::text(s)
+}
+
+async fn do_quest_complete(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let Some(vnum) = me.active_quest else {
+        return CmdOutput::text("\r\nYou have no active quest.\r\n");
+    };
+    let (qname, done_msg, qm_vnum, gold, exp, obj_reward, can_turn_in) = {
+        let w = world.lock().await;
+        let Some(q) = w.quests.get(&vnum) else {
+            return CmdOutput::text("\r\nYour quest's data has been lost.\r\n");
+        };
+        // Questmaster must be present.
+        let room_mob_vnums: Vec<i32> = w.rooms.get(&me.current_room)
+            .map(|r| r.mobs.iter()
+                .filter_map(|&mid| w.mob_instances.iter().find(|m| m.id == mid).map(|m| m.vnum))
+                .collect())
+            .unwrap_or_default();
+        let qm_here = room_mob_vnums.contains(&q.qm);
+        (q.name.clone(), q.done.clone(), q.qm, q.gold_reward, q.exp_reward, q.obj_reward, qm_here)
+    };
+    if !can_turn_in {
+        return CmdOutput::text(
+            "\r\nThe questmaster for this quest is not here.\r\n",
+        );
+    }
+    if me.quest_progress < 1 {
+        return CmdOutput::text("\r\nYou haven't completed the objective yet.\r\n");
+    }
+
+    // Award rewards.
+    me.gold += gold as i64;
+    if exp > 0 {
+        me.exp += exp as i64;
+        let lvls = me.check_level_up();
+        if lvls > 0 {
+            // Will be displayed via the response.
+        }
+    }
+    // Spawn the obj reward into the player's inventory.
+    if obj_reward >= 0 {
+        let iid = {
+            let mut w = world.lock().await;
+            w.spawn_obj(obj_reward)
+        };
+        if let Some(iid) = iid {
+            me.inventory.push(iid);
+        }
+    }
+    me.completed_quests.push(vnum);
+    me.active_quest = None;
+    me.quest_progress = 0;
+    let _ = qm_vnum;
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} completes a quest!\r\n", me.name));
+
+    CmdOutput::text(format!(
+        "\r\n=== Quest Complete: {qname} ===\r\n{done_msg}\r\n\
+         Rewards: {gold} gold, {exp} exp{obj_text}\r\n",
+        obj_text = if obj_reward >= 0 { format!(", obj #{obj_reward}") } else { String::new() },
+    ))
+}
+
+/// If the player has an active AQ_MOB_KILL quest targeting `killed_vnum`,
+/// mark the objective complete and return a player-facing message.
+/// Returns `None` if no quest progress occurred.
+pub async fn quest_check_kill(
+    me: &mut Character,
+    killed_vnum: i32,
+    world: &Arc<Mutex<World>>,
+) -> Option<String> {
+    let qv = me.active_quest?;
+    let w = world.lock().await;
+    let q = w.quests.get(&qv)?;
+    if q.kind != crate::world::AQ_MOB_KILL { return None; }
+    if q.target != killed_vnum { return None; }
+    if me.quest_progress >= 1 { return None; }
+    me.quest_progress = 1;
+    let mob_name = w.mob_protos.get(&killed_vnum)
+        .map(|p| p.short_descr.clone())
+        .unwrap_or_else(|| "the target".to_string());
+    Some(format!(
+        "\r\n*** Quest objective complete: you have slain {mob_name}! Return to the questmaster. ***\r\n",
+    ))
+}
+
+fn do_quest_abandon(me: &mut Character, _world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.active_quest.is_none() {
+        return CmdOutput::text("\r\nYou have no quest to abandon.\r\n");
+    }
+    me.active_quest = None;
+    me.quest_progress = 0;
+    CmdOutput::text("\r\nYou abandon your quest.\r\n")
+}
+
 fn do_skills(me: &Character) -> CmdOutput {
     use crate::character::ALL_SKILLS;
     let mut s = String::from("\r\nSkills available to your class:\r\n");
@@ -840,12 +1104,13 @@ async fn do_skill(
     let verb = skill.name();
 
     // Apply.
-    let (mob_name, mob_dead, mob_room) = {
+    let (mob_name, killed_vnum, mob_dead, mob_room) = {
         let mut w = world.lock().await;
         let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
             return CmdOutput::text("\r\nYour target is gone.\r\n");
         };
-        let mob_name = w.mob_protos.get(&m.vnum)
+        let vnum = m.vnum;
+        let mob_name = w.mob_protos.get(&vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "the creature".into());
         let mob_room = m.in_room;
@@ -866,7 +1131,7 @@ async fn do_skill(
         } else {
             false
         };
-        (mob_name, dead, mob_room)
+        (mob_name, vnum, dead, mob_room)
     };
 
     // Broadcast + reply.
@@ -936,6 +1201,9 @@ async fn do_skill(
                     me.level, me.max_hp,
                 ));
             }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
         }
         return CmdOutput::text(msg);
     }
@@ -1048,13 +1316,14 @@ async fn cast_magic_missile(
     let dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_);
     me.mana -= crate::character::Skill::MagicMissile.mana_cost();
 
-    let (mob_name, mob_dead, mob_room) = {
+    let (mob_name, killed_vnum, mob_dead, mob_room) = {
         let mut w = world.lock().await;
         let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
             Some(m) => m,
             None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
         };
-        let mob_name = w.mob_protos.get(&m.vnum)
+        let vnum = m.vnum;
+        let mob_name = w.mob_protos.get(&vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "the creature".into());
         let mob_room = m.in_room;
@@ -1068,7 +1337,7 @@ async fn cast_magic_missile(
             m.fighting = Some(Target { id: me.id, is_player: true });
         }
         let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
-        (mob_name, dead, mob_room)
+        (mob_name, vnum, dead, mob_room)
     };
 
     let (to_me, to_room) = if hit {
@@ -1130,6 +1399,9 @@ async fn cast_magic_missile(
                     me.level, me.max_hp,
                 ));
             }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
         }
         return CmdOutput::text(msg);
     }
@@ -1354,7 +1626,7 @@ async fn cast_harm(
     let dmg = dice(3, 8) + me.level + (me.wis - 10).max(0) / 2;
     me.mana -= crate::character::Skill::Harm.mana_cost();
 
-    let (mob_name, mob_dead, mob_room) = {
+    let (mob_name, killed_vnum, mob_dead, mob_room) = {
         let mut w = world.lock().await;
         let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
             Some(m) => (m.vnum, m.in_room),
@@ -1372,7 +1644,7 @@ async fn cast_harm(
             m.fighting = Some(Target { id: me.id, is_player: true });
         }
         let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
-        (mob_name, dead, in_room)
+        (mob_name, vnum, dead, in_room)
     };
 
     let (to_me, to_room) = if hit {
@@ -1434,6 +1706,9 @@ async fn cast_harm(
                     me.level, me.max_hp,
                 ));
             }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
         }
         return CmdOutput::text(msg);
     }
@@ -2298,6 +2573,9 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             for (skill, pct) in &me.skills {
                 r.skills.insert(skill.save_key().to_string(), *pct);
             }
+            r.active_quest    = me.active_quest;
+            r.quest_progress  = me.quest_progress;
+            r.completed_quests = me.completed_quests.clone();
             r
         }
         Err(e) => {

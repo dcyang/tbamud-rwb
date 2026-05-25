@@ -216,18 +216,43 @@ async fn resolve_player_attack(
     }
 
     if target_dead {
-        let xp = {
+        let (xp, killed_vnum) = {
             let w = world.lock().await;
-            w.mob_instances.iter().find(|m| m.id == p.target.id)
-                .and_then(|m| w.mob_protos.get(&m.vnum))
+            let m = w.mob_instances.iter().find(|m| m.id == p.target.id);
+            let vnum = m.map(|m| m.vnum).unwrap_or(-1);
+            let xp = m.and_then(|m| w.mob_protos.get(&m.vnum))
                 .map(|mp| mp.exp as i64)
-                .unwrap_or(0)
+                .unwrap_or(0);
+            (xp, vnum)
         };
         kill_mob(p.target.id, target_room, &target_name, &p.attacker_name, world, chars).await;
         // Clear the player's fighting state since the mob is gone.
         clear_player_fighting(p.attacker_id, chars).await;
         // Award XP and check for level-up.
         award_xp(p.attacker_id, xp, chars).await;
+        // Quest progress.
+        notify_quest_kill(p.attacker_id, killed_vnum, world, chars).await;
+    }
+}
+
+/// Push a "Quest objective complete" message to a player if their active
+/// quest matches the kill.  Mirrors interpreter::quest_check_kill but takes
+/// the player by id (we don't have direct &mut Character in combat).
+async fn notify_quest_kill(
+    player_id: u32,
+    killed_vnum: i32,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == player_id).cloned();
+        h
+    };
+    let Some(ph) = ph else { return };
+    let mut c = ph.character.lock().await;
+    if let Some(qmsg) = crate::interpreter::quest_check_kill(&mut c, killed_vnum, world).await {
+        let _ = ph.send.send(qmsg);
     }
 }
 

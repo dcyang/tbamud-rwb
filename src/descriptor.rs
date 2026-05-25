@@ -253,6 +253,9 @@ pub async fn handle_connection(
                     affects:      Vec::new(),
                     sneaking:     false,
                     hidden:       false,
+                    active_quest:    p_ref.and_then(|p| p.active_quest),
+                    quest_progress:  p_ref.map(|p| p.quest_progress).unwrap_or(0),
+                    completed_quests: p_ref.map(|p| p.completed_quests.clone()).unwrap_or_default(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline
@@ -469,6 +472,9 @@ async fn run_game_session(
             for (skill, pct) in &me.skills {
                 rec.skills.insert(skill.save_key().to_string(), *pct);
             }
+            rec.active_quest    = me.active_quest;
+            rec.quest_progress  = me.quest_progress;
+            rec.completed_quests = me.completed_quests.clone();
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }

@@ -18,7 +18,7 @@ use crate::{
     players::asciiflag_conv,
     world::{
         Direction, Exit, ExtraDescr, MobInstance, MobProto, ObjInstance, ObjProto,
-        ResetCmd, Room, Shop, World, Zone,
+        Quest, ResetCmd, Room, Shop, World, Zone,
     },
 };
 
@@ -108,6 +108,89 @@ fn parse_shop_file(path: &PathBuf, world: &mut World) -> Result<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Quest file parser
+// ---------------------------------------------------------------------------
+
+/// Parse a single .qst file.  Mirrors parse_quest() in quest.c.  Format:
+///   #<vnum>
+///   <name>~  <desc>~  <info>~  <done>~  <quit>~
+///   <type> <qm_vnum> <flags> <target> <prev> <next> <prereq>
+///   <value0..6>     (7 ints)
+///   <gold> <exp> <obj_reward>
+///   S
+fn parse_quest_file(path: &PathBuf, world: &mut World) -> Result<()> {
+    let mut s = Stream::from_file(path)?;
+    loop {
+        s.skip_blanks();
+        let header = match s.next_line() {
+            Some(h) => h.trim().to_string(),
+            None    => return Ok(()),
+        };
+        if header == "$" || header == "$~" { return Ok(()); }
+        let vnum: i32 = header.trim_start_matches('#').trim()
+            .parse().with_context(|| format!("bad quest header: {header:?}"))?;
+
+        let name = s.read_tilde_string()?;
+        let desc = s.read_tilde_string()?;
+        let info = s.read_tilde_string()?;
+        let done = s.read_tilde_string()?;
+        let quit = s.read_tilde_string()?;
+
+        // Line 1: type qm flags target prev next prereq
+        let l1 = s.next_line().ok_or_else(|| anyhow!("quest {vnum}: missing line 1"))?;
+        let toks: Vec<&str> = l1.split_whitespace().collect();
+        if toks.len() < 7 {
+            tracing::warn!(vnum, "quest line 1 has < 7 fields, skipping");
+            // Drain until S to keep stream aligned.
+            while let Some(line) = s.next_line() {
+                if line.trim() == "S" { break; }
+            }
+            continue;
+        }
+        let kind:       i32 = toks[0].parse().unwrap_or(-1);
+        let qm:         i32 = toks[1].parse().unwrap_or(-1);
+        let flags:      u32 = asciiflag_conv(toks[2]);
+        let target:     i32 = toks[3].parse().unwrap_or(-1);
+        let prev_quest: i32 = toks[4].parse().unwrap_or(-1);
+        let next_quest: i32 = toks[5].parse().unwrap_or(-1);
+        let prereq:     i32 = toks[6].parse().unwrap_or(-1);
+
+        // Line 2: 7 value ints
+        let l2 = s.next_line().ok_or_else(|| anyhow!("quest {vnum}: missing line 2"))?;
+        let toks: Vec<&str> = l2.split_whitespace().collect();
+        let mut value = [0i32; 7];
+        for i in 0..7 {
+            value[i] = toks.get(i).and_then(|t| t.parse().ok()).unwrap_or(0);
+        }
+
+        // Line 3: rewards
+        let l3 = s.next_line().ok_or_else(|| anyhow!("quest {vnum}: missing line 3"))?;
+        let toks: Vec<&str> = l3.split_whitespace().collect();
+        let gold_reward: i32 = toks.get(0).and_then(|t| t.parse().ok()).unwrap_or(0);
+        let exp_reward:  i32 = toks.get(1).and_then(|t| t.parse().ok()).unwrap_or(0);
+        let obj_reward:  i32 = toks.get(2).and_then(|t| t.parse().ok()).unwrap_or(-1);
+
+        // Read until S.
+        while let Some(line) = s.next_line() {
+            if line.trim() == "S" { break; }
+        }
+
+        world.quests.insert(vnum, Quest {
+            vnum,
+            name: name.trim().to_string(),
+            desc: desc.trim().to_string(),
+            info: info.trim().to_string(),
+            done: done.trim().to_string(),
+            quit: quit.trim().to_string(),
+            kind, flags, qm, target,
+            prev_quest, next_quest, prereq,
+            value,
+            gold_reward, exp_reward, obj_reward,
+        });
+    }
+}
+
 /// Read a list of integers terminated by -1.  Tolerant of formatting
 /// quirks: a value like "5lifecutter" (no separator before the keyword
 /// annotation) is read as 5.
@@ -191,6 +274,18 @@ pub fn load_world(data_dir: &str) -> Result<World> {
             .with_context(|| format!("Parsing mob file {}", path.display()))?;
     }
     tracing::info!(count = world.mob_protos.len(), "Loaded mob prototypes");
+
+    // --- Quests ------------------------------------------------------------
+    let qst_dir = format!("{data_dir}/world/qst");
+    if std::path::Path::new(&format!("{qst_dir}/index")).exists() {
+        for fname in read_index(&qst_dir)? {
+            let path = PathBuf::from(&qst_dir).join(&fname);
+            if let Err(e) = parse_quest_file(&path, &mut world) {
+                tracing::warn!(path = %path.display(), error = %e, "Quest parse error, skipping");
+            }
+        }
+        tracing::info!(count = world.quests.len(), "Loaded quests");
+    }
 
     // --- Shops -------------------------------------------------------------
     let shp_dir = format!("{data_dir}/world/shp");
