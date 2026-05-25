@@ -425,6 +425,16 @@ pub struct World {
     pub shops:         Vec<Shop>,
     pub quests:        BTreeMap<QuestVnum, Quest>,
     pub triggers:      BTreeMap<TriggerVnum, Trigger>,
+    pub help:          Vec<HelpEntry>,
+}
+
+/// One entry from the help database (lib/text/help/help.hlp).  Keywords
+/// are stored upper-cased for case-insensitive prefix lookup.
+#[derive(Debug, Clone, Default)]
+pub struct HelpEntry {
+    pub keywords:  Vec<String>,
+    pub min_level: i32,
+    pub body:      String,
 }
 
 impl World {

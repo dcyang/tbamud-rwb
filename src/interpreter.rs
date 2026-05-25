@@ -164,7 +164,7 @@ pub async fn dispatch_command(
         Some("remove")    => do_remove(rest, me, world, chars).await,
         Some("equipment") => do_equipment(me, world).await,
         Some("save")      => do_save(me, players).await,
-        Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, wield, wear, remove, equip, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
+        Some("help")      => do_help(rest, me, world).await,
         Some("exits")     => do_exits(me, world).await,
         Some("open")      => do_door(rest, me, world, chars, DoorOp::Open).await,
         Some("close")     => do_door(rest, me, world, chars, DoorOp::Close).await,
@@ -920,6 +920,37 @@ async fn do_shutdown(me: &Character, chars: &SharedChars) -> CmdOutput {
     // Give the writer tasks a moment to flush the notice.
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     std::process::exit(0);
+}
+
+/// `help [topic]` — look up a topic in the loaded help database.
+/// Without an argument, falls back to the original built-in summary so
+/// brand-new players can still discover commands when help.hlp is
+/// missing. Matching is case-insensitive prefix on any keyword; the
+/// first matching entry whose `min_level <= me.level` wins.
+async fn do_help(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    let fallback = "\r\nAvailable: look, get, drop, inv, wield, wear, remove, \
+        equip, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n";
+    let topic = arg.trim();
+    if topic.is_empty() {
+        return CmdOutput::text(fallback);
+    }
+    let needle = topic.to_ascii_uppercase();
+    let w = world.lock().await;
+    if w.help.is_empty() {
+        return CmdOutput::text(fallback);
+    }
+    let matched = w.help.iter().find(|e|
+        e.min_level <= me.level
+        && e.keywords.iter().any(|k| k.starts_with(&needle))
+    );
+    match matched {
+        Some(e) => CmdOutput::text(format!("\r\n{}\r\n", e.body.trim_end())),
+        None    => CmdOutput::text(format!("\r\nThere is no help on '{topic}'.\r\n")),
+    }
 }
 
 async fn do_where(

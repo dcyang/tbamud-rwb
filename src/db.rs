@@ -374,6 +374,20 @@ pub fn load_world(data_dir: &str) -> Result<World> {
         tracing::info!(count = world.shops.len(), "Loaded shops");
     }
 
+    // --- Help database ------------------------------------------------------
+    let help_path = format!("{data_dir}/text/help/help.hlp");
+    if std::path::Path::new(&help_path).exists() {
+        match parse_help_file(&help_path) {
+            Ok(entries) => {
+                world.help = entries;
+                tracing::info!(count = world.help.len(), "Loaded help entries");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "help.hlp parse error, skipping");
+            }
+        }
+    }
+
     // --- Run zone resets ---------------------------------------------------
     // Mirrors the initial reset_zone() pass that boot_db() performs over all
     // zones. Periodic resets are scheduled by spawn_zone_reset_tick().
@@ -388,6 +402,71 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     );
 
     Ok(world)
+}
+
+/// Parse a CircleMUD-style help file.  Each entry is:
+///
+/// ```text
+///   KEYWORD1 KEYWORD2 KEYWORD3 ...
+///   <body lines...>
+///   #<min-level>           ← terminator: standalone "#N" line OR
+///   <body line ending " #N">
+/// ```
+///
+/// File terminated by `$~`.  Min-level is the level-required gate.
+fn parse_help_file(path: &str) -> Result<Vec<crate::world::HelpEntry>> {
+    use crate::world::HelpEntry;
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("reading help file {path}"))?;
+    let mut entries = Vec::new();
+    let mut lines = contents.lines().peekable();
+    loop {
+        // Skip leading blanks.
+        while let Some(l) = lines.peek() {
+            if l.trim().is_empty() { lines.next(); } else { break; }
+        }
+        let keyword_line = match lines.next() {
+            Some(l) => l.trim(),
+            None => break,
+        };
+        if keyword_line == "$~" || keyword_line == "$" { break; }
+        let keywords: Vec<String> = keyword_line
+            .split_whitespace()
+            .map(|w| w.to_ascii_uppercase())
+            .collect();
+        // Read body until terminator.
+        let mut body = String::new();
+        let mut min_level: i32 = 0;
+        loop {
+            let raw = match lines.next() {
+                Some(l) => l,
+                None => break,
+            };
+            let trimmed = raw.trim_end();
+            // Standalone "#N" terminator?
+            if let Some(n) = trimmed.strip_prefix('#') {
+                if n.trim().chars().all(|c| c.is_ascii_digit() || c == '-') {
+                    min_level = n.trim().parse().unwrap_or(0);
+                    break;
+                }
+            }
+            // Trailing " #N" terminator?
+            if let Some(hash_pos) = trimmed.rfind(" #") {
+                let tail = &trimmed[hash_pos + 2..];
+                if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit() || c == '-') {
+                    min_level = tail.parse().unwrap_or(0);
+                    body.push_str(&trimmed[..hash_pos]);
+                    body.push_str("\r\n");
+                    break;
+                }
+            }
+            body.push_str(raw);
+            body.push_str("\r\n");
+        }
+        if keywords.is_empty() { continue; }
+        entries.push(HelpEntry { keywords, min_level, body });
+    }
+    Ok(entries)
 }
 
 // ---------------------------------------------------------------------------
