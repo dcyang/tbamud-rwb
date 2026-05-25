@@ -15,7 +15,8 @@ use rand::Rng;
 use tokio::{sync::Mutex, time::{Duration, MissedTickBehavior}};
 
 use crate::{
-    character::{str_damage_bonus, Character, SharedChars, Target, WEAR_WIELD},
+    character::{str_damage_bonus, dex_hit_bonus, Character, SharedChars, Target, WEAR_WIELD},
+    players::Class,
     db::dice,
     world::World,
 };
@@ -52,10 +53,13 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     attacker_id:   p.id,
                     attacker_name: me.name.clone(),
                     level:         me.level,
+                    class:         me.class,
                     room:          me.current_room,
                     target:        tgt,
                     weapon_iid:    me.equipment[WEAR_WIELD],
                     str_score:     me.str_,
+                    dex_score:     me.dex,
+                    hit_bonus:     me.affect_hit_bonus() + me.bonus_hitroll,
                     dam_bonus:     me.affect_dam_bonus() + me.bonus_damroll,
                 });
             }
@@ -63,9 +67,27 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         v
     };
 
-    // ----- Phase 2: resolve player attacks -------------------------------
+    // ----- Phase 2: resolve player attacks (multi-attack by level/class) --
     for intent in player_intents {
-        resolve_player_attack(intent, world, chars).await;
+        let n = num_attacks(intent.level, intent.class);
+        for _ in 0..n {
+            // Stop early if the attacker stopped fighting between swings
+            // (target died on a prior iteration → fighting cleared by
+            // resolve_player_attack).
+            let still_fighting = {
+                let ph = {
+                    let cl = chars.lock().await;
+                    let h = cl.iter().find(|p| p.id == intent.attacker_id).cloned();
+                    h
+                };
+                match ph {
+                    Some(ph) => ph.character.lock().await.fighting.is_some(),
+                    None     => false,
+                }
+            };
+            if !still_fighting { break; }
+            resolve_player_attack(intent.clone(), world, chars).await;
+        }
     }
 
     // ----- Phase 3: snapshot mob attackers -------------------------------
@@ -220,15 +242,34 @@ async fn regen_tick(chars: &SharedChars) {
     }
 }
 
+#[derive(Clone)]
 struct PlayerIntent {
     attacker_id:   u32,
     attacker_name: String,
     level:         i32,
+    class:         Class,
     room:          crate::world::RoomVnum,
     target:        Target,
     weapon_iid:    Option<u32>,
     str_score:     i32,
+    dex_score:     i32,
+    hit_bonus:     i32,
     dam_bonus:     i32,
+}
+
+/// Number of attacks per combat round.  Warriors gain extras at lvl 8 /
+/// 16 / 24; thieves at lvl 16.  Other classes are stuck at 1.
+fn num_attacks(level: i32, class: Class) -> i32 {
+    match class {
+        Class::Warrior => {
+            if      level >= 24 { 4 }
+            else if level >= 16 { 3 }
+            else if level >= 8  { 2 }
+            else                { 1 }
+        }
+        Class::Thief => if level >= 16 { 2 } else { 1 },
+        _ => 1,
+    }
 }
 
 struct MobIntent {
@@ -248,11 +289,14 @@ async fn resolve_player_attack(
         return; // PvP not supported in this checkpoint
     }
 
-    // Roll damage. If the player is wielding a weapon, use its dice
-    // (value[1] = dice count, value[2] = dice size — matches CircleMUD's
-    // ITEM_WEAPON layout in structs.h). Otherwise barehand 1d4.
-    let dmg: i32 = {
+    // To-hit roll first.  Hit% = base + level + dex_hit + hit_bonus -
+    // mob.ac/10, clamped 5..=95. Mob AC is looked up alongside the
+    // damage roll (same world lock).
+    let (mob_ac, dmg): (i32, i32) = {
         let w = world.lock().await;
+        let mob_ac = w.mob_instances.iter().find(|m| m.id == p.target.id)
+            .and_then(|m| w.mob_protos.get(&m.vnum))
+            .map(|pr| pr.ac).unwrap_or(0);
         let weapon = p.weapon_iid.and_then(|iid|
             w.obj_instances.iter().find(|o| o.id == iid)
                 .and_then(|o| w.obj_protos.get(&o.vnum)));
@@ -261,8 +305,29 @@ async fn resolve_player_attack(
         } else {
             dice(1, 4)
         };
-        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1)
+        let dmg = (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1);
+        (mob_ac, dmg)
     };
+    let hit_chance = (60 + p.level + dex_hit_bonus(p.dex_score) + p.hit_bonus - mob_ac / 10)
+        .clamp(5, 95);
+    let landed = rand::thread_rng().gen_range(0..100) < hit_chance;
+    if !landed {
+        // Miss: broadcast and bail out for this swing.
+        let target_name = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == p.target.id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|pr| pr.short_descr.clone())
+                .unwrap_or_else(|| "the creature".to_string())
+        };
+        let cl = chars.lock().await;
+        if let Some(ph) = cl.iter().find(|h| h.id == p.attacker_id) {
+            let _ = ph.send.send(format!("\r\nYou swing at {target_name} and miss.\r\n"));
+        }
+        cl.broadcast_room(p.room, Some(p.attacker_id),
+            &format!("\r\n{} swings at {target_name} and misses.\r\n", p.attacker_name));
+        return;
+    }
 
     let (target_name, target_dead, target_room, has_memory, is_wimpy, low_hp) = {
         let mut w = world.lock().await;

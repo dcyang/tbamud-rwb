@@ -348,6 +348,22 @@ pub fn str_carry_cap(str_score: i32) -> i32 {
     CARRY[i]
 }
 
+/// DEX-based to-hit bonus — mirrors dex_app[].reaction in constants.c.
+/// Positive means the attacker is more likely to land a hit.  Used by
+/// `resolve_player_attack`'s hit roll.
+pub fn dex_hit_bonus(dex_score: i32) -> i32 {
+    static REACTION: &[i32] = &[
+        // 0  1  2  3  4  5  6  7  8  9
+          -7,-6,-4,-3,-2,-1, 0, 0, 0, 0,
+        // 10 11 12 13 14 15 16 17 18 19
+           0, 0, 0, 0, 0, 0, 1, 2, 2, 3,
+        // 20 21 22 23 24 25
+           3, 4, 4, 4, 5, 5,
+    ];
+    let i = dex_score.clamp(0, (REACTION.len() - 1) as i32) as usize;
+    REACTION[i]
+}
+
 /// DEX-based AC bonus — mirrors dex_app[].defensive in constants.c.
 /// Negative values reduce AC (better defense).  Returned with the same
 /// sign convention as armor: more positive = better.  So we negate the
