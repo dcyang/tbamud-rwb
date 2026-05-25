@@ -467,25 +467,33 @@ async fn wander_pass(
     if moves.is_empty() { return; }
 
     // Phase 2: apply moves under a fresh lock.
-    let cl = chars.lock().await;
-    let mut w = world.lock().await;
-    for (mob_id, mob_name, from, to, dir) in moves {
-        // Skip if mob has since started fighting or its room changed.
-        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { continue; };
-        if m.fighting.is_some() || m.in_room != from { continue; }
-        // Move the mob between room mob-lists.
-        if let Some(r) = w.rooms.get_mut(&from) {
-            r.mobs.retain(|&id| id != mob_id);
+    let mut entered: Vec<u32> = Vec::new();
+    {
+        let cl = chars.lock().await;
+        let mut w = world.lock().await;
+        for (mob_id, mob_name, from, to, dir) in moves {
+            // Skip if mob has since started fighting or its room changed.
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { continue; };
+            if m.fighting.is_some() || m.in_room != from { continue; }
+            // Move the mob between room mob-lists.
+            if let Some(r) = w.rooms.get_mut(&from) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            if let Some(r) = w.rooms.get_mut(&to) {
+                r.mobs.push(mob_id);
+            }
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                m.in_room = to;
+            }
+            // Broadcast to both rooms.
+            cl.broadcast_room(from, None, &format!("{mob_name} leaves {}.\r\n", dir.name()));
+            cl.broadcast_room(to,   None, &format!("{mob_name} arrives.\r\n"));
+            entered.push(mob_id);
         }
-        if let Some(r) = w.rooms.get_mut(&to) {
-            r.mobs.push(mob_id);
-        }
-        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
-            m.in_room = to;
-        }
-        // Broadcast to both rooms.
-        cl.broadcast_room(from, None, &format!("{mob_name} leaves {}.\r\n", dir.name()));
-        cl.broadcast_room(to,   None, &format!("{mob_name} arrives.\r\n"));
+    }
+    // Phase 3: fire ENTRY triggers for mobs that just moved.
+    for mob_id in entered {
+        crate::interpreter::fire_mob_entry_triggers(mob_id, world, chars).await;
     }
 }
 

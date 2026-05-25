@@ -2675,19 +2675,24 @@ async fn do_give(
     });
 
     if let Some((mid, mob_vnum, mname)) = mob_match {
-        // Capture obj vnum for the quest hook.
-        let obj_vnum = w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum);
+        // Capture obj vnum + keywords for the quest + receive trigger hooks.
+        let (obj_vnum, obj_keywords) = w.obj_instances.iter()
+            .find(|o| o.id == iid)
+            .map(|o| (Some(o.vnum), w.obj_protos.get(&o.vnum)
+                .map(|p| p.name.clone()).unwrap_or_default()))
+            .unwrap_or((None, String::new()));
         me.inventory.remove(idx);
         if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
             m.inventory.push(iid);
         }
         drop(w);
-        let cl = chars.lock().await;
-        cl.broadcast_room(
-            me.current_room, Some(me.id),
-            &format!("{} gives {} to {}.\r\n", me.name, short, mname),
-        );
-        drop(cl);
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                me.current_room, Some(me.id),
+                &format!("{} gives {} to {}.\r\n", me.name, short, mname),
+            );
+        }
 
         let mut msg = format!("\r\nYou give {} to {}.\r\n", short, mname);
         if let Some(ov) = obj_vnum {
@@ -2695,6 +2700,8 @@ async fn do_give(
                 msg.push_str(&qmsg);
             }
         }
+        // Fire RECEIVE triggers on the receiving mob.
+        fire_mob_receive_triggers(mid, &me.name, &obj_keywords, world, chars).await;
         return CmdOutput::text(msg);
     }
 
@@ -3003,51 +3010,159 @@ enum ScriptOut {
     Load { vnum: i32, room: RoomVnum },
 }
 
+/// Per-script-execution context carrying mutable variables and the
+/// host-environment values (actor name, self/mob name, current room).
+struct ScriptCtx<'a> {
+    actor_name: &'a str,
+    mob_name:   &'a str,
+    self_room:  RoomVnum,
+    /// Optional direction the actor came from (e.g. "south") — set by
+    /// the caller for greet triggers when known.  Empty for others.
+    direction:  String,
+    vars:       std::collections::HashMap<String, String>,
+}
+
 /// Execute one trigger script.  Returns a list of pending side-effects
-/// to apply under the chars lock.  Variable substitution and most
-/// control-flow are still stubbed.
+/// to apply under the chars lock.  Supports:
+///   - `set <var> <expr>` for variable assignment
+///   - `if <cond>` / `end` (single-level, no nesting)
+///   - `%var%` substitution (built-in + user-set)
+///   - `say` / `mecho` / `memote` / `mload [obj] <vnum>`
+/// Nested if, while/loops, eval expressions are still skipped silently.
 fn execute_script(
     t: &crate::world::Trigger,
     actor_name: &str,
     mob_name: &str,
     self_room: RoomVnum,
+    direction: &str,
 ) -> Vec<ScriptOut> {
     use rand::Rng;
     if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
         return Vec::new();
     }
+    let mut ctx = ScriptCtx {
+        actor_name,
+        mob_name,
+        self_room,
+        direction: direction.to_string(),
+        vars:      std::collections::HashMap::new(),
+    };
     let mut out = Vec::new();
+    let mut skipping = false; // we're inside an `if` block whose cond was false
+
     for raw in &t.commands {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('*') { continue; }
-        if line.starts_with("if ") || line == "end" || line == "else"
-            || line.starts_with("while ")
-            || line.starts_with("wait ")
+        // Block terminator.
+        if line == "end" {
+            skipping = false;
+            continue;
+        }
+        if skipping { continue; }
+
+        // Block opener.
+        if let Some(cond) = line.strip_prefix("if ") {
+            let result = eval_condition(cond, &ctx);
+            skipping = !result;
+            continue;
+        }
+        // Skip while/eval/wait — not implemented yet.  Drop the line.
+        if line.starts_with("while ") || line.starts_with("wait ")
             || line.starts_with("eval ")
-            || line.starts_with("set ")
         { continue; }
+
+        // set <var> <expr>
+        if let Some(rest) = line.strip_prefix("set ") {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            if let (Some(var), Some(val)) = (parts.next(), parts.next()) {
+                let expanded = substitute(&ctx, val);
+                ctx.vars.insert(var.to_string(), expanded);
+            }
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("say ") {
             out.push(ScriptOut::Say {
-                mob_name: mob_name.to_string(),
-                text:     substitute_vars(rest, actor_name),
+                mob_name: ctx.mob_name.to_string(),
+                text:     substitute(&ctx, rest),
             });
         } else if let Some(rest) = line.strip_prefix("memote ") {
-            let body = substitute_vars(rest, actor_name);
-            out.push(ScriptOut::Echo { text: format!("{mob_name} {body}\r\n") });
+            let body = substitute(&ctx, rest);
+            out.push(ScriptOut::Echo { text: format!("{} {body}\r\n", ctx.mob_name) });
         } else if let Some(rest) = line.strip_prefix("mecho ") {
-            out.push(ScriptOut::Echo { text: format!("{}\r\n", substitute_vars(rest, actor_name)) });
+            out.push(ScriptOut::Echo { text: format!("{}\r\n", substitute(&ctx, rest)) });
         } else if let Some(rest) = line.strip_prefix("mload obj ") {
-            if let Ok(vnum) = rest.trim().parse::<i32>() {
-                out.push(ScriptOut::Load { vnum, room: self_room });
+            if let Ok(vnum) = substitute(&ctx, rest.trim()).parse::<i32>() {
+                out.push(ScriptOut::Load { vnum, room: ctx.self_room });
             }
         } else if let Some(rest) = line.strip_prefix("mload ") {
-            // Plain `mload <vnum>` defaults to object load.
-            if let Ok(vnum) = rest.trim().parse::<i32>() {
-                out.push(ScriptOut::Load { vnum, room: self_room });
+            if let Ok(vnum) = substitute(&ctx, rest.trim()).parse::<i32>() {
+                out.push(ScriptOut::Load { vnum, room: ctx.self_room });
             }
         }
     }
     out
+}
+
+/// Substitute %var% tokens in `s` against the context's built-ins and
+/// user-set variables.  Unknown vars expand to the empty string.
+fn substitute(ctx: &ScriptCtx, s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut iter = s.chars().peekable();
+    while let Some(c) = iter.next() {
+        if c != '%' { out.push(c); continue; }
+        let mut var = String::new();
+        while let Some(&nc) = iter.peek() {
+            iter.next();
+            if nc == '%' { break; }
+            var.push(nc);
+        }
+        if var.is_empty() {
+            // `%%` → literal `%`
+            out.push('%');
+            continue;
+        }
+        out.push_str(&resolve_var(ctx, &var));
+    }
+    out
+}
+
+fn resolve_var(ctx: &ScriptCtx, name: &str) -> String {
+    match name {
+        "actor.name"     => ctx.actor_name.to_string(),
+        "actor.is_pc"    => "1".to_string(),
+        "self.name"      => ctx.mob_name.to_string(),
+        "self.room.vnum" => ctx.self_room.to_string(),
+        "direction"      => ctx.direction.clone(),
+        "random.dir"     => {
+            use rand::seq::SliceRandom;
+            let dirs = ["north","east","south","west","up","down"];
+            dirs.choose(&mut rand::thread_rng()).copied().unwrap_or("north").to_string()
+        }
+        // User-set vars or unknown.
+        other => ctx.vars.get(other).cloned().unwrap_or_default(),
+    }
+}
+
+/// Evaluate a condition. Supports a single comparison or two terms joined
+/// with `&&` / `||`.  Comparison operators: ==, !=.  A bare value
+/// (no operator) is truthy unless empty or "0".
+fn eval_condition(cond: &str, ctx: &ScriptCtx) -> bool {
+    let cond = cond.trim();
+    if let Some((l, r)) = cond.split_once(" && ") {
+        return eval_condition(l, ctx) && eval_condition(r, ctx);
+    }
+    if let Some((l, r)) = cond.split_once(" || ") {
+        return eval_condition(l, ctx) || eval_condition(r, ctx);
+    }
+    if let Some((l, r)) = cond.split_once(" == ") {
+        return substitute(ctx, l.trim()) == substitute(ctx, r.trim());
+    }
+    if let Some((l, r)) = cond.split_once(" != ") {
+        return substitute(ctx, l.trim()) != substitute(ctx, r.trim());
+    }
+    // Bare truthiness.
+    let v = substitute(ctx, cond);
+    !v.is_empty() && v != "0" && v != "false"
 }
 
 /// Apply a list of script outputs: broadcasts speech/echoes to the room,
@@ -3122,7 +3237,7 @@ async fn fire_mob_triggers(
                         .any(|w| text_low.split_whitespace().any(|t| t == w));
                     if !any_match { continue; }
                 }
-                acc.extend(execute_script(t, actor_name, &mob_name, room));
+                acc.extend(execute_script(t, actor_name, &mob_name, room, ""));
             }
         }
         acc
@@ -3146,9 +3261,73 @@ async fn fire_room_triggers(
         for &tvnum in &r.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != trigger_type { continue; }
-            acc.extend(execute_script(t, actor_name, &room_name, room));
+            acc.extend(execute_script(t, actor_name, &room_name, room, ""));
         }
         acc
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Run ENTRY (type 'i') triggers when a specific mob has just entered
+/// a room.  The mob is the actor in this case.  Called from
+/// wander/flee paths in combat.rs / db.rs.
+pub async fn fire_mob_entry_triggers(
+    mob_id: u32,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let (outputs, room) = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
+            return;
+        };
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'i' { continue; }
+            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, ""));
+        }
+        (acc, mob_room)
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Run RECEIVE (type 'j') triggers when a mob receives an object from
+/// a player.  `obj_keywords` is the just-received object's keyword
+/// string, supplied as the filter (same model as SPEECH triggers).
+pub async fn fire_mob_receive_triggers(
+    mob_id: u32,
+    actor_name: &str,
+    obj_keywords: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let (outputs, room) = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else {
+            return;
+        };
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'j' { continue; }
+            // arg keyword match against the obj's keywords (any-of).
+            if !t.arg.is_empty() {
+                let arg_low  = t.arg.to_ascii_lowercase();
+                let obj_low  = obj_keywords.to_ascii_lowercase();
+                let any_match = arg_low.split_whitespace()
+                    .any(|w| obj_low.split_whitespace().any(|o| o == w));
+                if !any_match { continue; }
+            }
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, ""));
+        }
+        (acc, mob_room)
     };
     apply_script_outputs(outputs, room, world, chars).await;
 }
@@ -3174,7 +3353,7 @@ pub async fn fire_mob_death_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'f' { continue; }
-            acc.extend(execute_script(t, killer_name, &mob_name, mob_room));
+            acc.extend(execute_script(t, killer_name, &mob_name, mob_room, ""));
         }
         acc
     };

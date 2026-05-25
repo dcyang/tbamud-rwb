@@ -383,9 +383,13 @@ async fn mob_flee(
         }
         (from, to)
     };
-    let cl = chars.lock().await;
-    cl.broadcast_room(from_room, None, &format!("{mob_name} flees, severely wounded!\r\n"));
-    cl.broadcast_room(target_room, None, &format!("{mob_name} arrives, fleeing in panic.\r\n"));
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(from_room, None, &format!("{mob_name} flees, severely wounded!\r\n"));
+        cl.broadcast_room(target_room, None, &format!("{mob_name} arrives, fleeing in panic.\r\n"));
+    }
+    // Fire ENTRY triggers on the fleeing mob.
+    crate::interpreter::fire_mob_entry_triggers(mob_id, world, chars).await;
 }
 
 /// Push a "Quest objective complete" message to a player if their active
