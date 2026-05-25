@@ -89,6 +89,9 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         resolve_mob_attack(intent, world, chars).await;
     }
 
+    // ----- Phase 4.5: FIGHT (`k`) triggers fire each round on combat-ants
+    fight_trigger_tick(world, chars).await;
+
     // ----- Phase 5: HP/mana regen for non-fighting players ---------------
     // Regen is gentle (small per-tick) and only applies when out of combat,
     // so that combat losses feel meaningful.
@@ -649,6 +652,31 @@ async fn player_death(
     let view = crate::interpreter::render_room(start_room, Some(ph.id), world, chars).await;
     let _ = ph.send.send(view);
     let _ = ph.send.send("\r\n> ".to_string());
+}
+
+/// Fire FIGHT (`k`) triggers each combat round for every mob currently
+/// in combat against a player.  The trigger's actor is the player they're
+/// fighting; `narg` controls the per-round fire chance.
+async fn fight_trigger_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
+    // Snapshot fighting mob ids + their opponent player ids.
+    let pairs: Vec<(u32, u32)> = {
+        let w = world.lock().await;
+        w.mob_instances.iter()
+            .filter_map(|m| m.fighting.and_then(|t|
+                if t.is_player { Some((m.id, t.id)) } else { None }))
+            .collect()
+    };
+    for (mob_id, player_id) in pairs {
+        // Player name lookup.
+        let actor_name = {
+            let cl = chars.lock().await;
+            let name = cl.iter().find(|p| p.id == player_id).map(|p| p.name.clone());
+            name
+        };
+        let Some(actor_name) = actor_name else { continue; };
+        // Run any 'k' triggers via the generic fire path.
+        crate::interpreter::fire_mob_fight_triggers(mob_id, &actor_name, world, chars).await;
+    }
 }
 
 /// Heuristic: should this mob attempt to cast a spell in combat?

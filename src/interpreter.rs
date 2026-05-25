@@ -1483,8 +1483,75 @@ async fn do_cast(
         crate::character::Skill::WordOfRecall => cast_word_of_recall(me, world, chars).await,
         crate::character::Skill::Identify     => cast_identify(target, me, world).await,
         crate::character::Skill::DetectInvis  => cast_detect_invis(me),
+        crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
+}
+
+async fn cast_detect_magic(me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    // One-shot reveal: list magical items in inventory + current room.
+    // An item is "magical" if any affect_flags bit is set or the
+    // ITEM_MAGIC extra flag (bit 5 of extra_flags[0]) is set.
+    const ITEM_MAGIC: u32 = 1 << 5;
+    me.mana -= crate::character::Skill::DetectMagic.mana_cost();
+
+    let w = world.lock().await;
+    let is_magical = |obj: &crate::world::ObjInstance| -> bool {
+        if obj.corpse_of.is_some() { return false; }
+        let Some(p) = w.obj_protos.get(&obj.vnum) else { return false; };
+        p.extra_flags[0] & ITEM_MAGIC != 0
+            || p.affect_flags[0] != 0
+            || p.affect_flags[1] != 0
+            || p.affect_flags[2] != 0
+            || p.affect_flags[3] != 0
+    };
+
+    let mut s = String::from("\r\nYou close your eyes and seek auras of magic...\r\n");
+    let mut any = false;
+
+    // Inventory pass.
+    let inv_hits: Vec<String> = me.inventory.iter()
+        .filter_map(|iid| w.obj_instances.iter().find(|o| o.id == *iid))
+        .filter(|o| is_magical(o))
+        .filter_map(|o| w.obj_protos.get(&o.vnum).map(|p| p.short_description.clone()))
+        .collect();
+    if !inv_hits.is_empty() {
+        any = true;
+        s.push_str("  In your inventory:\r\n");
+        for n in &inv_hits { s.push_str(&format!("    {n}\r\n")); }
+    }
+
+    // Equipment pass.
+    let eq_hits: Vec<String> = me.equipment.iter()
+        .filter_map(|s| *s)
+        .filter_map(|iid| w.obj_instances.iter().find(|o| o.id == iid))
+        .filter(|o| is_magical(o))
+        .filter_map(|o| w.obj_protos.get(&o.vnum).map(|p| p.short_description.clone()))
+        .collect();
+    if !eq_hits.is_empty() {
+        any = true;
+        s.push_str("  Worn / wielded:\r\n");
+        for n in &eq_hits { s.push_str(&format!("    {n}\r\n")); }
+    }
+
+    // Room pass.
+    if let Some(r) = w.rooms.get(&me.current_room) {
+        let room_hits: Vec<String> = r.objects.iter()
+            .filter_map(|iid| w.obj_instances.iter().find(|o| o.id == *iid))
+            .filter(|o| is_magical(o))
+            .filter_map(|o| w.obj_protos.get(&o.vnum).map(|p| p.short_description.clone()))
+            .collect();
+        if !room_hits.is_empty() {
+            any = true;
+            s.push_str("  Here in this room:\r\n");
+            for n in &room_hits { s.push_str(&format!("    {n}\r\n")); }
+        }
+    }
+
+    if !any {
+        s.push_str("  ...you sense no magic nearby.\r\n");
+    }
+    CmdOutput::text(s)
 }
 
 fn cast_detect_invis(me: &mut Character) -> CmdOutput {
@@ -3013,13 +3080,31 @@ enum ScriptOut {
 /// Per-script-execution context carrying mutable variables and the
 /// host-environment values (actor name, self/mob name, current room).
 struct ScriptCtx<'a> {
-    actor_name: &'a str,
-    mob_name:   &'a str,
-    self_room:  RoomVnum,
+    actor_name:  &'a str,
+    actor_hp:    i32,
+    actor_level: i32,
+    mob_name:    &'a str,
+    self_hp:     i32,
+    self_max_hp: i32,
+    self_level:  i32,
+    self_room:   RoomVnum,
     /// Optional direction the actor came from (e.g. "south") — set by
     /// the caller for greet triggers when known.  Empty for others.
-    direction:  String,
-    vars:       std::collections::HashMap<String, String>,
+    direction:   String,
+    vars:        std::collections::HashMap<String, String>,
+}
+
+/// Bundle of trigger inputs to keep the `execute_script` signature sane
+/// as more variables enter the picture.  Numeric fields default to 0
+/// when not available to the caller.
+#[derive(Default, Clone)]
+pub struct ScriptInputs {
+    pub actor_hp:    i32,
+    pub actor_level: i32,
+    pub self_hp:     i32,
+    pub self_max_hp: i32,
+    pub self_level:  i32,
+    pub direction:   String,
 }
 
 /// Execute one trigger script.  Returns a list of pending side-effects
@@ -3034,7 +3119,7 @@ fn execute_script(
     actor_name: &str,
     mob_name: &str,
     self_room: RoomVnum,
-    direction: &str,
+    inputs: &ScriptInputs,
 ) -> Vec<ScriptOut> {
     use rand::Rng;
     if t.narg < 100 && rand::thread_rng().gen_range(0..100) >= t.narg {
@@ -3042,30 +3127,60 @@ fn execute_script(
     }
     let mut ctx = ScriptCtx {
         actor_name,
+        actor_hp:    inputs.actor_hp,
+        actor_level: inputs.actor_level,
         mob_name,
+        self_hp:     inputs.self_hp,
+        self_max_hp: inputs.self_max_hp,
+        self_level:  inputs.self_level,
         self_room,
-        direction: direction.to_string(),
-        vars:      std::collections::HashMap::new(),
+        direction:   inputs.direction.clone(),
+        vars:        std::collections::HashMap::new(),
     };
     let mut out = Vec::new();
-    let mut skipping = false; // we're inside an `if` block whose cond was false
+    // Stack of if/else frames so blocks can nest.  Each frame records
+    // whether its branch is currently being skipped and whether we've
+    // crossed into the `else` half (so a second `else` does nothing).
+    #[derive(Clone, Copy)]
+    struct IfFrame { skip: bool, in_else: bool }
+    let mut stack: Vec<IfFrame> = Vec::new();
+    let currently_skipping = |st: &[IfFrame]| st.iter().any(|f| f.skip);
 
     for raw in &t.commands {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('*') { continue; }
-        // Block terminator.
-        if line == "end" {
-            skipping = false;
-            continue;
-        }
-        if skipping { continue; }
 
-        // Block opener.
-        if let Some(cond) = line.strip_prefix("if ") {
-            let result = eval_condition(cond, &ctx);
-            skipping = !result;
+        // Block control: handled regardless of skip state.
+        if line == "end" {
+            stack.pop();
             continue;
         }
+        if line == "else" {
+            // Only flip the innermost frame; ignore if already in else.
+            if let Some(top) = stack.last_mut() {
+                if !top.in_else {
+                    top.in_else = true;
+                    // Flip skip-state — but only if no outer frame is also
+                    // skipping; otherwise we stay skipped regardless.
+                    top.skip = !top.skip;
+                }
+            }
+            continue;
+        }
+        if let Some(cond) = line.strip_prefix("if ") {
+            // If we're already inside a skipped outer block, the inner
+            // condition is irrelevant — the whole nested block is dead.
+            let outer_skipping = stack.iter().any(|f| f.skip);
+            let frame_skip = if outer_skipping {
+                true
+            } else {
+                !eval_condition(cond, &ctx)
+            };
+            stack.push(IfFrame { skip: frame_skip, in_else: false });
+            continue;
+        }
+        if currently_skipping(&stack) { continue; }
+
         // Skip while/eval/wait — not implemented yet.  Drop the line.
         if line.starts_with("while ") || line.starts_with("wait ")
             || line.starts_with("eval ")
@@ -3127,16 +3242,32 @@ fn substitute(ctx: &ScriptCtx, s: &str) -> String {
 }
 
 fn resolve_var(ctx: &ScriptCtx, name: &str) -> String {
+    use rand::Rng;
     match name {
         "actor.name"     => ctx.actor_name.to_string(),
         "actor.is_pc"    => "1".to_string(),
+        "actor.hp"       => ctx.actor_hp.to_string(),
+        "actor.level"    => ctx.actor_level.to_string(),
         "self.name"      => ctx.mob_name.to_string(),
+        "self.hp"        => ctx.self_hp.to_string(),
+        "self.maxhp"     => ctx.self_max_hp.to_string(),
+        "self.level"     => ctx.self_level.to_string(),
         "self.room.vnum" => ctx.self_room.to_string(),
         "direction"      => ctx.direction.clone(),
         "random.dir"     => {
             use rand::seq::SliceRandom;
             let dirs = ["north","east","south","west","up","down"];
             dirs.choose(&mut rand::thread_rng()).copied().unwrap_or("north").to_string()
+        }
+        // %random.N% — uniform 1..=N integer roll.
+        other if other.starts_with("random.") => {
+            let n_str = &other["random.".len()..];
+            if let Ok(n) = n_str.parse::<i32>() {
+                if n >= 1 {
+                    return rand::thread_rng().gen_range(1..=n).to_string();
+                }
+            }
+            String::new()
         }
         // User-set vars or unknown.
         other => ctx.vars.get(other).cloned().unwrap_or_default(),
@@ -3237,7 +3368,12 @@ async fn fire_mob_triggers(
                         .any(|w| text_low.split_whitespace().any(|t| t == w));
                     if !any_match { continue; }
                 }
-                acc.extend(execute_script(t, actor_name, &mob_name, room, ""));
+                let inputs = ScriptInputs {
+                    self_hp: m.hp, self_max_hp: m.max_hp,
+                    self_level: proto.level,
+                    ..Default::default()
+                };
+                acc.extend(execute_script(t, actor_name, &mob_name, room, &inputs));
             }
         }
         acc
@@ -3261,9 +3397,40 @@ async fn fire_room_triggers(
         for &tvnum in &r.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != trigger_type { continue; }
-            acc.extend(execute_script(t, actor_name, &room_name, room, ""));
+            acc.extend(execute_script(t, actor_name, &room_name, room, &ScriptInputs::default()));
         }
         acc
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Run FIGHT (type 'k') triggers each combat round for a mob currently
+/// engaged with a player.  Provides %actor.name%/%actor.hp% to the
+/// script so dynamic combat dialogue is possible.
+pub async fn fire_mob_fight_triggers(
+    mob_id: u32,
+    actor_name: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let (outputs, room) = {
+        let w = world.lock().await;
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mob_id) else { return; };
+        let Some(proto) = w.mob_protos.get(&m.vnum) else { return; };
+        let mob_name = proto.short_descr.clone();
+        let mob_room = m.in_room;
+        let inputs = ScriptInputs {
+            self_hp: m.hp, self_max_hp: m.max_hp,
+            self_level: proto.level,
+            ..Default::default()
+        };
+        let mut acc = Vec::new();
+        for &tvnum in &m.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            if t.trigger_type != 'k' { continue; }
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &inputs));
+        }
+        (acc, mob_room)
     };
     apply_script_outputs(outputs, room, world, chars).await;
 }
@@ -3288,7 +3455,7 @@ pub async fn fire_mob_entry_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'i' { continue; }
-            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, ""));
+            acc.extend(execute_script(t, &mob_name, &mob_name, mob_room, &ScriptInputs::default()));
         }
         (acc, mob_room)
     };
@@ -3325,7 +3492,7 @@ pub async fn fire_mob_receive_triggers(
                     .any(|w| obj_low.split_whitespace().any(|o| o == w));
                 if !any_match { continue; }
             }
-            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, ""));
+            acc.extend(execute_script(t, actor_name, &mob_name, mob_room, &ScriptInputs::default()));
         }
         (acc, mob_room)
     };
@@ -3353,7 +3520,7 @@ pub async fn fire_mob_death_triggers(
         for &tvnum in &m.triggers {
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != 'f' { continue; }
-            acc.extend(execute_script(t, killer_name, &mob_name, mob_room, ""));
+            acc.extend(execute_script(t, killer_name, &mob_name, mob_room, &ScriptInputs::default()));
         }
         acc
     };
