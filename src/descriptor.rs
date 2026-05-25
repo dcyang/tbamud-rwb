@@ -250,6 +250,7 @@ pub async fn handle_connection(
                         }
                         m
                     },
+                    affects:      Vec::new(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline

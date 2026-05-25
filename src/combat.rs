@@ -56,6 +56,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     target:        tgt,
                     weapon_iid:    me.equipment[WEAR_WIELD],
                     str_score:     me.str_,
+                    dam_bonus:     me.affect_dam_bonus(),
                 });
             }
         }
@@ -94,16 +95,27 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
     regen_tick(chars).await;
 }
 
-/// Regen HP and mana for players not currently in combat.  Mirrors point_update()
-/// in limits.c, much simplified — fires every combat tick (2s).
+/// Regen HP and mana for players not currently in combat, and decrement
+/// active affect durations.  Mirrors a slice of point_update() in limits.c.
 async fn regen_tick(chars: &SharedChars) {
     let handles: Vec<crate::character::PlayerHandle> = {
         let cl = chars.lock().await;
         cl.iter().cloned().collect()
     };
     for ph in handles {
+        // Tick affects + collect expiry messages.
+        let (expired, in_combat) = {
+            let mut c = ph.character.lock().await;
+            (c.tick_affects(), c.fighting.is_some())
+        };
+        for skill in expired {
+            let _ = ph.send.send(format!(
+                "\r\nThe glow of {} fades from you.\r\n", skill.name(),
+            ));
+        }
+        // Regen — only when out of combat.
+        if in_combat { continue; }
         let mut c = ph.character.lock().await;
-        if c.fighting.is_some() { continue; }
         if c.hp < c.max_hp {
             c.hp = (c.hp + 1 + c.level / 5).min(c.max_hp);
         }
@@ -121,6 +133,7 @@ struct PlayerIntent {
     target:        Target,
     weapon_iid:    Option<u32>,
     str_score:     i32,
+    dam_bonus:     i32,
 }
 
 struct MobIntent {
@@ -153,7 +166,7 @@ async fn resolve_player_attack(
         } else {
             dice(1, 4)
         };
-        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score)).max(1)
+        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1)
     };
 
     let (target_name, target_dead, target_room) = {
@@ -273,7 +286,8 @@ async fn resolve_mob_attack(
     };
 
     // Roll mob damage from its prototype dice (dam_dice d dam_size + damroll).
-    // Then subtract player AC/3 as damage reduction (clamped >= 1).
+    // Reduce by AC/3 (armor) and again by the player's affect-based damage
+    // reduction (e.g. sanctuary).  Clamped to ≥ 1.
     let dmg: i32 = {
         let raw = {
             let w = world.lock().await;
@@ -282,11 +296,15 @@ async fn resolve_mob_attack(
                 None    => 1,
             }
         };
-        let ac = {
+        let (ac, reduction) = {
             let me = ph.character.lock().await;
-            crate::interpreter::total_ac(&me, world).await
+            let ac = crate::interpreter::total_ac(&me, world).await;
+            let r  = me.affect_dmg_reduction();
+            (ac, r)
         };
-        (raw - ac / 3).max(1)
+        let after_ac = (raw - ac / 3).max(1);
+        let after_buff = (after_ac * (100 - reduction)) / 100;
+        after_buff.max(1)
     };
 
     // Apply damage to the player; check death.

@@ -30,6 +30,8 @@ pub enum Skill {
     Backstab,
     MagicMissile,
     CureLight,
+    Bless,
+    BurningHands,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +50,13 @@ impl Skill {
         let s = s.to_ascii_lowercase();
         let normalized = s.replace([' ', '-', '_'], "");
         match normalized.as_str() {
-            "kick"        => Some(Skill::Kick),
-            "bash"        => Some(Skill::Bash),
-            "backstab"    => Some(Skill::Backstab),
+            "kick"         => Some(Skill::Kick),
+            "bash"         => Some(Skill::Bash),
+            "backstab"     => Some(Skill::Backstab),
             "magicmissile" => Some(Skill::MagicMissile),
-            "curelight"   => Some(Skill::CureLight),
+            "curelight"    => Some(Skill::CureLight),
+            "bless"        => Some(Skill::Bless),
+            "burninghands" => Some(Skill::BurningHands),
             _ => None,
         }
     }
@@ -65,13 +69,16 @@ impl Skill {
             Skill::Backstab     => "backstab",
             Skill::MagicMissile => "magic missile",
             Skill::CureLight    => "cure light",
+            Skill::Bless        => "bless",
+            Skill::BurningHands => "burning hands",
         }
     }
 
     pub fn kind(self) -> SkillKind {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab => SkillKind::Physical,
-            Skill::MagicMissile | Skill::CureLight       => SkillKind::Spell,
+            Skill::MagicMissile | Skill::CureLight
+                | Skill::Bless  | Skill::BurningHands   => SkillKind::Spell,
         }
     }
 
@@ -81,6 +88,8 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
+            Skill::Bless        => 5,
+            Skill::BurningHands => 12,
         }
     }
 
@@ -92,6 +101,8 @@ impl Skill {
             Skill::Backstab     => &[Class::Thief],
             Skill::MagicMissile => &[Class::MagicUser],
             Skill::CureLight    => &[Class::Cleric],
+            Skill::Bless        => &[Class::Cleric],
+            Skill::BurningHands => &[Class::MagicUser],
         }
     }
 
@@ -107,6 +118,8 @@ impl Skill {
             Skill::Backstab     => "backstab",
             Skill::MagicMissile => "magic-missile",
             Skill::CureLight    => "cure-light",
+            Skill::Bless        => "bless",
+            Skill::BurningHands => "burning-hands",
         }
     }
 
@@ -120,7 +133,28 @@ impl Skill {
 pub const ALL_SKILLS: &[Skill] = &[
     Skill::Kick, Skill::Bash, Skill::Backstab,
     Skill::MagicMissile, Skill::CureLight,
+    Skill::Bless, Skill::BurningHands,
 ];
+
+// ---------------------------------------------------------------------------
+// Affects (temporary buffs/debuffs)
+// ---------------------------------------------------------------------------
+
+/// A timed effect on a character.  Stacks of the same spell refresh rather
+/// than accumulate.  Tick count is in combat-tick units (2s each).
+#[derive(Debug, Clone)]
+pub struct Affect {
+    pub skill:         Skill,
+    pub duration:      i32,
+    pub to_hit:        i32,
+    pub to_dam:        i32,
+    /// Percent damage reduction on incoming attacks (0..=75).
+    pub dmg_reduction: i32,
+}
+
+impl Affect {
+    pub fn name(&self) -> &'static str { self.skill.name() }
+}
 
 /// Who/what a character is fighting. Mob instance ids are positive; we use
 /// the same numeric space for player ids (they're both `u32`) — the
@@ -167,6 +201,9 @@ pub struct Character {
     /// Learned skill levels — value is "practice percent" (0..=100).  Only
     /// skills the player has invested in appear here.
     pub skills:       HashMap<Skill, u8>,
+    /// Active temporary affects (buffs/debuffs).  Not persisted across
+    /// sessions.
+    pub affects:      Vec<Affect>,
 }
 
 /// STR-based damage modifier — mirrors str_app[].todam in constants.c
@@ -328,6 +365,47 @@ impl Character {
 
     /// Practice points granted on each level-up.
     pub const PRACTICES_PER_LEVEL: i32 = 2;
+
+    // ----- Affect helpers ----------------------------------------------------
+
+    /// Sum of `to_hit` bonuses from all active affects.
+    pub fn affect_hit_bonus(&self) -> i32 {
+        self.affects.iter().map(|a| a.to_hit).sum()
+    }
+
+    /// Sum of `to_dam` bonuses from all active affects.
+    pub fn affect_dam_bonus(&self) -> i32 {
+        self.affects.iter().map(|a| a.to_dam).sum()
+    }
+
+    /// Total damage reduction percent (0..=75) from active affects.
+    pub fn affect_dmg_reduction(&self) -> i32 {
+        let total: i32 = self.affects.iter().map(|a| a.dmg_reduction).sum();
+        total.clamp(0, 75)
+    }
+
+    /// Replace an existing affect from the same spell (refresh duration)
+    /// or push a new one.
+    pub fn apply_affect(&mut self, a: Affect) {
+        if let Some(existing) = self.affects.iter_mut().find(|x| x.skill == a.skill) {
+            *existing = a;
+        } else {
+            self.affects.push(a);
+        }
+    }
+
+    /// Decrement all affect durations.  Returns the list of skills whose
+    /// effects just expired (for "X fades away" messaging).
+    pub fn tick_affects(&mut self) -> Vec<Skill> {
+        let mut expired = Vec::new();
+        for a in self.affects.iter_mut() {
+            a.duration -= 1;
+        }
+        self.affects.retain(|a| {
+            if a.duration <= 0 { expired.push(a.skill); false } else { true }
+        });
+        expired
+    }
 
     pub fn init_hp(level: i32) -> i32 {
         // Class-independent default; per-class scaling is applied on
