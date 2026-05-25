@@ -185,6 +185,9 @@ pub struct ObjInstance {
     /// Seconds remaining until the object decays.  Currently used only by
     /// corpses; regular objects have None.
     pub decay_in: Option<i32>,
+    /// DG trigger vnums attached to this object.  Populated by the T zone
+    /// reset command with attach_type=1 (OBJ).
+    pub triggers: Vec<TriggerVnum>,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -465,6 +468,7 @@ impl World {
             vnum: CORPSE_VNUM,
             in_room: room,
             contents,
+            triggers: Vec::new(),
             corpse_of: Some(mob_short.to_string()),
             decay_in: Some(CORPSE_DECAY_SECS),
         });
@@ -485,6 +489,7 @@ impl World {
             contents: Vec::new(),
                         corpse_of: None,
                         decay_in: None,
+                        triggers: Vec::new(),
         });
         Some(id)
     }

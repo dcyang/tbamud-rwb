@@ -332,6 +332,8 @@ async fn do_get(
             msg.push_str(&qmsg);
         }
     }
+    // Fire any GET triggers attached to the picked-up object.
+    fire_obj_get_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(msg)
 }
 
@@ -901,8 +903,9 @@ async fn do_quest_complete(
 }
 
 /// If the player has an active AQ_MOB_KILL quest targeting `killed_vnum`,
-/// mark the objective complete and return a player-facing message.
-/// Returns `None` if no quest progress occurred.
+/// mark the objective complete and return a player-facing message.  If
+/// they have an AQ_ROOM_CLEAR quest targeting `kill_room`, completes
+/// when no mobs remain in that room after this kill.
 pub async fn quest_check_kill(
     me: &mut Character,
     killed_vnum: i32,
@@ -911,16 +914,36 @@ pub async fn quest_check_kill(
     let qv = me.active_quest?;
     let w = world.lock().await;
     let q = w.quests.get(&qv)?;
-    if q.kind != crate::world::AQ_MOB_KILL { return None; }
-    if q.target != killed_vnum { return None; }
     if me.quest_progress >= 1 { return None; }
-    me.quest_progress = 1;
-    let mob_name = w.mob_protos.get(&killed_vnum)
-        .map(|p| p.short_descr.clone())
-        .unwrap_or_else(|| "the target".to_string());
-    Some(format!(
-        "\r\n*** Quest objective complete: you have slain {mob_name}! Return to the questmaster. ***\r\n",
-    ))
+
+    if q.kind == crate::world::AQ_MOB_KILL && q.target == killed_vnum {
+        me.quest_progress = 1;
+        let mob_name = w.mob_protos.get(&killed_vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the target".to_string());
+        return Some(format!(
+            "\r\n*** Quest objective complete: you have slain {mob_name}! Return to the questmaster. ***\r\n",
+        ));
+    }
+    if q.kind == crate::world::AQ_ROOM_CLEAR {
+        // Player must be IN the target room and no mobs may remain there
+        // after this kill (the killed mob is already extracted by the
+        // time we're called).
+        let target_room = q.target;
+        if me.current_room != target_room { return None; }
+        let mobs_remaining = w.rooms.get(&target_room)
+            .map(|r| r.mobs.len()).unwrap_or(0);
+        if mobs_remaining == 0 {
+            me.quest_progress = 1;
+            let room_name = w.rooms.get(&target_room)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "the area".to_string());
+            return Some(format!(
+                "\r\n*** Quest objective complete: you have cleared {room_name}! Return to the questmaster. ***\r\n",
+            ));
+        }
+    }
+    None
 }
 
 /// AQ_OBJ_FIND: completes when the player picks up an object matching the
@@ -3080,18 +3103,22 @@ enum ScriptOut {
 /// Per-script-execution context carrying mutable variables and the
 /// host-environment values (actor name, self/mob name, current room).
 struct ScriptCtx<'a> {
-    actor_name:  &'a str,
-    actor_hp:    i32,
-    actor_level: i32,
-    mob_name:    &'a str,
-    self_hp:     i32,
-    self_max_hp: i32,
-    self_level:  i32,
-    self_room:   RoomVnum,
+    actor_name:    &'a str,
+    actor_hp:      i32,
+    actor_level:   i32,
+    actor_gold:    i64,
+    actor_class:   String,
+    mob_name:      &'a str,
+    self_hp:       i32,
+    self_max_hp:   i32,
+    self_level:    i32,
+    self_fighting: bool,
+    self_room:     RoomVnum,
+    room_people:   i32,
     /// Optional direction the actor came from (e.g. "south") — set by
     /// the caller for greet triggers when known.  Empty for others.
-    direction:   String,
-    vars:        std::collections::HashMap<String, String>,
+    direction:     String,
+    vars:          std::collections::HashMap<String, String>,
 }
 
 /// Bundle of trigger inputs to keep the `execute_script` signature sane
@@ -3099,12 +3126,16 @@ struct ScriptCtx<'a> {
 /// when not available to the caller.
 #[derive(Default, Clone)]
 pub struct ScriptInputs {
-    pub actor_hp:    i32,
-    pub actor_level: i32,
-    pub self_hp:     i32,
-    pub self_max_hp: i32,
-    pub self_level:  i32,
-    pub direction:   String,
+    pub actor_hp:      i32,
+    pub actor_level:   i32,
+    pub actor_gold:    i64,
+    pub actor_class:   String,
+    pub self_hp:       i32,
+    pub self_max_hp:   i32,
+    pub self_level:    i32,
+    pub self_fighting: bool,
+    pub room_people:   i32,
+    pub direction:     String,
 }
 
 /// Execute one trigger script.  Returns a list of pending side-effects
@@ -3127,15 +3158,19 @@ fn execute_script(
     }
     let mut ctx = ScriptCtx {
         actor_name,
-        actor_hp:    inputs.actor_hp,
-        actor_level: inputs.actor_level,
+        actor_hp:      inputs.actor_hp,
+        actor_level:   inputs.actor_level,
+        actor_gold:    inputs.actor_gold,
+        actor_class:   inputs.actor_class.clone(),
         mob_name,
-        self_hp:     inputs.self_hp,
-        self_max_hp: inputs.self_max_hp,
-        self_level:  inputs.self_level,
+        self_hp:       inputs.self_hp,
+        self_max_hp:   inputs.self_max_hp,
+        self_level:    inputs.self_level,
+        self_fighting: inputs.self_fighting,
         self_room,
-        direction:   inputs.direction.clone(),
-        vars:        std::collections::HashMap::new(),
+        room_people:   inputs.room_people,
+        direction:     inputs.direction.clone(),
+        vars:          std::collections::HashMap::new(),
     };
     let mut out = Vec::new();
     // Frame stack — supports nested if/else AND while loops.  Each frame
@@ -3293,11 +3328,15 @@ fn resolve_var(ctx: &ScriptCtx, name: &str) -> String {
         "actor.is_pc"    => "1".to_string(),
         "actor.hp"       => ctx.actor_hp.to_string(),
         "actor.level"    => ctx.actor_level.to_string(),
+        "actor.gold"     => ctx.actor_gold.to_string(),
+        "actor.class"    => ctx.actor_class.clone(),
         "self.name"      => ctx.mob_name.to_string(),
         "self.hp"        => ctx.self_hp.to_string(),
         "self.maxhp"     => ctx.self_max_hp.to_string(),
         "self.level"     => ctx.self_level.to_string(),
+        "self.fighting"  => if ctx.self_fighting { "1".into() } else { "0".into() },
         "self.room.vnum" => ctx.self_room.to_string(),
+        "room.people"    => ctx.room_people.to_string(),
         "direction"      => ctx.direction.clone(),
         "random.dir"     => {
             use rand::seq::SliceRandom;
@@ -3439,6 +3478,8 @@ async fn fire_mob_triggers(
                 let inputs = ScriptInputs {
                     self_hp: m.hp, self_max_hp: m.max_hp,
                     self_level: proto.level,
+                    self_fighting: m.fighting.is_some(),
+                    room_people: 0,  // filled by caller-specific paths if needed
                     ..Default::default()
                 };
                 acc.extend(execute_script(t, actor_name, &mob_name, room, &inputs));
@@ -3466,6 +3507,36 @@ async fn fire_room_triggers(
             let Some(t) = w.triggers.get(&tvnum) else { continue; };
             if t.trigger_type != trigger_type { continue; }
             acc.extend(execute_script(t, actor_name, &room_name, room, &ScriptInputs::default()));
+        }
+        acc
+    };
+    apply_script_outputs(outputs, room, world, chars).await;
+}
+
+/// Fire object GET triggers ('g' on attach_type=1) when an object is
+/// picked up.  The "self" in scripts is the object's short_description.
+pub async fn fire_obj_get_triggers(
+    obj_iid: u32,
+    actor_name: &str,
+    room: RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let outputs: Vec<ScriptOut> = {
+        let w = world.lock().await;
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == obj_iid) else {
+            return;
+        };
+        let obj_name = w.obj_protos.get(&o.vnum)
+            .map(|p| p.short_description.clone())
+            .unwrap_or_else(|| "an object".to_string());
+        let mut acc = Vec::new();
+        for &tvnum in &o.triggers {
+            let Some(t) = w.triggers.get(&tvnum) else { continue; };
+            // Object GET: attach_type must be 1 (OBJ) and type 'g'.
+            if t.attach_type != crate::world::TRIG_ATTACH_OBJ { continue; }
+            if t.trigger_type != 'g' { continue; }
+            acc.extend(execute_script(t, actor_name, &obj_name, room, &ScriptInputs::default()));
         }
         acc
     };

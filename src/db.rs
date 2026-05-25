@@ -1142,6 +1142,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         contents: Vec::new(),
                         corpse_of: None,
                         decay_in: None,
+                        triggers: Vec::new(),
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -1153,6 +1154,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                         contents: Vec::new(),
                         corpse_of: None,
                         decay_in: None,
+                        triggers: Vec::new(),
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -1184,6 +1186,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     contents: Vec::new(),
                         corpse_of: None,
                         decay_in: None,
+                        triggers: Vec::new(),
                 });
                 if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
                     m.inventory.push(id);
@@ -1213,6 +1216,7 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     contents: Vec::new(),
                         corpse_of: None,
                         decay_in: None,
+                        triggers: Vec::new(),
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {
@@ -1257,11 +1261,10 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     }
                     1 /* obj */ => {
                         if let Some(oid) = last_obj_id {
-                            // Object trigger storage TBD — we don't yet
-                            // execute obj triggers, but we silently accept
-                            // them so the parser stays aligned.
-                            let _ = oid;
-                            last_cmd_ok = true;
+                            if let Some(o) = world.obj_instances.iter_mut().find(|o| o.id == oid) {
+                                o.triggers.push(cmd.arg2);
+                                last_cmd_ok = true;
+                            } else { last_cmd_ok = false; }
                         } else { last_cmd_ok = false; }
                     }
                     2 /* room */ => {
