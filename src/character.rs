@@ -38,6 +38,7 @@ pub enum Skill {
     Hide,
     Steal,
     WordOfRecall,
+    Identify,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +70,7 @@ impl Skill {
             "hide"         => Some(Skill::Hide),
             "steal"        => Some(Skill::Steal),
             "wordofrecall" => Some(Skill::WordOfRecall),
+            "identify"     => Some(Skill::Identify),
             _ => None,
         }
     }
@@ -89,6 +91,7 @@ impl Skill {
             Skill::Hide         => "hide",
             Skill::Steal        => "steal",
             Skill::WordOfRecall => "word of recall",
+            Skill::Identify     => "identify",
         }
     }
 
@@ -99,7 +102,7 @@ impl Skill {
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
-                | Skill::WordOfRecall                       => SkillKind::Spell,
+                | Skill::WordOfRecall | Skill::Identify     => SkillKind::Spell,
         }
     }
 
@@ -115,6 +118,7 @@ impl Skill {
             Skill::Sanctuary    => 10,
             Skill::Harm         => 10,
             Skill::WordOfRecall => 20,
+            Skill::Identify     => 15,
         }
     }
 
@@ -137,6 +141,7 @@ impl Skill {
             // shared between Cleric and MagicUser (and trivially castable
             // by all in many forks).  Keep Cleric-only for now.
             Skill::WordOfRecall => &[Class::Cleric, Class::MagicUser],
+            Skill::Identify     => &[Class::MagicUser],
         }
     }
 
@@ -160,6 +165,7 @@ impl Skill {
             Skill::Hide         => "hide",
             Skill::Steal        => "steal",
             Skill::WordOfRecall => "word-of-recall",
+            Skill::Identify     => "identify",
         }
     }
 
@@ -176,7 +182,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::MagicMissile, Skill::CureLight,
     Skill::Bless, Skill::BurningHands,
     Skill::Sanctuary, Skill::Harm,
-    Skill::WordOfRecall,
+    Skill::WordOfRecall, Skill::Identify,
 ];
 
 // ---------------------------------------------------------------------------

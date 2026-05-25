@@ -93,6 +93,85 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
     // Regen is gentle (small per-tick) and only applies when out of combat,
     // so that combat losses feel meaningful.
     regen_tick(chars).await;
+
+    // ----- Phase 6: aggressive mobs engage players in their room --------
+    aggro_tick(world, chars).await;
+}
+
+/// Each tick, walk all aggressive (MOB_AGGRESSIVE) mobs that aren't
+/// already fighting and look for a player in the same room.  If found,
+/// engage combat.  Mobs with see_invisible/level concerns are not yet
+/// modeled — for now hidden players are skipped (gives `hide` its main
+/// utility against mundane aggro).
+async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
+    // Snapshot all online player rooms (and hidden state) for cheap lookup.
+    let live_players: Vec<(u32, crate::world::RoomVnum, bool)> = {
+        let cl = chars.lock().await;
+        let mut v = Vec::new();
+        for p in cl.iter() {
+            let c = p.character.lock().await;
+            v.push((p.id, c.current_room, c.hidden));
+        }
+        v
+    };
+    if live_players.is_empty() { return; }
+
+    // Identify all aggressive mob instances that have no current target
+    // and have at least one non-hidden player in their room.
+    let intents: Vec<(u32, u32, crate::world::RoomVnum, String)> = {
+        let w = world.lock().await;
+        let mut v = Vec::new();
+        for m in &w.mob_instances {
+            if m.fighting.is_some() { continue; }
+            let proto = match w.mob_protos.get(&m.vnum) {
+                Some(p) => p,
+                None    => continue,
+            };
+            if proto.mob_flags[0] & crate::world::MOB_AGGRESSIVE == 0 {
+                continue;
+            }
+            // Find a non-hidden player in this mob's room.
+            let target = live_players.iter()
+                .find(|(_, room, hidden)| *room == m.in_room && !hidden);
+            if let Some(&(pid, _, _)) = target {
+                v.push((m.id, pid, m.in_room, proto.short_descr.clone()));
+            }
+        }
+        v
+    };
+
+    // Engage each (mob -> player) pairing.
+    for (mob_id, player_id, room, mob_name) in intents {
+        let handle = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == player_id).cloned();
+            h
+        };
+        let Some(ph) = handle else { continue; };
+        {
+            let mut c = ph.character.lock().await;
+            if c.fighting.is_some() { continue; }
+            c.fighting = Some(crate::character::Target {
+                id: mob_id, is_player: false,
+            });
+        }
+        {
+            let mut w = world.lock().await;
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                m.fighting = Some(crate::character::Target {
+                    id: player_id, is_player: true,
+                });
+            }
+        }
+        let _ = ph.send.send(format!(
+            "\r\n{mob_name} attacks you!\r\n",
+        ));
+        let cl = chars.lock().await;
+        cl.broadcast_room(
+            room, Some(player_id),
+            &format!("{mob_name} attacks {}!\r\n", ph.name),
+        );
+    }
 }
 
 /// Regen HP and mana for players not currently in combat, and decrement

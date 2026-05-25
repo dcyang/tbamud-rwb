@@ -200,6 +200,15 @@ pub const ITEM_WEAPON:    i32 = 5;
 pub const ITEM_ARMOR:     i32 = 9;
 pub const ITEM_CONTAINER: i32 = 15;
 
+/// MOB_* bitflag positions in `MobProto.mob_flags[0]`.  Mirrors the
+/// MOB_* defines in structs.h.
+pub const MOB_SPEC:       u32 = 1 << 0;
+pub const MOB_SENTINEL:   u32 = 1 << 1;
+pub const MOB_SCAVENGER:  u32 = 1 << 2;
+pub const MOB_ISNPC:      u32 = 1 << 3;
+pub const MOB_AWARE:      u32 = 1 << 4;
+pub const MOB_AGGRESSIVE: u32 = 1 << 5;
+
 // ---------------------------------------------------------------------------
 // Mob prototypes & instances
 // ---------------------------------------------------------------------------

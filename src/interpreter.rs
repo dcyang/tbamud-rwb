@@ -44,7 +44,7 @@ const COMMANDS: &[&str] = &[
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
-    "quest",
+    "quest", "where",
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
@@ -128,6 +128,7 @@ pub async fn dispatch_command(
         Some("practice")  => do_practice(rest, me),
         Some("affects")   => do_affects(me),
         Some("quest")     => do_quest(rest, me, world, chars).await,
+        Some("where")     => do_where(me, world, chars).await,
         Some("give")      => do_give(rest, me, world, chars).await,
         Some("examine")   => do_examine(rest, me, world, chars).await,
         Some("list")      => do_list(me, world).await,
@@ -539,6 +540,33 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         }
         _ => CmdOutput::text("\r\nNo one by that name is online.\r\n"),
     }
+}
+
+async fn do_where(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let immortal = me.level >= 34;
+    let cl = chars.lock().await;
+    let w = world.lock().await;
+    let mut s = String::from("\r\nPlayers in the world:\r\n");
+    for p in cl.iter() {
+        // Skip hidden players unless we're immortal or them.
+        if !immortal && p.id != me.id {
+            let hidden = p.character.lock().await.hidden;
+            if hidden { continue; }
+        }
+        let room_name = w.rooms.get(&p.current_room)
+            .map(|r| r.name.as_str())
+            .unwrap_or("(nowhere)");
+        let marker = if p.id == me.id { " (you)" } else { "" };
+        s.push_str(&format!(
+            "  {:<14}  [{:>5}] {}{}\r\n",
+            p.name, p.current_room, room_name, marker,
+        ));
+    }
+    CmdOutput::text(s)
 }
 
 async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
@@ -1363,6 +1391,7 @@ async fn do_cast(
         crate::character::Skill::Sanctuary    => cast_sanctuary(target, me, chars, learned).await,
         crate::character::Skill::Harm         => cast_harm(target, me, world, chars, learned).await,
         crate::character::Skill::WordOfRecall => cast_word_of_recall(me, world, chars).await,
+        crate::character::Skill::Identify     => cast_identify(target, me, world).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -1799,6 +1828,88 @@ async fn cast_harm(
         return CmdOutput::text(msg);
     }
     CmdOutput::text(to_me)
+}
+
+async fn cast_identify(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if target_kw.is_empty() {
+        return CmdOutput::text("\r\nIdentify what? (Specify an item in your inventory.)\r\n");
+    }
+    let key = target_kw.to_ascii_lowercase();
+    me.mana -= crate::character::Skill::Identify.mana_cost();
+
+    // Find a matching obj in inventory or equipment first, then room.
+    let w = world.lock().await;
+    let candidate: Option<u32> = me.inventory.iter().copied().find(|iid| {
+        if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
+            obj_matches_keyword(&w, o, &key)
+        } else { false }
+    }).or_else(|| {
+        me.equipment.iter().flatten().copied().find(|iid| {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
+                obj_matches_keyword(&w, o, &key)
+            } else { false }
+        })
+    }).or_else(|| {
+        let r = w.rooms.get(&me.current_room)?;
+        r.objects.iter().copied().find(|iid| {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
+                obj_matches_keyword(&w, o, &key)
+            } else { false }
+        })
+    });
+
+    let Some(iid) = candidate else {
+        return CmdOutput::text(format!("\r\nYou see no {key} to identify.\r\n"));
+    };
+    let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else {
+        return CmdOutput::text("\r\nThe item slips from your mind.\r\n");
+    };
+
+    // Corpses have no proto — special-case.
+    if let Some(of) = &obj.corpse_of {
+        let count = obj.contents.len();
+        return CmdOutput::text(format!(
+            "\r\nIdentify result:\r\n  the corpse of {of}\r\n  type:      corpse\r\n  contents:  {count} items\r\n",
+        ));
+    }
+
+    let Some(p) = w.obj_protos.get(&obj.vnum) else {
+        return CmdOutput::text("\r\nYou cannot fathom what this is.\r\n");
+    };
+    let kind_name = item_type_name(p.item_type);
+    let mut s = format!(
+        "\r\nIdentify result:\r\n  {}\r\n  type:      {}\r\n  weight:    {}\r\n  cost:      {}\r\n",
+        p.short_description, kind_name, p.weight, p.cost,
+    );
+    match p.item_type {
+        5 /* ITEM_WEAPON */ => {
+            s.push_str(&format!("  damage:    {}d{} ({:+} avg)\r\n",
+                p.value[1], p.value[2],
+                if p.value[1] > 0 && p.value[2] > 0 {
+                    p.value[1] * (p.value[2] + 1) / 2
+                } else { 0 },
+            ));
+        }
+        9 /* ITEM_ARMOR */ => {
+            s.push_str(&format!("  AC apply:  {}\r\n", p.value[0]));
+        }
+        1 /* ITEM_LIGHT */ => {
+            s.push_str(&format!("  hours:     {}\r\n", p.value[2]));
+        }
+        15 /* ITEM_CONTAINER */ => {
+            s.push_str(&format!("  capacity:  {} lb\r\n", p.value[0]));
+            s.push_str(&format!("  contents:  {} item(s)\r\n", obj.contents.len()));
+        }
+        _ => {}
+    }
+    if p.level > 0 {
+        s.push_str(&format!("  min level: {}\r\n", p.level));
+    }
+    CmdOutput::text(s)
 }
 
 async fn cast_word_of_recall(
