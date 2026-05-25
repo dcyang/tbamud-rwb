@@ -213,6 +213,11 @@ pub struct MobInstance {
     pub in_room: RoomVnum,
     /// Object instance ids carried/equipped by this mob.
     pub inventory: Vec<u32>,
+    pub hp:        i32,
+    pub max_hp:    i32,
+    /// Opponent — same Target shape as `Character.fighting` to keep the
+    /// combat tick uniform. The player id here is a PlayerHandle.id.
+    pub fighting:  Option<crate::character::Target>,
 }
 
 /// In-memory world: keyed by vnum so lookups are O(log n) and we sidestep

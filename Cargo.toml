@@ -16,3 +16,4 @@ bytes  = "=1.5.0"
 libc   = "=0.2.153"
 tracing            = "=0.1.40"
 tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
+rand               = "=0.8.5"

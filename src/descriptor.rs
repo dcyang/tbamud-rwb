@@ -191,6 +191,7 @@ pub async fn handle_connection(
                     .unwrap_or_else(|| "Someone".to_string());
 
                 // Build the character. id reuses the connection id for now.
+                let hp = Character::init_hp(session.level);
                 let me = Character {
                     id:           id as u32,
                     name:         pname.clone(),
@@ -204,6 +205,9 @@ pub async fn handle_connection(
                     current_room: start,
                     inventory:    Vec::new(),
                     gold:         0,
+                    hp,
+                    max_hp:       hp,
+                    fighting:     None,
                 };
 
                 run_game_session(id, host.clone(), stream, me, world, chars).await?;
@@ -227,7 +231,7 @@ async fn run_game_session(
     id: usize,
     host: String,
     stream: TcpStream,
-    mut me: Character,
+    me: Character,
     world: Arc<Mutex<World>>,
     chars: SharedChars,
 ) -> Result<()> {
@@ -239,27 +243,35 @@ async fn run_game_session(
     // tiny and we'd rather drop bytes on close than spin on send pressure.
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
+    // Stash the character behind an Arc<Mutex<>> so the combat tick task
+    // can mutate HP/fighting concurrently with this connection.
+    let my_id   = me.id;
+    let my_name = me.name.clone();
+    let my_room = me.current_room;
+    let character = Arc::new(Mutex::new(me));
+
     // Register in shared player list so others can find us.
     {
         let mut cl = chars.lock().await;
         cl.add(PlayerHandle {
-            id:           me.id,
-            name:         me.name.clone(),
-            level:        me.level,
-            current_room: me.current_room,
+            id:           my_id,
+            name:         my_name.clone(),
+            level:        character.lock().await.level,
+            current_room: my_room,
             send:         tx.clone(),
+            character:    Arc::clone(&character),
         });
         // Broadcast arrival to the start room.
         cl.broadcast_room(
-            me.current_room, Some(me.id),
-            &format!("{} has entered the world.\r\n", me.name),
+            my_room, Some(my_id),
+            &format!("{} has entered the world.\r\n", my_name),
         );
     }
 
     // Send the welcome + initial room view via the channel so it goes through
     // the same writer task as everything else.
     let _ = tx.send("\r\nWelcome to tbaMUD!  May your visit here be... Enlightening\r\n".to_string());
-    let _ = tx.send(interpreter::render_room(me.current_room, Some(me.id), &world, &chars).await);
+    let _ = tx.send(interpreter::render_room(my_room, Some(my_id), &world, &chars).await);
     let _ = tx.send("\r\n> ".to_string());
 
     // Writer task: drains the channel to the socket. Exits when the channel
@@ -280,7 +292,7 @@ async fn run_game_session(
     'outer: loop {
         let n = match read_half.read(&mut read_tmp).await {
             Ok(0) => {
-                info!(id, host = %host, name = %me.name, "EOF in game loop");
+                info!(id, host = %host, name = %my_name, "EOF in game loop");
                 break;
             }
             Ok(n) => n,
@@ -323,8 +335,11 @@ async fn run_game_session(
                 let _ = tx.send("> ".to_string());
                 continue;
             }
-            debug!(id, name = %me.name, cmd = %line, "command");
-            let out = interpreter::dispatch_command(line, &mut me, &world, &chars).await;
+            debug!(id, name = %my_name, cmd = %line, "command");
+            let out = {
+                let mut me = character.lock().await;
+                interpreter::dispatch_command(line, &mut me, &world, &chars).await
+            };
             if !out.text.is_empty() {
                 let _ = tx.send(out.text);
             }
@@ -338,20 +353,20 @@ async fn run_game_session(
 
     // Tear down: remove from registry, broadcast departure, drop sender so
     // the writer task exits naturally.
-    let from_room = me.current_room;
+    let from_room = character.lock().await.current_room;
     {
         let mut cl = chars.lock().await;
-        cl.remove(me.id);
+        cl.remove(my_id);
         let verb = if quit { "leaves" } else { "vanishes into thin air" };
         cl.broadcast_room(
             from_room, None,
-            &format!("{} {}.\r\n", me.name, verb),
+            &format!("{} {}.\r\n", my_name, verb),
         );
     }
 
     drop(tx);
     let _ = writer.await;
 
-    info!(id, name = %me.name, "session ended");
+    info!(id, name = %my_name, "session ended");
     Ok(())
 }

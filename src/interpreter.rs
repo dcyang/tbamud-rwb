@@ -14,8 +14,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use rand::seq::SliceRandom;
+
 use crate::{
-    character::{Character, CharacterList, SharedChars},
+    character::{Character, CharacterList, SharedChars, Target},
     world::{Direction, ObjVnum, RoomVnum, World},
 };
 
@@ -29,10 +31,11 @@ const COMMANDS: &[&str] = &[
     // Movement — short aliases first so "n" matches "north" not "news".
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
-    "look", "inventory", "get", "drop", "say", "tell", "who",
+    "look", "inventory", "kill", "flee",
+    "get", "drop", "say", "tell", "who",
     "score", "equipment", "save", "help",
     // Single-letter aliases not handled by prefix
-    "exits", "quit",
+    "exits", "quit", "hit",
 ];
 
 /// Resolve a typed verb to a canonical command name via prefix match.
@@ -97,9 +100,11 @@ pub async fn dispatch_command(
         Some("tell")      => do_tell(rest, me, chars).await,
         Some("who")       => do_who(me, chars).await,
         Some("score")     => do_score(me),
+        Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
+        Some("flee")      => do_flee(me, world, chars).await,
         Some("equipment") => CmdOutput::text("\r\nYou are not wearing anything yet.\r\n"),
         Some("save")      => CmdOutput::text("\r\nSave is not yet implemented.\r\n"),
-        Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
+        Some("help")      => CmdOutput::text("\r\nAvailable: look, get, drop, inv, kill, flee, say, tell, who, score, save, quit, n/e/s/w/u/d.\r\n"),
         Some("exits")     => do_exits(me, world).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
@@ -368,10 +373,128 @@ async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
 
 fn do_score(me: &Character) -> CmdOutput {
     let s = format!(
-        "\r\nName:  {}\r\nLevel: {}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\n",
-        me.name, me.level, me.class, me.sex, me.gold, me.current_room,
+        "\r\nName:  {}\r\nLevel: {}\r\nHP:    {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\n",
+        me.name, me.level, me.hp, me.max_hp, me.class, me.sex, me.gold, me.current_room,
     );
     CmdOutput::text(s)
+}
+
+async fn do_kill(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nKill whom?\r\n");
+    }
+    if me.fighting.is_some() {
+        return CmdOutput::text("\r\nYou are already fighting!\r\n");
+    }
+    let key = arg.to_ascii_lowercase();
+    let mut w = world.lock().await;
+
+    // Find a mob in the current room whose proto.name keyword matches.
+    let mob_id = {
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
+        };
+        let mut found: Option<u32> = None;
+        for &mid in &r.mobs {
+            if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
+                if let Some(mp) = w.mob_protos.get(&m.vnum) {
+                    if mp.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                        found = Some(mid);
+                        break;
+                    }
+                }
+            }
+        }
+        match found {
+            Some(id) => id,
+            None => return CmdOutput::text(format!("\r\nYou see no {key} here to attack.\r\n")),
+        }
+    };
+
+    let mob_name = w.mob_instances.iter()
+        .find(|m| m.id == mob_id)
+        .and_then(|m| w.mob_protos.get(&m.vnum).map(|p| p.short_descr.clone()))
+        .unwrap_or_else(|| "the creature".into());
+
+    // Mutual fighting state.
+    me.fighting = Some(Target { id: mob_id, is_player: false });
+    if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+        if m.fighting.is_none() {
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+    }
+    drop(w);
+
+    let cl = chars.lock().await;
+    cl.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} attacks {mob_name}!\r\n", me.name),
+    );
+
+    CmdOutput::text(format!("\r\nYou attack {mob_name}!\r\n"))
+}
+
+async fn do_flee(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.fighting.is_none() {
+        return CmdOutput::text("\r\nYou are not fighting anyone.\r\n");
+    }
+    // Pick a random valid exit.
+    let target = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
+        };
+        let candidates: Vec<(Direction, RoomVnum)> = Direction::ALL.iter()
+            .filter_map(|d| {
+                r.exits[*d as usize].as_ref().and_then(|e| {
+                    if e.to_room != crate::world::NOWHERE && w.rooms.contains_key(&e.to_room) {
+                        Some((*d, e.to_room))
+                    } else { None }
+                })
+            })
+            .collect();
+        candidates.choose(&mut rand::thread_rng()).copied()
+    };
+
+    let Some((dir, to)) = target else {
+        return CmdOutput::text("\r\nPANIC!  You couldn't escape!\r\n");
+    };
+
+    let from = me.current_room;
+    me.current_room = to;
+    me.fighting     = None;
+    // Detach the mob's pointer too.
+    {
+        let mut w = world.lock().await;
+        for m in w.mob_instances.iter_mut() {
+            if m.fighting.map(|t| t.is_player && t.id == me.id).unwrap_or(false) {
+                m.fighting = None;
+            }
+        }
+    }
+
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, to);
+        cl.broadcast_room(from, Some(me.id),
+            &format!("{} flees {}!\r\n", me.name, dir.name()));
+        cl.broadcast_room(to,   Some(me.id),
+            &format!("{} arrives in a panicked rush.\r\n", me.name));
+    }
+
+    let view = render_room(to, Some(me.id), world, chars).await;
+    CmdOutput::text(format!("\r\nYou flee {}!\r\n{view}", dir.name()))
 }
 
 async fn do_exits(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {

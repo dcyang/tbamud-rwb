@@ -13,8 +13,18 @@ use tokio::sync::mpsc;
 
 use crate::{players::{Class, Sex}, world::RoomVnum};
 
-/// A live online player's complete state, owned by their connection task.
-/// Mob in-world state still lives in `world::MobInstance` for now.
+/// Who/what a character is fighting. Mob instance ids are positive; we use
+/// the same numeric space for player ids (they're both `u32`) — the
+/// disambiguator is `is_player`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub id:        u32,
+    pub is_player: bool,
+}
+
+/// A live online player's complete state.  Lives behind `Arc<Mutex<>>` in
+/// `PlayerHandle.character` so the combat-tick task can mutate HP and
+/// fighting state concurrently with the player's own connection.
 #[derive(Debug)]
 pub struct Character {
     pub id:           u32,
@@ -27,10 +37,28 @@ pub struct Character {
     pub inventory:    Vec<u32>,
     /// Gold pieces.
     pub gold:         i64,
+    pub hp:           i32,
+    pub max_hp:       i32,
+    /// Current opponent, if any.
+    pub fighting:     Option<Target>,
 }
 
-/// Lightweight handle in the shared online-player registry. Holds just
-/// enough to (a) display in `who`, (b) deliver a message via mpsc.
+impl Character {
+    /// Derive starting HP for a brand-new mortal. Immortals (lvl >= 34) get
+    /// a much higher pool. Mirrors very loosely what CircleMUD does in
+    /// new-character init — exact constants will come with the stat system.
+    pub fn init_hp(level: i32) -> i32 {
+        // Generous default while combat balance is still placeholder — gives
+        // a level-0 mortal enough HP to actually kill something before being
+        // pulped by Midgaard's high-level guards.
+        if level >= 34 { 1000 } else { 200 + level * 8 }
+    }
+}
+
+/// Handle in the shared online-player registry. Holds a copy of cheap
+/// identifying fields (name, level, current_room — for room broadcasts and
+/// `who` without locking the character), an mpsc sender for inbound text,
+/// and a shared handle to the full character behind a lock.
 #[derive(Debug, Clone)]
 pub struct PlayerHandle {
     pub id:           u32,
@@ -40,6 +68,8 @@ pub struct PlayerHandle {
     /// Outbound message channel — the connection's writer task receives
     /// strings from this and writes them to the socket.
     pub send:         mpsc::UnboundedSender<String>,
+    /// Full character state. Lock briefly for HP/inventory/fighting mutation.
+    pub character:    Arc<tokio::sync::Mutex<Character>>,
 }
 
 /// Registry of all currently-online players, keyed by player id (the same

@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::{
     character::CharacterList,
+    combat,
     config::Config,
     db,
     descriptor,
@@ -48,6 +49,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Shared online-player registry --------------------------------------
     let chars: Arc<Mutex<CharacterList>> =
         Arc::new(Mutex::new(CharacterList::default()));
+
+    // --- Spawn background combat tick ---------------------------------------
+    combat::spawn(Arc::clone(&world), Arc::clone(&chars));
 
     // --- Bind listening socket -----------------------------------------------
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));

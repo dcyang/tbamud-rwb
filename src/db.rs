@@ -556,11 +556,19 @@ fn reset_zone(world: &mut World, zone_vnum: i32) {
                     continue;
                 }
                 if let Some(room) = world.rooms.get_mut(&cmd.arg3) {
+                    // HP: prototype stores "hit" as a starting roll; we use
+                    // it directly as max_hp for simple mobs. Mirrors the
+                    // GET_HIT/GET_MAX_HIT initialization in db.c (the full
+                    // version is xdy+z; here we just take the constant).
+                    let proto = world.mob_protos.get(&cmd.arg1);
+                    let hp = proto.map(|p| p.hit.max(1)).unwrap_or(10);
                     let id = next_mob_id; next_mob_id += 1;
                     room.mobs.push(id);
                     world.mob_instances.push(MobInstance {
                         id, vnum: cmd.arg1, in_room: cmd.arg3,
                         inventory: Vec::new(),
+                        hp, max_hp: hp,
+                        fighting: None,
                     });
                     last_mob_id = Some(id);
                     last_cmd_ok = true;
