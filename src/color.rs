@@ -33,6 +33,22 @@ pub fn convert(s: &str) -> String {
     out
 }
 
+/// Strip every `@X` color code from `s` without rendering ANSI.
+/// `@@` collapses to a single `@`; unknown codes drop entirely
+/// (since the user opted out of color).
+pub fn strip(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut iter = s.chars().peekable();
+    while let Some(c) = iter.next() {
+        if c != '@' { out.push(c); continue; }
+        let Some(&next) = iter.peek() else { out.push('@'); break; };
+        iter.next();
+        if next == '@' { out.push('@'); }
+        // Otherwise drop both the '@' and the code letter.
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::convert;

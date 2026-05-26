@@ -107,6 +107,37 @@ pub const ROOM_PRIVATE:    u32 = 1 << 9;
 pub const ROOM_NOTRACK:    u32 = 1 << 6;
 pub const ROOM_GODROOM:    u32 = 1 << 10;
 
+/// Sector type codes (matches structs.h SECT_* macros).  Used by
+/// `Room.sector_type` and `sector_move_cost`.
+pub const SECT_INSIDE:        i32 = 0;
+pub const SECT_CITY:          i32 = 1;
+pub const SECT_FIELD:         i32 = 2;
+pub const SECT_FOREST:        i32 = 3;
+pub const SECT_HILLS:         i32 = 4;
+pub const SECT_MOUNTAIN:      i32 = 5;
+pub const SECT_WATER_SWIM:    i32 = 6;
+pub const SECT_WATER_NOSWIM:  i32 = 7;
+pub const SECT_UNDERWATER:    i32 = 8;
+pub const SECT_FLYING:        i32 = 9;
+
+/// Movement-point cost to leave a room of the given sector type.
+/// Tracks tbaMUD's `movement_loss[]` table in constants.c.  `do_move`
+/// pays the average of (cost of from-sector) + (cost of to-sector),
+/// rounded up.
+pub fn sector_move_cost(sector: i32) -> i32 {
+    match sector {
+        SECT_INSIDE   | SECT_CITY    => 1,
+        SECT_FIELD    | SECT_FOREST  => 2,
+        SECT_HILLS                   => 3,
+        SECT_MOUNTAIN                => 4,
+        SECT_WATER_SWIM
+        | SECT_WATER_NOSWIM
+        | SECT_UNDERWATER            => 4,
+        SECT_FLYING                  => 1,
+        _                            => 2,
+    }
+}
+
 /// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
 /// structs.h.  Only the ones we currently honor are listed.
 pub const EX_ISDOOR:    u32 = 1 << 0;
@@ -432,6 +463,35 @@ pub struct MobInstance {
     /// mobs.  Allowed to be stale after the affect expires — the drag
     /// path re-checks the affect before using this.
     pub charmer:   Option<u32>,
+    /// Mob spec_proc — special behavior assigned by vnum at spawn time.
+    /// See `MobSpec::for_vnum`.
+    pub spec:      Option<MobSpec>,
+}
+
+/// Mob spec procs.  Hard-coded by vnum at spawn time (mirrors
+/// CircleMUD's spec_assign.c table).  Ticked from a dedicated
+/// background task in `db::spawn_mob_spec_tick`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobSpec {
+    /// Idle utterer (the canonical "Puff" dragon at vnum 1).
+    Puff,
+    /// Eats corpses lying in its current room.
+    Fido,
+    /// Picks up small items lying in its current room.
+    Janitor,
+}
+
+impl MobSpec {
+    /// Hard-coded vnum → spec table.  Matches the stock CircleMUD
+    /// spec_assign for these canonical vnums.
+    pub fn for_vnum(vnum: MobVnum) -> Option<MobSpec> {
+        match vnum {
+            1  => Some(MobSpec::Puff),    // The dragon Puff
+            11 => Some(MobSpec::Fido),
+            12 => Some(MobSpec::Janitor),
+            _  => None,
+        }
+    }
 }
 
 impl MobInstance {
@@ -655,6 +715,7 @@ impl World {
             triggers: Vec::new(),
             affects: Vec::new(),
             charmer: None,
+            spec: MobSpec::for_vnum(vnum),
         });
         Some(id)
     }

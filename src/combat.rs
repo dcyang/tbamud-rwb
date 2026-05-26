@@ -293,14 +293,16 @@ async fn regen_tick(chars: &SharedChars) {
         // Regen — only when out of combat.
         if in_combat { continue; }
         let mut c = ph.character.lock().await;
+        let mult = c.position.regen_factor();
+        if mult == 0 { continue; }
         if c.hp < c.max_hp {
-            c.hp = (c.hp + 1 + c.level / 5).min(c.max_hp);
+            c.hp = (c.hp + (1 + c.level / 5) * mult).min(c.max_hp);
         }
         if c.mana < c.max_mana {
-            c.mana = (c.mana + 1 + c.level / 4).min(c.max_mana);
+            c.mana = (c.mana + (1 + c.level / 4) * mult).min(c.max_mana);
         }
         if c.movement < c.max_movement {
-            c.movement = (c.movement + 1 + c.level / 3).min(c.max_movement);
+            c.movement = (c.movement + (1 + c.level / 3) * mult).min(c.max_movement);
         }
     }
 }
@@ -884,7 +886,7 @@ async fn resolve_mob_attack(
     };
 
     // Apply damage to the player; check death.
-    let (player_dead, player_room, mob_short_name) = {
+    let (player_dead, player_room, mob_short_name, trigger_wimpy) = {
         let mut c = ph.character.lock().await;
         if c.current_room != m.room {
             // Player moved/fled; mob loses its target.
@@ -899,7 +901,9 @@ async fn resolve_mob_attack(
         let short = w.mob_protos.get(&m.attacker_vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "Something".into());
-        (c.hp <= 0, c.current_room, short)
+        // Wimpy auto-flee: HP > 0 but below threshold.
+        let wimpy_trigger = c.hp > 0 && c.wimpy > 0 && c.hp <= c.wimpy;
+        (c.hp <= 0, c.current_room, short, wimpy_trigger)
     };
 
     let (to_victim, to_room) = if is_spell {
@@ -921,6 +925,18 @@ async fn resolve_mob_attack(
 
     if player_dead {
         player_death(&ph, world, chars).await;
+    } else if trigger_wimpy {
+        if let Some(tx) = crate::interpreter::FORCE_CMD_TX.get() {
+            let _ = ph.send.send(format!(
+                "\r\nWimp mode: you flee head over heels.\r\n"
+            ));
+            let _ = tx.send(crate::interpreter::ForceCmdMsg {
+                player:  ph.name.clone(),
+                command: "flee".to_string(),
+                world:   Arc::clone(world),
+                chars:   Arc::clone(chars),
+            });
+        }
     }
     let _ = player_room;
 }
@@ -935,6 +951,20 @@ async fn clear_player_fighting(player_id: u32, chars: &SharedChars) {
         let mut c = h.character.lock().await;
         c.fighting = None;
     }
+}
+
+/// External entry to the `kill_mob` path — used by the immortal
+/// `slay` command.  Drops the standard kill flow including DEATH
+/// triggers, corpse spawn, and fighting-state cleanup.
+pub async fn kill_mob_immediate(
+    mob_id: u32,
+    room: crate::world::RoomVnum,
+    mob_name: &str,
+    killer_name: &str,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    kill_mob(mob_id, room, mob_name, killer_name, world, chars).await;
 }
 
 /// Remove a dead mob from the world. Spawns a corpse container in the room

@@ -253,6 +253,12 @@ pub async fn handle_connection(
                     max_mana,
                     movement,
                     max_movement,
+                    position:     p_ref.and_then(|p| crate::character::Position::parse(&p.position))
+                                    .unwrap_or(crate::character::Position::Standing),
+                    wimpy:        p_ref.map(|p| p.wimpy).unwrap_or(0),
+                    info_off:     false,
+                    shout_off:    false,
+                    color_off:    p_ref.map(|p| p.color_off).unwrap_or(false),
                     practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
@@ -281,7 +287,14 @@ pub async fn handle_connection(
                     completed_quests: p_ref.map(|p| p.completed_quests.clone()).unwrap_or_default(),
                     hunger:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.hunger).unwrap_or(24) },
                     thirst:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.thirst).unwrap_or(24) },
-                    title:            p_ref.map(|p| p.title.clone()).unwrap_or_default(),
+                    title:            {
+                        let saved = p_ref.map(|p| p.title.clone()).unwrap_or_default();
+                        if saved.is_empty() {
+                            // Seed a default title from the (class, level).
+                            let cls = p_ref.map(|p| p.class).unwrap_or(crate::players::Class::Undefined);
+                            Character::default_title_for(cls, session.level.max(1)).to_string()
+                        } else { saved }
+                    },
                     bonus_hitroll:    0,
                     bonus_damroll:    0,
                     bonus_ac:         0,
@@ -435,9 +448,16 @@ async fn run_game_session(
 
     // Writer task: drains the channel to the socket. Exits when the channel
     // closes (all senders dropped) or the socket errors.
+    let writer_ch = Arc::clone(&character);
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let rendered = crate::color::convert(&msg);
+            // Check the user's color preference; strip codes if color_off.
+            let color_off = writer_ch.lock().await.color_off;
+            let rendered = if color_off {
+                crate::color::strip(&msg)
+            } else {
+                crate::color::convert(&msg)
+            };
             if write_half.write_all(rendered.as_bytes()).await.is_err() {
                 break;
             }
@@ -530,6 +550,9 @@ async fn run_game_session(
             rec.max_mana  = me.max_mana;
             rec.movement     = me.movement;
             rec.max_movement = me.max_movement;
+            rec.position     = me.position.save_key().to_string();
+            rec.wimpy        = me.wimpy;
+            rec.color_off    = me.color_off;
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;

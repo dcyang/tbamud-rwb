@@ -363,6 +363,65 @@ pub struct Target {
     pub is_player: bool,
 }
 
+/// Body position.  CircleMUD uses an integer code (POS_DEAD=0 …
+/// POS_STANDING=8); we use a tighter enum (no separate dead/incap/stun —
+/// we represent those via `hp <= 0` and the combat extract path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Sleeping,
+    Resting,
+    Sitting,
+    Standing,
+    Fighting,
+}
+
+impl Position {
+    /// Persistence key written to the .plr file.
+    pub fn save_key(self) -> &'static str {
+        match self {
+            Position::Sleeping => "sleeping",
+            Position::Resting  => "resting",
+            Position::Sitting  => "sitting",
+            Position::Standing => "standing",
+            Position::Fighting => "standing",  // re-anchor to standing on load
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Position> {
+        match s.to_ascii_lowercase().as_str() {
+            "sleeping" | "sleep" => Some(Position::Sleeping),
+            "resting"  | "rest"  => Some(Position::Resting),
+            "sitting"  | "sit"   => Some(Position::Sitting),
+            "standing" | "stand" => Some(Position::Standing),
+            "fighting" | "fight" => Some(Position::Fighting),
+            _ => None,
+        }
+    }
+
+    /// Regen multiplier (HP/mana/movement gained per non-combat tick is
+    /// scaled by this).  Sleep is fastest, fighting blocks regen.
+    pub fn regen_factor(self) -> i32 {
+        match self {
+            Position::Sleeping => 4,
+            Position::Resting  => 2,
+            Position::Sitting  => 1,
+            Position::Standing => 1,
+            Position::Fighting => 0,
+        }
+    }
+
+    /// Short verb shown in look ("is standing here.", "is sleeping here.").
+    pub fn room_verb(self) -> &'static str {
+        match self {
+            Position::Sleeping => "is sleeping here",
+            Position::Resting  => "is resting here",
+            Position::Sitting  => "is sitting here",
+            Position::Standing => "is standing here",
+            Position::Fighting => "is here, fighting",
+        }
+    }
+}
+
 /// A live online player's complete state.  Lives behind `Arc<Mutex<>>` in
 /// `PlayerHandle.character` so the combat-tick task can mutate HP and
 /// fighting state concurrently with the player's own connection.
@@ -401,6 +460,7 @@ pub struct Character {
     pub cha:          i32,
     /// Current opponent, if any.
     pub fighting:     Option<Target>,
+    pub position:     Position,
     /// Learned skill levels — value is "practice percent" (0..=100).  Only
     /// skills the player has invested in appear here.
     pub skills:       HashMap<Skill, u8>,
@@ -496,6 +556,16 @@ pub struct Character {
     /// AFK status. `None` = present. `Some(msg)` = away with the given
     /// reason; tells to this character auto-reply with `msg`. Transient.
     pub afk_msg:      Option<String>,
+    /// Auto-flee HP threshold.  Zero disables.  When HP drops below
+    /// this value during combat, the combat tick triggers a flee.
+    pub wimpy:        i32,
+    /// Personal toggle for the info (newbie) channel.
+    pub info_off:     bool,
+    /// Personal toggle for the shout (zone) channel.
+    pub shout_off:    bool,
+    /// When true, color codes are stripped before sending to the client
+    /// (mirrors CircleMUD's COLOR_OFF preference).
+    pub color_off:    bool,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.
@@ -786,10 +856,66 @@ impl Character {
         }
     }
 
+    /// Return the canonical class title for the given (class, level).
+    /// Tracks the stock CircleMUD `class_titles[]` tables from class.c
+    /// in spirit (we collapse the long banded tables to a single
+    /// representative title per ~5-level band).
+    pub fn default_title_for(class: crate::players::Class, level: i32) -> &'static str {
+        use crate::players::Class;
+        match class {
+            Class::Warrior => match level {
+                ..=4   => "the Warrior",
+                5..=9  => "the Soldier",
+                10..=14 => "the Veteran",
+                15..=19 => "the Champion",
+                20..=24 => "the Knight",
+                25..=29 => "the Hero",
+                30..=33 => "the Lord",
+                _       => "the Immortal Warrior",
+            },
+            Class::Cleric => match level {
+                ..=4   => "the Believer",
+                5..=9  => "the Acolyte",
+                10..=14 => "the Priest",
+                15..=19 => "the Cardinal",
+                20..=24 => "the Bishop",
+                25..=29 => "the High Priest",
+                30..=33 => "the Patriarch",
+                _       => "the Immortal Cleric",
+            },
+            Class::Thief => match level {
+                ..=4   => "the Pickpocket",
+                5..=9  => "the Rogue",
+                10..=14 => "the Burglar",
+                15..=19 => "the Cutpurse",
+                20..=24 => "the Shadow",
+                25..=29 => "the Assassin",
+                30..=33 => "the Master Thief",
+                _       => "the Immortal Thief",
+            },
+            Class::MagicUser => match level {
+                ..=4   => "the Apprentice of Magic",
+                5..=9  => "the Spell Student",
+                10..=14 => "the Scholar of Magic",
+                15..=19 => "the Mage",
+                20..=24 => "the Sorcerer",
+                25..=29 => "the Conjurer",
+                30..=33 => "the Arch-Mage",
+                _       => "the Immortal Mage",
+            },
+            Class::Undefined => "the Adventurer",
+        }
+    }
+
     /// Apply level-up effects if the character has enough XP. Returns the
     /// number of levels gained (0 if none).
     pub fn check_level_up(&mut self) -> i32 {
         let mut gained = 0;
+        // Snapshot the class's current default title so we can detect
+        // whether the user is still on the auto-title (and update) vs.
+        // a custom title (which we never overwrite).
+        let prev_default = Self::default_title_for(self.class, self.level);
+        let title_is_auto = self.title.is_empty() || self.title == prev_default;
         while self.level < Self::MAX_MORTAL_LEVEL
             && self.exp >= Self::exp_for_level(self.level)
         {
@@ -810,6 +936,11 @@ impl Character {
             // Practice points.
             self.practices += Self::PRACTICES_PER_LEVEL;
             gained += 1;
+        }
+        // Re-apply the auto-title at the new level (only when the user
+        // was on an auto-title; custom titles are preserved).
+        if gained > 0 && title_is_auto {
+            self.title = Self::default_title_for(self.class, self.level).to_string();
         }
         gained
     }

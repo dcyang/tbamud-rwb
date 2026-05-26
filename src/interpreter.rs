@@ -72,6 +72,9 @@ const COMMANDS: &[&str] = &[
     "examine",
     "list", "buy", "sell",
     "kick", "bash", "backstab", "rescue",
+    "sleep", "rest", "sit", "stand", "wake",
+    "wimpy",
+    "info", "newbie", "shout", "color",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -91,7 +94,7 @@ const COMMANDS: &[&str] = &[
     "invis", "vis", "mute", "freeze",
     "ban", "unban", "bans",
     "wiznet",
-    "load", "restore", "echo", "gecho",
+    "load", "restore", "echo", "gecho", "slay",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -218,6 +221,15 @@ pub async fn dispatch_command(
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
+        Some("sleep")     => do_position(me, chars, crate::character::Position::Sleeping).await,
+        Some("rest")      => do_position(me, chars, crate::character::Position::Resting).await,
+        Some("sit")       => do_position(me, chars, crate::character::Position::Sitting).await,
+        Some("stand")     => do_position(me, chars, crate::character::Position::Standing).await,
+        Some("wake")      => do_wake(me, chars).await,
+        Some("wimpy")     => do_wimpy(rest, me),
+        Some("info") | Some("newbie") => do_info(rest, me, chars).await,
+        Some("shout")     => do_shout(rest, me, world, chars).await,
+        Some("color")     => do_color(rest, me),
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -313,6 +325,7 @@ pub async fn dispatch_command(
         Some("restore")   => do_restore(rest, me, chars).await,
         Some("echo")      => do_echo(rest, me, chars).await,
         Some("gecho")     => do_gecho(rest, me, chars).await,
+        Some("slay")      => do_slay(rest, me, world, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -353,6 +366,34 @@ async fn do_look(
 ) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text(render_room(me.current_room, Some(me.id), world, chars).await);
+    }
+    // look <direction>: peek into the adjacent room.
+    if let Some(dir) = Direction::parse(arg) {
+        let (target, closed, hidden_only) = {
+            let w = world.lock().await;
+            match w.rooms.get(&me.current_room)
+                .and_then(|r| r.exits[dir as usize].as_ref())
+            {
+                Some(e) if e.to_room != crate::world::NOWHERE
+                    && w.rooms.contains_key(&e.to_room) =>
+                {
+                    let closed = (e.exit_info & crate::world::EX_CLOSED) != 0;
+                    let hidden = (e.exit_info & crate::world::EX_HIDDEN) != 0;
+                    (Some(e.to_room), closed, hidden && me.level < LVL_IMMORT)
+                }
+                _ => (None, false, false),
+            }
+        };
+        let Some(t) = target else {
+            return CmdOutput::text("\r\nYou see nothing in that direction.\r\n".to_string());
+        };
+        if hidden_only {
+            return CmdOutput::text("\r\nYou see nothing in that direction.\r\n".to_string());
+        }
+        if closed {
+            return CmdOutput::text("\r\nThat way is closed.\r\n".to_string());
+        }
+        return CmdOutput::text(render_room(t, Some(me.id), world, chars).await);
     }
     // look <keyword>: search obj in inventory, then obj in room, then extras
     let w = world.lock().await;
@@ -2665,6 +2706,54 @@ async fn do_gecho(
     CmdOutput::text(String::new())
 }
 
+/// `slay <target>` — immortal one-shot kill.  Targets a mob in the
+/// caller's room by keyword.  PvP slay is intentionally not supported
+/// (use `force <player> quit` for that effect instead).
+async fn do_slay(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nSlay whom?\r\n".to_string());
+    }
+    let (mob_id, mob_short) = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+        };
+        let hit = r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let proto = w.mob_protos.get(&m.vnum)?;
+            if proto.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+                Some((mid, proto.short_descr.clone()))
+            } else { None }
+        });
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(
+                "\r\nNo such creature here.\r\n".to_string()
+            ),
+        }
+    };
+    chars.lock().await.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!(
+            "A bolt of holy fury smites {mob_short} dead by {}'s will!\r\n",
+            me.name,
+        ),
+    );
+    // Route through the standard kill path so corpse/triggers/XP fire.
+    crate::combat::kill_mob_immediate(
+        mob_id, me.current_room, &mob_short, &me.name, world, chars,
+    ).await;
+    CmdOutput::text(format!("\r\nYou slay {mob_short}.\r\n"))
+}
+
 /// Broadcast a wiznet line to every online immortal whose `wiznet_off`
 /// is false.  `msg` should be the bare body — this helper wraps it in
 /// the magenta `[wiznet] ...` envelope and CRLF.  Used by `do_wiznet`
@@ -3781,6 +3870,13 @@ async fn do_kill(
     if me.fighting.is_some() {
         return CmdOutput::text("\r\nYou are already fighting!\r\n");
     }
+    match me.position {
+        crate::character::Position::Standing => {}
+        crate::character::Position::Sleeping =>
+            return CmdOutput::text("\r\nYou can't attack while sleeping!\r\n".to_string()),
+        _ =>
+            return CmdOutput::text("\r\nYou need to stand up to attack.\r\n".to_string()),
+    }
     me.reveal();
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
@@ -3878,6 +3974,207 @@ async fn do_kill(
     );
 
     CmdOutput::text(format!("\r\nYou attack {mob_name}!\r\n"))
+}
+
+// ---------------------------------------------------------------------------
+// Body position commands
+// ---------------------------------------------------------------------------
+
+use crate::character::Position;
+
+/// `sleep` / `rest` / `sit` / `stand` — change body position.  No-op
+/// when the requested position matches the current one.  Refused
+/// while fighting (combat locks you into Fighting/Standing-ish state).
+async fn do_position(
+    me: &mut Character,
+    chars: &SharedChars,
+    target: Position,
+) -> CmdOutput {
+    if me.fighting.is_some() {
+        return CmdOutput::text(
+            "\r\nYou're too busy fighting to change position!\r\n".to_string()
+        );
+    }
+    if me.position == target {
+        let already = match target {
+            Position::Sleeping => "You are already sound asleep.",
+            Position::Resting  => "You are already resting.",
+            Position::Sitting  => "You are already sitting.",
+            Position::Standing => "You are already standing.",
+            Position::Fighting => "You are already fighting.",
+        };
+        return CmdOutput::text(format!("\r\n{already}\r\n"));
+    }
+    me.position = target;
+    let (self_line, room_line) = match target {
+        Position::Sleeping =>
+            ("You go to sleep.", format!("{} lies down and goes to sleep.", me.name)),
+        Position::Resting =>
+            ("You sit down and rest your tired bones.",
+             format!("{} sits down and rests.", me.name)),
+        Position::Sitting =>
+            ("You sit down.", format!("{} sits down.", me.name)),
+        Position::Standing =>
+            ("You stand up.", format!("{} stands up.", me.name)),
+        Position::Fighting =>
+            ("You ready yourself for battle.",
+             format!("{} readies for battle.", me.name)),
+    };
+    chars.lock().await.broadcast_room(
+        me.current_room, Some(me.id), &format!("{room_line}\r\n"),
+    );
+    CmdOutput::text(format!("\r\n{self_line}\r\n"))
+}
+
+/// `wimpy [hp]` — set auto-flee HP threshold.  No arg shows current
+/// state; `wimpy 0` (or `off`) disables.  Threshold is clamped to half
+/// of max_hp so the player can't accidentally configure perpetual flight.
+fn do_wimpy(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text(if me.wimpy <= 0 {
+            "\r\nYour wimpy threshold is OFF.\r\n".to_string()
+        } else {
+            format!("\r\nYou will flee combat below {} HP.\r\n", me.wimpy)
+        });
+    }
+    if arg.eq_ignore_ascii_case("off") {
+        me.wimpy = 0;
+        return CmdOutput::text("\r\nWimpy is now OFF.\r\n".to_string());
+    }
+    let Ok(v) = arg.parse::<i32>() else {
+        return CmdOutput::text("\r\nUsage: wimpy <hp> | off\r\n".to_string());
+    };
+    let v = v.max(0).min((me.max_hp / 2).max(1));
+    me.wimpy = v;
+    if v == 0 {
+        CmdOutput::text("\r\nWimpy is now OFF.\r\n".to_string())
+    } else {
+        CmdOutput::text(format!("\r\nYou will flee combat below {v} HP.\r\n"))
+    }
+}
+
+/// `info <msg>` — newbie help channel.  Empty arg toggles the
+/// sender's personal `info_off`.  Refused in SOUNDPROOF rooms (same
+/// pattern as gossip).  Rendered in green.
+async fn do_info(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.muted { return muted_msg(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.info_off = !me.info_off;
+        return CmdOutput::text(format!(
+            "\r\nInfo channel: {}.\r\n",
+            if me.info_off { "off" } else { "on" },
+        ));
+    }
+    if me.info_off {
+        return CmdOutput::text(
+            "\r\nYou have the info channel turned off.\r\n".to_string()
+        );
+    }
+    let formatted = format!("\r\n@g[info] {} asks: '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let off = ph.character.lock().await.info_off;
+        if off { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    CmdOutput::text(format!("\r\n@g[info] You ask: '{msg}'@n\r\n"))
+}
+
+/// `shout <msg>` — broadcasts to every player in the sender's current
+/// *zone*.  Empty arg toggles `shout_off`.  Refused in SOUNDPROOF.
+async fn do_shout(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.muted { return muted_msg(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.shout_off = !me.shout_off;
+        return CmdOutput::text(format!(
+            "\r\nShout channel: {}.\r\n",
+            if me.shout_off { "off" } else { "on" },
+        ));
+    }
+    if me.shout_off {
+        return CmdOutput::text(
+            "\r\nYou have the shout channel turned off.\r\n".to_string()
+        );
+    }
+    // Snapshot the sender's zone, and the per-room→zone map under one lock.
+    let (my_zone, room_zone): (i32, std::collections::HashMap<i32, i32>) = {
+        let w = world.lock().await;
+        if w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_SOUNDPROOF != 0)
+            .unwrap_or(false)
+        {
+            return CmdOutput::text(
+                "\r\nThe walls dampen your voice — no one outside can hear you.\r\n".to_string()
+            );
+        }
+        let z = w.rooms.get(&me.current_room).map(|r| r.zone).unwrap_or(-1);
+        let m = w.rooms.iter().map(|(v, r)| (*v, r.zone)).collect();
+        (z, m)
+    };
+    let formatted = format!("\r\n@Y{} shouts, '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        if room_zone.get(&ph.current_room).copied() != Some(my_zone) { continue; }
+        let off = ph.character.lock().await.shout_off;
+        if off { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    CmdOutput::text(format!("\r\n@YYou shout, '{msg}'@n\r\n"))
+}
+
+/// `color [on|off]` — toggle ANSI color rendering.  Empty arg shows
+/// state.  Persisted as `ClOf: 1` in the player file when off.
+fn do_color(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim().to_ascii_lowercase();
+    match arg.as_str() {
+        "" => CmdOutput::text(format!(
+            "\r\nColor is currently {}.\r\n",
+            if me.color_off { "OFF" } else { "ON" },
+        )),
+        "off" | "0" | "none" => {
+            me.color_off = true;
+            CmdOutput::text("\r\nColor is now OFF.\r\n".to_string())
+        }
+        "on" | "1" | "normal" => {
+            me.color_off = false;
+            CmdOutput::text("\r\nColor is now ON.\r\n".to_string())
+        }
+        _ => CmdOutput::text("\r\nUsage: color [on|off]\r\n".to_string()),
+    }
+}
+
+/// `wake` — go from Sleeping to Resting (the typical "wake from a
+/// nap" transition).  No-op otherwise.
+async fn do_wake(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    if me.position != Position::Sleeping {
+        return CmdOutput::text("\r\nYou are already awake.\r\n".to_string());
+    }
+    me.position = Position::Resting;
+    chars.lock().await.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} wakes up.\r\n", me.name),
+    );
+    CmdOutput::text("\r\nYou wake up.\r\n".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -4204,6 +4501,15 @@ async fn do_cast(
 ) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nCast which spell? Try `cast magic-missile fido` or `cast cure-light`.\r\n");
+    }
+    // Position gate.  Spellcasters can stand or fight, but not sleep/sit/rest.
+    match me.position {
+        crate::character::Position::Standing
+        | crate::character::Position::Fighting => {}
+        crate::character::Position::Sleeping =>
+            return CmdOutput::text("\r\nYou dream of casting spells.\r\n".to_string()),
+        _ =>
+            return CmdOutput::text("\r\nYou need to stand to focus on a spell.\r\n".to_string()),
     }
     // ROOM_NOMAGIC: refuse before any class/learned check so the spell
     // name isn't even resolved.
@@ -7483,6 +7789,9 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.max_mana  = me.max_mana;
             r.movement     = me.movement;
             r.max_movement = me.max_movement;
+            r.position     = me.position.save_key().to_string();
+            r.wimpy        = me.wimpy;
+            r.color_off    = me.color_off;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
@@ -7632,15 +7941,18 @@ async fn do_move(
         Some(r) => r,
         None    => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
     };
-    let (target, closed, door_kw, target_flags) = match &r.exits[dir as usize] {
+    let from_sector = r.sector_type;
+    let (target, closed, door_kw, target_flags, target_sector) = match &r.exits[dir as usize] {
         Some(e) if e.to_room != crate::world::NOWHERE
             && w.rooms.contains_key(&e.to_room) =>
         {
             let closed = (e.exit_info & crate::world::EX_CLOSED) != 0;
             let kw = if e.keyword.is_empty() { "door".to_string() }
                      else { e.keyword.split_whitespace().next().unwrap_or("door").to_string() };
-            let flags = w.rooms.get(&e.to_room).map(|r| r.room_flags[0]).unwrap_or(0);
-            (e.to_room, closed, kw, flags)
+            let dest = w.rooms.get(&e.to_room);
+            let flags = dest.map(|r| r.room_flags[0]).unwrap_or(0);
+            let sect  = dest.map(|r| r.sector_type).unwrap_or(0);
+            (e.to_room, closed, kw, flags, sect)
         }
         _ => return CmdOutput::text(format!("\r\nAlas, you cannot go that way...\r\n")),
     };
@@ -7648,15 +7960,28 @@ async fn do_move(
     if closed {
         return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
     }
-    // Movement-point gate.  Mortals pay 1 movement per step; immortals
-    // are exempt.  Refuse with a "too exhausted" message at 0.
+    // Position gate.  Must be standing to move.
+    match me.position {
+        crate::character::Position::Standing
+        | crate::character::Position::Fighting => {}
+        crate::character::Position::Sleeping =>
+            return CmdOutput::text("\r\nIn your dreams, or what?\r\n".to_string()),
+        _ =>
+            return CmdOutput::text("\r\nYou should probably stand up first.\r\n".to_string()),
+    }
+    // Movement-point gate.  Mortals pay (from_sector + to_sector) / 2
+    // movement per step (rounded up, min 1); immortals are exempt.
+    // Refuse with a "too exhausted" message at 0.
     if me.level < LVL_IMMORT {
-        if me.movement <= 0 {
+        let from_cost = crate::world::sector_move_cost(from_sector);
+        let to_cost   = crate::world::sector_move_cost(target_sector);
+        let cost = ((from_cost + to_cost + 1) / 2).max(1);
+        if me.movement < cost {
             return CmdOutput::text(
                 "\r\nYou are too exhausted.\r\n".to_string()
             );
         }
-        me.movement -= 1;
+        me.movement -= cost;
     }
     // ROOM_GODROOM: mortals can't enter.
     if (target_flags & crate::world::ROOM_GODROOM) != 0 && me.level < LVL_IMMORT {
@@ -9147,9 +9472,9 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        let (hidden, pose, invis_lvl) = {
+        let (hidden, pose, invis_lvl, position) = {
             let c = p.character.lock().await;
-            (c.hidden, c.pose.clone(), c.invis_level)
+            (c.hidden, c.pose.clone(), c.invis_level, c.position)
         };
         // Immortal invis hides them from anyone below `invis_level`.
         if invis_lvl > viewer_level { continue; }
@@ -9159,7 +9484,10 @@ pub async fn render_room(
         if !pose.is_empty() {
             s.push_str(&format!("{} {pose}{hidden_tag}{invis_tag}\r\n", p.name));
         } else {
-            s.push_str(&format!("{} is standing here.{hidden_tag}{invis_tag}\r\n", p.name));
+            s.push_str(&format!(
+                "{} {}.{hidden_tag}{invis_tag}\r\n",
+                p.name, position.room_verb(),
+            ));
         }
     }
 

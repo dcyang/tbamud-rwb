@@ -1026,6 +1026,150 @@ pub fn spawn_zone_reset_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
     });
 }
 
+/// Spawn the mob spec_proc tick — fires every PULSE seconds, walks all
+/// mobs holding a `spec`, and dispatches per-spec behavior.  Mirrors
+/// CircleMUD's mobile_activity() spec call, just simplified.
+pub fn spawn_mob_spec_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const PULSE_SECONDS: u64 = 10;
+    tokio::spawn(async move {
+        use rand::seq::SliceRandom;
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(PULSE_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        // Idle utterance pool for Puff.
+        const PUFF_PHRASES: &[&str] = &[
+            "My god!  It's full of stars!",
+            "How'd all those fish get up here?",
+            "I'm so very tired.",
+            "I wish star trek was real.",
+        ];
+        loop {
+            interval.tick().await;
+
+            // Phase A: snapshot all mobs with a spec — id, vnum, room,
+            // spec, short_descr — under one world lock.
+            let mut acts: Vec<(u32, crate::world::RoomVnum, crate::world::MobSpec, String)> = Vec::new();
+            {
+                let w = world.lock().await;
+                for m in &w.mob_instances {
+                    if let Some(spec) = m.spec {
+                        let short = w.mob_protos.get(&m.vnum)
+                            .map(|p| p.short_descr.clone())
+                            .unwrap_or_default();
+                        acts.push((m.id, m.in_room, spec, short));
+                    }
+                }
+            }
+            if acts.is_empty() { continue; }
+
+            // Phase B: per-spec dispatch.
+            for (mob_id, room, spec, short) in acts {
+                match spec {
+                    crate::world::MobSpec::Puff => {
+                        // 30% chance per tick to utter a random phrase.
+                        let say = {
+                            use rand::Rng;
+                            let mut rng = rand::thread_rng();
+                            if rng.gen_range(1..=100) <= 30 {
+                                PUFF_PHRASES.choose(&mut rng).copied()
+                            } else { None }
+                        };
+                        if let Some(phrase) = say {
+                            chars.lock().await.broadcast_room(
+                                room, None,
+                                &format!("{short} says, '{phrase}'\r\n"),
+                            );
+                        }
+                    }
+                    crate::world::MobSpec::Fido => {
+                        // Find a corpse in the room and eat it.
+                        let corpse_iid = {
+                            let w = world.lock().await;
+                            w.rooms.get(&room)
+                                .and_then(|r| r.objects.iter()
+                                    .find(|&&iid| {
+                                        w.obj_instances.iter()
+                                            .find(|o| o.id == iid)
+                                            .map(|o| o.corpse_of.is_some())
+                                            .unwrap_or(false)
+                                    })
+                                    .copied())
+                        };
+                        if let Some(iid) = corpse_iid {
+                            let label = {
+                                let w = world.lock().await;
+                                w.obj_instances.iter()
+                                    .find(|o| o.id == iid)
+                                    .and_then(|o| o.corpse_of.clone())
+                                    .unwrap_or_else(|| "a corpse".to_string())
+                            };
+                            chars.lock().await.broadcast_room(
+                                room, None,
+                                &format!("{short} savagely devours {label}.\r\n"),
+                            );
+                            // Extract the corpse and any contents.
+                            let mut w = world.lock().await;
+                            w.extract_obj(iid);
+                        }
+                    }
+                    crate::world::MobSpec::Janitor => {
+                        // Pick up the first non-corpse floor object whose
+                        // weight ≤ 5 (CircleMUD's threshold) — but we don't
+                        // track weight per-instance, so use the proto.
+                        let pickup = {
+                            let w = world.lock().await;
+                            w.rooms.get(&room).and_then(|r| {
+                                r.objects.iter().find(|&&iid| {
+                                    let o = match w.obj_instances.iter().find(|x| x.id == iid) {
+                                        Some(o) => o, None => return false,
+                                    };
+                                    if o.corpse_of.is_some() { return false; }
+                                    w.obj_protos.get(&o.vnum)
+                                        .map(|p| p.weight <= 5)
+                                        .unwrap_or(false)
+                                }).copied()
+                            })
+                        };
+                        if let Some(iid) = pickup {
+                            let label = {
+                                let w = world.lock().await;
+                                w.obj_instances.iter()
+                                    .find(|o| o.id == iid)
+                                    .and_then(|o| w.obj_protos.get(&o.vnum)
+                                        .map(|p| p.short_description.clone()))
+                                    .unwrap_or_else(|| "something".to_string())
+                            };
+                            {
+                                let mut w = world.lock().await;
+                                if let Some(r) = w.rooms.get_mut(&room) {
+                                    r.objects.retain(|&i| i != iid);
+                                }
+                                if let Some(o) = w.obj_instances.iter_mut().find(|x| x.id == iid) {
+                                    o.in_room = crate::world::NOWHERE;
+                                }
+                                if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                                    m.inventory.push(iid);
+                                }
+                            }
+                            chars.lock().await.broadcast_room(
+                                room, None,
+                                &format!("{short} picks up {label}.\r\n"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Index file reader: returns Vec<String> of filenames listed in `<dir>/index`
 // (terminated by a line containing only "$"). Mirrors index_boot() in db.c.
@@ -1536,6 +1680,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         triggers: Vec::new(),
                         affects: Vec::new(),
                         charmer: None,
+                        spec: crate::world::MobSpec::for_vnum(cmd.arg1),
                     });
                     last_mob_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);

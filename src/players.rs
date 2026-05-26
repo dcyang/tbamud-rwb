@@ -119,6 +119,13 @@ pub struct PlayerRecord {
     pub max_mana:      i32,
     pub movement:      i32,
     pub max_movement:  i32,
+    /// Position name (one of "sleeping"/"resting"/"sitting"/"standing").
+    /// Empty means "default" — login should use Standing.
+    pub position:      String,
+    /// Auto-flee HP threshold; 0 disables.
+    pub wimpy:         i32,
+    /// Persistent color-off preference (strip ANSI codes on output).
+    pub color_off:     bool,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -332,6 +339,9 @@ impl PlayerDb {
                     if let Some(p) = parts.next() { rec.movement     = p.trim().parse().unwrap_or(0); }
                     if let Some(p) = parts.next() { rec.max_movement = p.trim().parse().unwrap_or(0); }
                 }
+                "Pos"  => rec.position = val.trim().to_string(),
+                "Wmpy" => rec.wimpy    = val.parse().unwrap_or(0),
+                "ClOf" => rec.color_off = val.parse::<i32>().unwrap_or(0) != 0,
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -431,6 +441,15 @@ impl PlayerDb {
         }
         if rec.max_movement > 0 {
             writeln!(f, "Move: {}/{}", rec.movement, rec.max_movement)?;
+        }
+        if !rec.position.is_empty() && rec.position != "standing" {
+            writeln!(f, "Pos : {}", rec.position)?;
+        }
+        if rec.wimpy > 0 {
+            writeln!(f, "Wmpy: {}", rec.wimpy)?;
+        }
+        if rec.color_off {
+            writeln!(f, "ClOf: 1")?;
         }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
