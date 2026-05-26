@@ -396,6 +396,9 @@ pub struct Character {
     /// followers in/out; ungrouped followers tag along on movement but
     /// don't share XP and don't see `gtell`.
     pub grouped:      bool,
+    /// Personal toggle: if true, this character will neither send nor
+    /// receive `gossip` channel traffic.  Not persisted across sessions.
+    pub gossip_off:   bool,
 }
 
 impl Character {

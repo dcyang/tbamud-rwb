@@ -69,7 +69,7 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
-    "follow", "group", "gtell", "title",
+    "follow", "group", "gtell", "title", "gossip", "chat",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -184,6 +184,7 @@ pub async fn dispatch_command(
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("title")     => do_title(rest, me),
+        Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -766,6 +767,53 @@ async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     }
     let _ = delivered;
     CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
+}
+
+/// `gossip <msg>` — global chat channel.  Empty arg toggles the
+/// sender's personal `gossip_off` state (mutes both incoming and
+/// outgoing).  Refused when the sender's room has ROOM_SOUNDPROOF.
+/// Receivers with their own `gossip_off` set are skipped.
+async fn do_gossip(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.gossip_off = !me.gossip_off;
+        return CmdOutput::text(format!(
+            "\r\nGossip channel: {}.\r\n",
+            if me.gossip_off { "off" } else { "on" },
+        ));
+    }
+    if me.gossip_off {
+        return CmdOutput::text("\r\nYou have the gossip channel turned off.\r\n".to_string());
+    }
+    // Soundproof room: refuse.
+    {
+        let w = world.lock().await;
+        if w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_SOUNDPROOF != 0)
+            .unwrap_or(false)
+        {
+            return CmdOutput::text(
+                "\r\nThe walls dampen your voice — no one outside can hear you.\r\n".to_string()
+            );
+        }
+    }
+    let formatted = format!("\r\n@c{} gossips: '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let off = ph.character.lock().await.gossip_off;
+        if off { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    CmdOutput::text(format!("\r\n@cYou gossip, '{msg}'@n\r\n"))
 }
 
 // ---------------------------------------------------------------------------

@@ -97,13 +97,14 @@ pub struct Exit {
 /// ROOM_* bit positions inside `Room.room_flags[0]`.  Mirror the
 /// same-named macros in structs.h. Only the ones we currently honor are
 /// listed.
-pub const ROOM_DEATH:    u32 = 1 << 1;
-pub const ROOM_NOMOB:    u32 = 1 << 2;
-pub const ROOM_PEACEFUL: u32 = 1 << 4;
-pub const ROOM_NOMAGIC:  u32 = 1 << 7;
-pub const ROOM_TUNNEL:   u32 = 1 << 8;
-pub const ROOM_PRIVATE:  u32 = 1 << 9;
-pub const ROOM_GODROOM:  u32 = 1 << 10;
+pub const ROOM_DEATH:      u32 = 1 << 1;
+pub const ROOM_NOMOB:      u32 = 1 << 2;
+pub const ROOM_PEACEFUL:   u32 = 1 << 4;
+pub const ROOM_SOUNDPROOF: u32 = 1 << 5;
+pub const ROOM_NOMAGIC:    u32 = 1 << 7;
+pub const ROOM_TUNNEL:     u32 = 1 << 8;
+pub const ROOM_PRIVATE:    u32 = 1 << 9;
+pub const ROOM_GODROOM:    u32 = 1 << 10;
 
 /// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
 /// structs.h.  Only the ones we currently honor are listed.

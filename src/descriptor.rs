@@ -265,6 +265,7 @@ pub async fn handle_connection(
                     bonus_ac:         0,
                     following:        None,
                     grouped:          false,
+                    gossip_off:       false,
                 };
 
                 // Settle any pending level-ups (e.g. character was offline
