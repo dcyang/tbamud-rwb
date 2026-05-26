@@ -148,6 +148,8 @@ pub struct PlayerRecord {
     pub prompt_format: String,
     /// Per-character command aliases (first-word expansion).
     pub aliases:       std::collections::HashMap<String, String>,
+    /// Personal note pad.
+    pub notes:         Vec<String>,
 }
 
 impl PlayerRecord {
@@ -361,6 +363,7 @@ impl PlayerDb {
                         rec.aliases.insert(name.to_string(), exp.trim().to_string());
                     }
                 }
+                "Note" => rec.notes.push(val.to_string()),
                 _ => {}
             }
         }
@@ -443,6 +446,9 @@ impl PlayerDb {
         anames.sort();
         for name in anames {
             writeln!(f, "Alis: {name} {}", rec.aliases[name])?;
+        }
+        for note in &rec.notes {
+            writeln!(f, "Note: {note}")?;
         }
 
         Ok(())

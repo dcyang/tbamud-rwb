@@ -436,6 +436,9 @@ pub struct Character {
     /// dispatcher swaps the first whitespace token for the expansion
     /// before the verb resolution.  Persisted.
     pub aliases:      HashMap<String, String>,
+    /// Personal notes (free-form strings).  Capped at 50 entries, each
+    /// 200 chars max.  Persisted as one `Note: ...` line per entry.
+    pub notes:        Vec<String>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

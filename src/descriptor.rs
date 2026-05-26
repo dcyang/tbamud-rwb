@@ -273,6 +273,7 @@ pub async fn handle_connection(
                     last_tell_from:   None,
                     prompt_format:    p_ref.map(|p| p.prompt_format.clone()).unwrap_or_default(),
                     aliases:          p_ref.map(|p| p.aliases.clone()).unwrap_or_default(),
+                    notes:            p_ref.map(|p| p.notes.clone()).unwrap_or_default(),
                     last_activity:    std::time::Instant::now(),
                 };
 
@@ -515,6 +516,7 @@ async fn run_game_session(
             rec.bank_gold       = me.bank_gold;
             rec.prompt_format   = me.prompt_format.clone();
             rec.aliases         = me.aliases.clone();
+            rec.notes           = me.notes.clone();
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }

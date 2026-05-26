@@ -79,7 +79,8 @@ const COMMANDS: &[&str] = &[
     "follow", "group", "gtell", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
-    "commands", "scan", "track", "mail",
+    "commands", "scan", "track", "mail", "spells", "recall",
+    "emote", "socials", "note", "notes",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -225,6 +226,12 @@ pub async fn dispatch_command(
         Some("scan")      => do_scan(rest, me, world, chars).await,
         Some("track")     => do_track(rest, me, world, chars).await,
         Some("mail")      => do_mail(rest, me, chars, players).await,
+        Some("spells")    => do_spells(me),
+        Some("recall")    => do_cast("'word of recall'", me, world, chars).await,
+        Some("emote")     => do_emote(rest, me, chars).await,
+        Some("socials")   => do_socials_list(world).await,
+        Some("note")      => do_note(rest, me),
+        Some("notes")     => do_notes(me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -956,6 +963,80 @@ async fn do_scan(
                 s.push_str(&format!("      {m}\r\n"));
             }
         }
+    }
+    CmdOutput::text(s)
+}
+
+/// `notes` lists current notes numbered 1..N.  Empty notepad shows
+/// "You have no notes yet."
+fn do_notes(me: &Character) -> CmdOutput {
+    if me.notes.is_empty() {
+        return CmdOutput::text("\r\nYou have no notes yet.\r\n".to_string());
+    }
+    let mut s = format!("\r\nYour notes ({}):\r\n", me.notes.len());
+    for (i, n) in me.notes.iter().enumerate() {
+        s.push_str(&format!("  [{}] {n}\r\n", i + 1));
+    }
+    CmdOutput::text(s)
+}
+
+/// `note <text>` appends a note (200-char cap, 50-note cap).
+/// `note del &lt;N&gt;` removes the 1-based N-th note.
+fn do_note(arg: &str, me: &mut Character) -> CmdOutput {
+    const MAX_NOTES: usize  = 50;
+    const MAX_LEN:   usize  = 200;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return do_notes(me);
+    }
+    let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
+    if parts[0].eq_ignore_ascii_case("del") || parts[0].eq_ignore_ascii_case("delete") {
+        let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) else {
+            return CmdOutput::text("\r\nUsage: note del <N>\r\n".to_string());
+        };
+        let Some(i) = n.checked_sub(1) else {
+            return CmdOutput::text("\r\nBad index.\r\n".to_string());
+        };
+        if i >= me.notes.len() {
+            return CmdOutput::text(format!("\r\nNo note #{n}.\r\n"));
+        }
+        me.notes.remove(i);
+        return CmdOutput::text(format!("\r\nDeleted note #{n}.\r\n"));
+    }
+    if me.notes.len() >= MAX_NOTES {
+        return CmdOutput::text(format!(
+            "\r\nYou already have {MAX_NOTES} notes — delete some first.\r\n"
+        ));
+    }
+    let body: String = arg.chars().filter(|c| !c.is_control()).take(MAX_LEN).collect();
+    me.notes.push(body);
+    CmdOutput::text(format!("\r\nNote #{} saved.\r\n", me.notes.len()))
+}
+
+async fn do_emote(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    let text = arg.trim();
+    if text.is_empty() {
+        return CmdOutput::text("\r\nEmote what?\r\n".to_string());
+    }
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} {text}\r\n", me.name));
+    CmdOutput::text(format!("\r\nYou {text}\r\n"))
+}
+
+async fn do_socials_list(world: &Arc<Mutex<World>>) -> CmdOutput {
+    let mut names: Vec<String> = {
+        let w = world.lock().await;
+        w.socials.iter().map(|s| s.name.clone()).collect()
+    };
+    names.sort();
+    let mut s = format!("\r\nLoaded socials ({}):\r\n", names.len());
+    for chunk in names.chunks(6) {
+        s.push_str("  ");
+        for n in chunk {
+            s.push_str(&format!("{n:<12}"));
+        }
+        s.push_str("\r\n");
     }
     CmdOutput::text(s)
 }
@@ -2496,6 +2577,28 @@ fn do_quest_abandon(me: &mut Character, _world: &Arc<Mutex<World>>) -> CmdOutput
     CmdOutput::text("\r\nYou abandon your quest.\r\n")
 }
 
+/// `spells` — like `skills`, but filtered to entries whose `kind()` is
+/// SkillKind::Spell.  Shows learned% and mana cost.
+fn do_spells(me: &Character) -> CmdOutput {
+    use crate::character::{ALL_SKILLS, SkillKind};
+    let mut s = String::from("\r\nSpells available to your class:\r\n");
+    let mut any = false;
+    for &skill in ALL_SKILLS {
+        if skill.kind() != SkillKind::Spell { continue; }
+        if !skill.is_class_allowed(me.class) { continue; }
+        any = true;
+        let pct = *me.skills.get(&skill).unwrap_or(&0);
+        s.push_str(&format!(
+            "  {:<16} {:>3}%  ({} mana)\r\n",
+            skill.name(), pct, skill.mana_cost(),
+        ));
+    }
+    if !any {
+        s.push_str("  (none — your class casts no spells)\r\n");
+    }
+    CmdOutput::text(s)
+}
+
 fn do_skills(me: &Character) -> CmdOutput {
     use crate::character::ALL_SKILLS;
     let mut s = String::from("\r\nSkills available to your class:\r\n");
@@ -3603,6 +3706,27 @@ async fn cast_poison(
     if rand::thread_rng().gen_range(0..100) >= hit_chance {
         return CmdOutput::text("\r\nThe poison fails to take.\r\n");
     }
+    // Mob save vs poison.  Higher-level mobs resist; lower-level mobs
+    // succumb more readily.
+    let target_level = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|m| m.id == mid)
+            .and_then(|m| w.mob_protos.get(&m.vnum))
+            .map(|p| p.level).unwrap_or(1)
+    };
+    if save_vs_spell(me.level, target_level) {
+        let mob_name = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mid)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the creature".to_string())
+        };
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{mob_name} shakes off the spell.\r\n"));
+        return CmdOutput::text(format!("\r\n{mob_name} shakes off the spell.\r\n"));
+    }
 
     // Apply the affect + grab mob name for the broadcast.
     let mob_name = {
@@ -3630,6 +3754,17 @@ async fn cast_poison(
     cl.broadcast_room(me.current_room, Some(me.id),
         &format!("{} looks ill.\r\n", mob_name));
     CmdOutput::text(format!("\r\n{mob_name} looks ill.\r\n"))
+}
+
+/// Roll a saving throw for a mob target against a spellcasting player.
+/// Returns true if the mob shrugged it off (caller bails before
+/// applying the affect).  Formula: `save% = (50 - (caster - target)*5).clamp(5, 95)` — equal levels → 50% save; +10 caster
+/// level pushes save down to 0% (clamped to 5%); +10 target level
+/// pushes save up to 100% (clamped to 95%).
+fn save_vs_spell(caster_level: i32, target_level: i32) -> bool {
+    use rand::Rng;
+    let save_pct = (50 - (caster_level - target_level) * 5).clamp(5, 95);
+    rand::thread_rng().gen_range(0..100) < save_pct
 }
 
 /// Shared shape for non-DoT debuff spells (Sleep, Blindness): roll vs
@@ -3665,6 +3800,26 @@ async fn cast_debuff(
     let hit_chance = (65 + learned as i32 / 5).min(95);
     if rand::thread_rng().gen_range(0..100) >= hit_chance {
         return CmdOutput::text(format!("\r\nThe {} spell fails to take.\r\n", skill.name()));
+    }
+    // Mob save against the debuff.
+    let target_level = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|m| m.id == mid)
+            .and_then(|m| w.mob_protos.get(&m.vnum))
+            .map(|p| p.level).unwrap_or(1)
+    };
+    if save_vs_spell(me.level, target_level) {
+        let mob_name = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mid)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the creature".to_string())
+        };
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{mob_name} shakes off the spell.\r\n"));
+        return CmdOutput::text(format!("\r\n{mob_name} shakes off the spell.\r\n"));
     }
     let (duration, broadcast_room, broadcast_self) = match skill {
         crate::character::Skill::Sleep => (
@@ -5941,6 +6096,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.bank_gold       = me.bank_gold;
             r.prompt_format   = me.prompt_format.clone();
             r.aliases         = me.aliases.clone();
+            r.notes           = me.notes.clone();
             r
         }
         Err(e) => {
