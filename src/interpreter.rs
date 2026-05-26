@@ -70,7 +70,7 @@ const COMMANDS: &[&str] = &[
     "look", "inventory", "kill", "flee",
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
-    "list", "buy", "sell",
+    "list", "buy", "sell", "appraise", "value",
     "kick", "bash", "backstab", "rescue", "disarm", "recover",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
@@ -93,7 +93,7 @@ const COMMANDS: &[&str] = &[
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
-    "at",
+    "at", "househere",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "mute", "freeze",
     "ban", "unban", "bans",
@@ -270,6 +270,7 @@ pub async fn dispatch_command(
         Some("list")      => do_list(me, world).await,
         Some("buy")       => do_buy(rest, me, world, chars).await,
         Some("sell")      => do_sell(rest, me, world, chars).await,
+        Some("appraise") | Some("value") => do_appraise(rest, me, world).await,
         Some("flee")      => do_flee(rest, me, world, chars).await,
         Some("wield")     => do_wield(rest, me, world, chars).await,
         Some("wear")      => do_wear(rest, me, world, chars).await,
@@ -335,6 +336,7 @@ pub async fn dispatch_command(
         Some("stat")      => do_stat(rest, me, world, chars, players).await,
         Some("force")     => do_force(rest, me, world, chars).await,
         Some("at")        => do_at(rest, me, world, chars, players).await,
+        Some("househere") => do_househere(me, world).await,
         Some("set")       => do_set(rest, me, chars).await,
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
@@ -1989,6 +1991,10 @@ pub fn render_prompt(me: &Character) -> String {
             'V' => out.push_str(&me.max_movement.to_string()),
             'g' => out.push_str(&me.gold.to_string()),
             'x' => out.push_str(&me.exp.to_string()),
+            'r' => out.push_str(&me.current_room.to_string()),
+            'a' => out.push_str(&me.alignment.to_string()),
+            'c' => out.push_str(me.class.as_str()),
+            'L' => out.push_str(&me.level.to_string()),
             '%' => out.push('%'),
             other => { out.push('%'); out.push(other); }
         }
@@ -2757,6 +2763,27 @@ async fn do_at(
         });
     }
     CmdOutput::text(format!("\r\nYou flicker to [{vnum}] and queue '{command}'.\r\n"))
+}
+
+/// `househere` (LVL_IMMORT+) — toggles `ROOM_HOUSE` on the current
+/// room.  When set, the room's floor contents persist via
+/// `db::spawn_house_save_tick`.
+async fn do_househere(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let mut w = world.lock().await;
+    let Some(r) = w.rooms.get_mut(&me.current_room) else {
+        return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+    };
+    let now_house = (r.room_flags[0] & crate::world::ROOM_HOUSE) == 0;
+    if now_house {
+        r.room_flags[0] |= crate::world::ROOM_HOUSE;
+    } else {
+        r.room_flags[0] &= !crate::world::ROOM_HOUSE;
+    }
+    CmdOutput::text(format!(
+        "\r\nROOM_HOUSE is now {} for room [{}].\r\n",
+        if now_house { "ON" } else { "OFF" }, me.current_room,
+    ))
 }
 
 /// `set <player> <field> <value>` — immortal-only. Supports a handful
@@ -8293,6 +8320,56 @@ async fn cast_identify(
     if p.level > 0 {
         s.push_str(&format!("  min level: {}\r\n", p.level));
     }
+    // Show this instance's condition (cp160).
+    s.push_str(&format!(
+        "  condition: {} ({})\r\n", obj.condition, condition_label(obj.condition),
+    ));
+    // Wear positions allowed.
+    let mut slots: Vec<&str> = Vec::new();
+    use crate::character::*;
+    if p.wear_flags[0] & ITEM_WEAR_FINGER != 0 { slots.push("finger"); }
+    if p.wear_flags[0] & ITEM_WEAR_NECK   != 0 { slots.push("neck"); }
+    if p.wear_flags[0] & ITEM_WEAR_BODY   != 0 { slots.push("body"); }
+    if p.wear_flags[0] & ITEM_WEAR_HEAD   != 0 { slots.push("head"); }
+    if p.wear_flags[0] & ITEM_WEAR_LEGS   != 0 { slots.push("legs"); }
+    if p.wear_flags[0] & ITEM_WEAR_FEET   != 0 { slots.push("feet"); }
+    if p.wear_flags[0] & ITEM_WEAR_HANDS  != 0 { slots.push("hands"); }
+    if p.wear_flags[0] & ITEM_WEAR_ARMS   != 0 { slots.push("arms"); }
+    if p.wear_flags[0] & ITEM_WEAR_SHIELD != 0 { slots.push("shield"); }
+    if p.wear_flags[0] & ITEM_WEAR_ABOUT  != 0 { slots.push("about"); }
+    if p.wear_flags[0] & ITEM_WEAR_WAIST  != 0 { slots.push("waist"); }
+    if p.wear_flags[0] & ITEM_WEAR_WRIST  != 0 { slots.push("wrist"); }
+    if p.wear_flags[0] & ITEM_WEAR_WIELD  != 0 { slots.push("wield"); }
+    if p.wear_flags[0] & ITEM_WEAR_HOLD   != 0 { slots.push("hold"); }
+    if !slots.is_empty() {
+        s.push_str(&format!("  wearable:  {}\r\n", slots.join(", ")));
+    }
+    // Affects (cp36 ObjAffect list).
+    if !p.affected.is_empty() {
+        s.push_str("  affects:\r\n");
+        for a in &p.affected {
+            let name = apply_name(a.location);
+            let sign = if a.modifier >= 0 { "+" } else { "" };
+            s.push_str(&format!("    {} by {sign}{}\r\n", name, a.modifier));
+        }
+    }
+    // Anti-class / anti-alignment hints (cp124/125).
+    let xf = p.extra_flags[0];
+    let mut anti: Vec<&str> = Vec::new();
+    use crate::world::*;
+    if xf & ITEM_ANTI_GOOD       != 0 { anti.push("good"); }
+    if xf & ITEM_ANTI_EVIL       != 0 { anti.push("evil"); }
+    if xf & ITEM_ANTI_NEUTRAL    != 0 { anti.push("neutral"); }
+    if xf & ITEM_ANTI_WARRIOR    != 0 { anti.push("warrior"); }
+    if xf & ITEM_ANTI_CLERIC     != 0 { anti.push("cleric"); }
+    if xf & ITEM_ANTI_THIEF      != 0 { anti.push("thief"); }
+    if xf & ITEM_ANTI_MAGIC_USER != 0 { anti.push("magic-user"); }
+    if !anti.is_empty() {
+        s.push_str(&format!("  forbidden: {}\r\n", anti.join(", ")));
+    }
+    if xf & ITEM_2H_WEAPON != 0 {
+        s.push_str("  two-handed: yes\r\n");
+    }
     CmdOutput::text(s)
 }
 
@@ -10431,6 +10508,48 @@ async fn do_sell(
         "\r\n{keeper_name} gives you {price} gold for {short}.\r\nYou now have {} gold.\r\n",
         me.gold,
     ))
+}
+
+/// `appraise <item>` (alias `value`) — preview a shopkeeper's sell
+/// price for an inventory item without committing.  Same gating and
+/// formula as `do_sell`.
+async fn do_appraise(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nAppraise what?\r\n".to_string());
+    }
+    let w = world.lock().await;
+    let Some(shop) = w.shop_in_room(me.current_room) else {
+        return CmdOutput::text("\r\nThere is no shop here.\r\n".to_string());
+    };
+    let Some((_idx, iid, short)) = find_inv_match(&w, &me.inventory, &key) else {
+        return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n"));
+    };
+    let obj = w.obj_instances.iter().find(|o| o.id == iid).unwrap();
+    let proto = w.obj_protos.get(&obj.vnum).unwrap();
+    if !shop.buys_types.is_empty() && !shop.buys_types.contains(&proto.item_type) {
+        return CmdOutput::text(format!(
+            "\r\nThe shopkeeper wouldn't buy {short}.\r\n"
+        ));
+    }
+    if obj.condition <= 0 {
+        return CmdOutput::text(format!(
+            "\r\nThe shopkeeper wouldn't take {short} — it's broken.\r\n"
+        ));
+    }
+    let cond_mult = obj.condition.max(1) as f32 / 100.0;
+    let price = ((proto.cost as f32) * shop.profit_sell * cond_mult) as i64;
+    let pristine_price = ((proto.cost as f32) * shop.profit_sell) as i64;
+    let cond_label = condition_label(obj.condition);
+    let mut s = format!(
+        "\r\nThe shopkeeper would give you {price} gold for {short} ({cond_label}).\r\n"
+    );
+    if pristine_price > price {
+        s.push_str(&format!(
+            "  (Pristine, it would fetch {pristine_price} gold — consider `repair`ing first.)\r\n"
+        ));
+    }
+    CmdOutput::text(s)
 }
 
 /// Hand `amount` gold to a target named `target_kw`.  Target may be a

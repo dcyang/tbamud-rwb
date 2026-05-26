@@ -419,7 +419,98 @@ pub fn load_world(data_dir: &str) -> Result<World> {
         "Initial zone reset complete",
     );
 
+    // --- Restore house contents -------------------------------------------
+    // For every room flagged ROOM_HOUSE, load its `.house` file (if any)
+    // and spawn the persisted objects into the room.
+    let house_rooms: Vec<i32> = world.rooms.iter()
+        .filter(|(_, r)| r.room_flags[0] & crate::world::ROOM_HOUSE != 0)
+        .map(|(v, _)| *v).collect();
+    let mut restored_total = 0usize;
+    for rv in house_rooms {
+        restored_total += load_house(data_dir, rv, &mut world);
+    }
+    if restored_total > 0 {
+        tracing::info!(items = restored_total, "Restored house contents");
+    }
+
     Ok(world)
+}
+
+/// Persist the floor objects of a ROOM_HOUSE room to
+/// `<data_dir>/house/<vnum>.house`.  One line per top-level object:
+/// `<vnum> c=<condition> [content_vnum content_vnum ...]`.
+pub fn save_house(data_dir: &str, room_vnum: i32, world: &crate::world::World) {
+    use std::io::Write;
+    let dir = format!("{data_dir}/house");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "Failed to create house dir");
+        return;
+    }
+    let path = format!("{dir}/{room_vnum}.house");
+    let Some(r) = world.rooms.get(&room_vnum) else { return; };
+    let mut lines = String::new();
+    lines.push_str("# tbamud-rwb house v1 — <vnum> c=<cond> [content_vnums...]\n");
+    for &iid in &r.objects {
+        let Some(o) = world.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+        // Skip corpses (transient).
+        if o.corpse_of.is_some() { continue; }
+        let mut line = format!("{} c={}", o.vnum, o.condition);
+        for &cid in &o.contents {
+            if let Some(c) = world.obj_instances.iter().find(|x| x.id == cid) {
+                line.push(' ');
+                line.push_str(&c.vnum.to_string());
+            }
+        }
+        line.push('\n');
+        lines.push_str(&line);
+    }
+    if let Ok(mut f) = std::fs::File::create(&path) {
+        let _ = f.write_all(lines.as_bytes());
+    }
+}
+
+/// Load a house file from disk and spawn its objects into the given
+/// room.  Idempotent in the sense of "items present at the moment we
+/// load" — duplicate boot calls will pile up.
+pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::World) -> usize {
+    let path = format!("{data_dir}/house/{room_vnum}.house");
+    let Ok(body) = std::fs::read_to_string(&path) else { return 0; };
+    let mut count = 0;
+    for line in body.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') { continue; }
+        let parts: Vec<&str> = t.split_ascii_whitespace().collect();
+        if parts.is_empty() { continue; }
+        let Ok(vnum) = parts[0].parse::<i32>() else { continue; };
+        let mut condition = 100;
+        let mut contents: Vec<i32> = Vec::new();
+        for tok in &parts[1..] {
+            if let Some(rest) = tok.strip_prefix("c=") {
+                if let Ok(n) = rest.parse::<i32>() {
+                    condition = n.clamp(0, 100);
+                    continue;
+                }
+            }
+            if let Ok(n) = tok.parse::<i32>() { contents.push(n); }
+        }
+        let Some(iid) = world.spawn_obj(vnum) else { continue; };
+        if let Some(o) = world.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.in_room = room_vnum;
+            o.condition = condition;
+        }
+        if let Some(r) = world.rooms.get_mut(&room_vnum) {
+            r.objects.push(iid);
+        }
+        for cv in contents {
+            if let Some(cid) = world.spawn_obj(cv) {
+                if let Some(container) = world.obj_instances.iter_mut().find(|o| o.id == iid) {
+                    container.contents.push(cid);
+                }
+            }
+        }
+        count += 1;
+    }
+    count
 }
 
 /// Vnums reserved for synthetic newbie-kit objects.  See
@@ -1004,6 +1095,38 @@ pub fn spawn_save_all_tick(
             }
             if saved > 0 {
                 tracing::info!(saved, "Periodic save-all complete");
+            }
+        }
+    });
+}
+
+/// Crash-safe house-save tick.  Every 5 minutes, walks every
+/// ROOM_HOUSE room and persists its floor contents.
+pub fn spawn_house_save_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<crate::world::World>>,
+    players: std::sync::Arc<tokio::sync::Mutex<crate::players::PlayerDb>>,
+) {
+    const TICK_SECONDS: u64 = 300;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let data_dir = players.lock().await.data_dir().to_string();
+            let w = world.lock().await;
+            let house_rooms: Vec<i32> = w.rooms.iter()
+                .filter(|(_, r)| r.room_flags[0] & crate::world::ROOM_HOUSE != 0)
+                .map(|(v, _)| *v).collect();
+            for rv in &house_rooms {
+                save_house(&data_dir, *rv, &w);
+            }
+            if !house_rooms.is_empty() {
+                tracing::info!(houses = house_rooms.len(), "Periodic house save");
             }
         }
     });

@@ -102,6 +102,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn crash-safe save-all tick -----------------------------------
     db::spawn_save_all_tick(Arc::clone(&chars), Arc::clone(&players));
 
+    // --- Spawn periodic house-save tick -----------------------------------
+    db::spawn_house_save_tick(Arc::clone(&world), Arc::clone(&players));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

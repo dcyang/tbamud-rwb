@@ -1164,6 +1164,49 @@ async fn resolve_mob_attack(
         (c.hp <= 0, c.current_room, short, wimpy_trigger)
     };
 
+    // Mob wielded weapon durability tick (only on non-spell hits).
+    if !is_spell {
+        use rand::Rng;
+        if rand::thread_rng().gen_range(0..100) < 5 {
+            let weap_iid = {
+                let w = world.lock().await;
+                w.mob_instances.iter().find(|x| x.id == m.attacker_id)
+                    .and_then(|x| x.equipment[crate::character::WEAR_WIELD])
+            };
+            if let Some(iid) = weap_iid {
+                let broke = {
+                    let mut w = world.lock().await;
+                    if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                        o.condition = (o.condition - 1).max(0);
+                        o.condition == 0
+                    } else { false }
+                };
+                if broke {
+                    let short = {
+                        let w = world.lock().await;
+                        w.obj_instances.iter().find(|o| o.id == iid)
+                            .and_then(|o| w.obj_protos.get(&o.vnum))
+                            .map(|p| p.short_description.clone())
+                            .unwrap_or_else(|| "the weapon".to_string())
+                    };
+                    {
+                        let mut w = world.lock().await;
+                        if let Some(mob) = w.mob_instances.iter_mut().find(|x| x.id == m.attacker_id) {
+                            mob.equipment[crate::character::WEAR_WIELD] = None;
+                        }
+                    }
+                    {
+                        let cl = chars.lock().await;
+                        cl.broadcast_room(m.room, None,
+                            &format!("{mob_short_name}'s {short} shatters into pieces!\r\n"));
+                    }
+                    let mut w = world.lock().await;
+                    w.extract_obj(iid);
+                }
+            }
+        }
+    }
+
     // Armor durability tick (only on non-spell hits).
     if !is_spell {
         use rand::Rng;

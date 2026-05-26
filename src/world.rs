@@ -107,6 +107,10 @@ pub const ROOM_TUNNEL:     u32 = 1 << 8;
 pub const ROOM_PRIVATE:    u32 = 1 << 9;
 pub const ROOM_NOTRACK:    u32 = 1 << 6;
 pub const ROOM_GODROOM:    u32 = 1 << 10;
+/// Marks the room as a persistent house — its `objects` list is saved
+/// to `<data_dir>/house/<vnum>.house` on a periodic tick and restored
+/// at boot.  Toggled at runtime by the immortal `househere` command.
+pub const ROOM_HOUSE:      u32 = 1 << 11;
 
 /// Sector type codes (matches structs.h SECT_* macros).  Used by
 /// `Room.sector_type` and `sector_move_cost`.
