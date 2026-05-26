@@ -76,6 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
+    "hp", "mana", "mv", "gold",
     "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
@@ -92,6 +93,7 @@ const COMMANDS: &[&str] = &[
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
+    "at",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "mute", "freeze",
     "ban", "unban", "bans",
@@ -245,6 +247,10 @@ pub async fn dispatch_command(
         Some("history")    => do_history(me),
         Some("prefs")      => do_prefs(me),
         Some("worth")      => do_worth(me, world).await,
+        Some("hp")         => CmdOutput::text(format!("\r\nHP:   {}/{}\r\n", me.hp, me.max_hp)),
+        Some("mana")       => CmdOutput::text(format!("\r\nMana: {}/{}\r\n", me.mana, me.max_mana)),
+        Some("mv")         => CmdOutput::text(format!("\r\nMove: {}/{}\r\n", me.movement, me.max_movement)),
+        Some("gold")       => CmdOutput::text(format!("\r\nGold: {}  Bank: {}\r\n", me.gold, me.bank_gold)),
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
@@ -254,7 +260,7 @@ pub async fn dispatch_command(
         Some("steal")     => do_steal(rest, me, world, chars).await,
         Some("cast")      => do_cast(rest, me, world, chars).await,
         Some("skills")    => do_skills(me),
-        Some("practice")  => do_practice(rest, me),
+        Some("practice") | Some("prac") => do_practice(rest, me),
         Some("affects")   => do_affects(me),
         Some("quest")     => do_quest(rest, me, world, chars).await,
         Some("where")     => do_where(me, world, chars).await,
@@ -327,6 +333,7 @@ pub async fn dispatch_command(
         Some("shutdown")  => do_shutdown(me, chars).await,
         Some("stat")      => do_stat(rest, me, world, chars, players).await,
         Some("force")     => do_force(rest, me, world, chars).await,
+        Some("at")        => do_at(rest, me, world, chars, players).await,
         Some("set")       => do_set(rest, me, chars).await,
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
@@ -1384,38 +1391,48 @@ async fn do_scan(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
-    let only_dir = if arg.trim().is_empty() {
-        None
-    } else if let Some(d) = Direction::parse(arg.trim()) {
-        Some(d)
-    } else {
-        return CmdOutput::text(format!("\r\nUnknown direction '{}'.\r\n", arg.trim()));
-    };
+    // Parse args: optional direction word, optional distance integer (1-3).
+    let mut only_dir: Option<Direction> = None;
+    let mut max_hops: i32 = 1;
+    for tok in arg.split_whitespace() {
+        if let Ok(n) = tok.parse::<i32>() {
+            max_hops = n.clamp(1, 3);
+            continue;
+        }
+        if let Some(d) = Direction::parse(tok) {
+            only_dir = Some(d);
+            continue;
+        }
+        return CmdOutput::text(format!("\r\nUnknown direction '{tok}'.\r\n"));
+    }
     let immortal = me.level >= LVL_IMMORT;
 
-    // Snapshot adjacent rooms + their occupants under a brief lock.
-    let scans: Vec<(Direction, crate::world::RoomVnum, String, Vec<String>)> = {
+    // Snapshot rooms 1..max_hops in each (filtered) direction.
+    let scans: Vec<(Direction, i32, crate::world::RoomVnum, String, Vec<String>)> = {
         let w = world.lock().await;
-        let Some(r) = w.rooms.get(&me.current_room) else {
-            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
-        };
         let mut out = Vec::new();
         for d in Direction::ALL {
             if let Some(this_d) = only_dir { if this_d != d { continue; } }
-            let Some(e) = &r.exits[d as usize] else { continue; };
-            if e.to_room == crate::world::NOWHERE { continue; }
-            if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
-            if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
-            let Some(target) = w.rooms.get(&e.to_room) else { continue; };
-            let mut mobs: Vec<String> = Vec::new();
-            for &mid in &target.mobs {
-                if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
-                    if let Some(p) = w.mob_protos.get(&m.vnum) {
-                        mobs.push(p.short_descr.clone());
+            // Walk up to `max_hops` rooms in this direction.
+            let mut cur = me.current_room;
+            for hop in 1..=max_hops {
+                let r = match w.rooms.get(&cur) { Some(r) => r, None => break };
+                let Some(e) = &r.exits[d as usize] else { break };
+                if e.to_room == crate::world::NOWHERE { break; }
+                if (e.exit_info & crate::world::EX_CLOSED) != 0 { break; }
+                if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { break; }
+                let Some(target) = w.rooms.get(&e.to_room) else { break };
+                let mut mobs: Vec<String> = Vec::new();
+                for &mid in &target.mobs {
+                    if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
+                        if let Some(p) = w.mob_protos.get(&m.vnum) {
+                            mobs.push(p.short_descr.clone());
+                        }
                     }
                 }
+                out.push((d, hop, e.to_room, target.name.clone(), mobs));
+                cur = e.to_room;
             }
-            out.push((d, e.to_room, target.name.clone(), mobs));
         }
         out
     };
@@ -1430,20 +1447,21 @@ async fn do_scan(
         return CmdOutput::text("\r\nNo visible exits to scan.\r\n".to_string());
     }
     let mut s = String::from("\r\n");
-    for (d, rv, name, mobs) in &scans {
-        s.push_str(&format!("  {} → [{rv}] {name}\r\n", d.name()));
+    for (d, hop, rv, name, mobs) in &scans {
+        let prefix = "  ".repeat(*hop as usize);
+        s.push_str(&format!("{prefix}{} (+{hop}) → [{rv}] {name}\r\n", d.name()));
         let players: Vec<&str> = cl_snap.iter()
             .filter(|(id, room, _)| *id != me.id && *room == *rv)
             .map(|(_, _, n)| n.as_str())
             .collect();
         if mobs.is_empty() && players.is_empty() {
-            s.push_str("      (quiet)\r\n");
+            s.push_str(&format!("{prefix}    (quiet)\r\n"));
         } else {
             for n in &players {
-                s.push_str(&format!("      {n} is here.\r\n"));
+                s.push_str(&format!("{prefix}    {n} is here.\r\n"));
             }
             for m in mobs {
-                s.push_str(&format!("      {m}\r\n"));
+                s.push_str(&format!("{prefix}    {m}\r\n"));
             }
         }
     }
@@ -2689,6 +2707,52 @@ async fn do_force(
         chars:   Arc::clone(chars),
     });
     CmdOutput::text(format!("\r\nYou force {} to '{}'.\r\n", ph.name, command))
+}
+
+/// `at <room-vnum> <command>` — immortal-only.  Teleports to the named
+/// room and then forces the command as oneself via FORCE_CMD_TX so the
+/// dispatch runs at the new location.  Doesn't auto-return; immortals
+/// `goto` back when done.
+async fn do_at(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    _players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let mut parts = arg.splitn(2, char::is_whitespace);
+    let vnum_s = parts.next().unwrap_or("");
+    let command = parts.next().unwrap_or("").trim();
+    let Ok(vnum) = vnum_s.parse::<i32>() else {
+        return CmdOutput::text("\r\nUsage: at <room-vnum> <command>\r\n".to_string());
+    };
+    if command.is_empty() {
+        return CmdOutput::text("\r\nWhat command should run there?\r\n".to_string());
+    }
+    {
+        let w = world.lock().await;
+        if !w.rooms.contains_key(&vnum) {
+            return CmdOutput::text(format!("\r\nNo such room: {vnum}.\r\n"));
+        }
+    }
+    // Teleport to target room (mirrors do_goto's room update).
+    me.current_room = vnum;
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, vnum);
+    }
+    // Post a forced command to self.  The runner picks it up after our
+    // current dispatch returns, by which point we're already at the target.
+    if let Some(tx) = FORCE_CMD_TX.get() {
+        let _ = tx.send(ForceCmdMsg {
+            player:  me.name.clone(),
+            command: command.to_string(),
+            world:   Arc::clone(world),
+            chars:   Arc::clone(chars),
+        });
+    }
+    CmdOutput::text(format!("\r\nYou flicker to [{vnum}] and queue '{command}'.\r\n"))
 }
 
 /// `set <player> <field> <value>` — immortal-only. Supports a handful
@@ -4486,6 +4550,18 @@ fn do_spells(me: &Character) -> CmdOutput {
     CmdOutput::text(s)
 }
 
+/// Map a skill percentage to a flavor label.
+fn skill_tier(pct: u8) -> &'static str {
+    match pct {
+        0          => "untrained",
+        1..=25     => "unfamiliar",
+        26..=50    => "novice",
+        51..=75    => "skilled",
+        76..=95    => "expert",
+        _          => "master",
+    }
+}
+
 fn do_skills(me: &Character) -> CmdOutput {
     use crate::character::ALL_SKILLS;
     let mut s = String::from("\r\nSkills available to your class:\r\n");
@@ -4494,7 +4570,10 @@ fn do_skills(me: &Character) -> CmdOutput {
         if !skill.is_class_allowed(me.class) { continue; }
         any = true;
         let pct = *me.skills.get(&skill).unwrap_or(&0);
-        s.push_str(&format!("  {:<10} {:>3}%\r\n", skill.name(), pct));
+        s.push_str(&format!(
+            "  {:<14} {:>3}%   ({})\r\n",
+            skill.name(), pct, skill_tier(pct),
+        ));
     }
     if !any {
         s.push_str("  (none — your class has no learnable skills)\r\n");
@@ -4571,8 +4650,9 @@ fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
     }
     *pct = (*pct + 10).min(90);
     me.practices -= 1;
+    let tier = skill_tier(*pct);
     CmdOutput::text(format!(
-        "\r\nYou practice {} a bit. ({}%, {} practice(s) left)\r\n",
+        "\r\nYou practice {} a bit. ({}%, {tier}, {} practice(s) left)\r\n",
         skill.name(), pct, me.practices,
     ))
 }
@@ -9922,19 +10002,19 @@ async fn do_examine(
     // Quick item-type sniffing: find a matching object and report its type.
     let key = arg.to_ascii_lowercase();
     let w = world.lock().await;
-    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>)> = me.inventory.iter()
+    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>, i32)> = me.inventory.iter()
         .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
         .find_map(|&iid| {
             let o = w.obj_instances.iter().find(|o| o.id == iid)?;
             let p = w.obj_protos.get(&o.vnum)?;
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
-                Some((p.item_type, p.value, p.affected.clone()))
+                Some((p.item_type, p.value, p.affected.clone(), o.condition))
             } else {
                 None
             }
         });
 
-    if let Some((ty, vals, affs)) = proto_info {
+    if let Some((ty, vals, affs, cond)) = proto_info {
         let kind = item_type_name(ty);
         let extra = match ty {
             // ITEM_WEAPON: value[1] dice count, value[2] dice size, value[3] damage type
@@ -9947,6 +10027,7 @@ async fn do_examine(
         };
         let mut out = base.text;
         out.push_str(&extra);
+        out.push_str(&format!("It is in {} condition.\r\n", condition_label(cond)));
         if !affs.is_empty() {
             out.push_str("Affects:\r\n");
             for a in &affs {
@@ -9958,6 +10039,18 @@ async fn do_examine(
         return CmdOutput::text(out);
     }
     base
+}
+
+/// Banded label for an object's `condition` (0..=100).
+pub fn condition_label(cond: i32) -> &'static str {
+    match cond {
+        0          => "broken",
+        1..=20     => "poor",
+        21..=50    => "worn",
+        51..=80    => "good",
+        81..=99    => "fine",
+        _          => "pristine",
+    }
 }
 
 /// Human-readable label for an APPLY_* location.  Returns "?" for

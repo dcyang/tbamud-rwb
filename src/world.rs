@@ -265,6 +265,10 @@ pub struct ObjInstance {
     /// For ITEM_LIGHT only: whether the light source is currently lit.
     /// `false` for everything else; toggled by `light`/`extinguish`.
     pub light_lit: bool,
+    /// Item durability, 0..=100.  100 = pristine, 0 = broken.  Items
+    /// at 0 are extracted by the combat path that landed the final
+    /// hit (player or mob).
+    pub condition: i32,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -735,6 +739,7 @@ impl World {
             decay_in: Some(decay_secs),
             timer: None,
             light_lit: false,
+            condition: 100,
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -844,6 +849,7 @@ impl World {
             triggers: Vec::new(),
             timer,
             light_lit: false,
+            condition: 100,
         });
         Some(id)
     }

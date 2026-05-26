@@ -631,6 +631,15 @@ async fn resolve_player_attack(
             m.remembers.push(p.attacker_id);
         }
         let low_hp = !dead && m.hp <= m.max_hp / 6;
+        // Weapon durability: 5% chance to ding the wielded weapon.
+        if let Some(weap) = p.weapon_iid {
+            use rand::Rng;
+            if rand::thread_rng().gen_range(0..100) < 5 {
+                if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == weap) {
+                    o.condition = (o.condition - 1).max(0);
+                }
+            }
+        }
         (proto_name, dead, in_room, has_memory, is_wimpy, low_hp)
     };
     let _ = has_memory;
@@ -648,6 +657,44 @@ async fn resolve_player_attack(
             let _ = ph.send.send(to_attacker);
         }
         cl.broadcast_room(p.room, Some(p.attacker_id), &to_room);
+    }
+    // If the weapon just broke (condition == 0), extract it from the
+    // attacker's WIELD slot and broadcast a shatter line.
+    if let Some(weap) = p.weapon_iid {
+        let broke = {
+            let w = world.lock().await;
+            w.obj_instances.iter().find(|o| o.id == weap)
+                .map(|o| o.condition == 0).unwrap_or(false)
+        };
+        if broke {
+            let (short, name) = {
+                let w = world.lock().await;
+                let s = w.obj_instances.iter().find(|o| o.id == weap)
+                    .and_then(|o| w.obj_protos.get(&o.vnum))
+                    .map(|p| p.short_description.clone())
+                    .unwrap_or_else(|| "your weapon".to_string());
+                (s, p.attacker_name.clone())
+            };
+            let kh = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
+                h
+            };
+            if let Some(kh) = kh {
+                let mut c = kh.character.lock().await;
+                c.equipment[crate::character::WEAR_WIELD] = None;
+                drop(c);
+                let _ = kh.send.send(format!(
+                    "\r\n*** {short} shatters in your hands! ***\r\n",
+                ));
+            }
+            let cl = chars.lock().await;
+            cl.broadcast_room(p.room, Some(p.attacker_id),
+                &format!("{}'s {short} shatters into pieces!\r\n", name));
+            // Extract the instance.
+            let mut w = world.lock().await;
+            w.extract_obj(weap);
+        }
     }
 
     // MOB_HELPER assist: any non-fighting mob in the room with the

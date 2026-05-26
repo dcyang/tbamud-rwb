@@ -1928,6 +1928,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         triggers: Vec::new(),
                         timer: init_timer,
                         light_lit: false,
+                        condition: 100,
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -1942,6 +1943,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         triggers: Vec::new(),
                         timer: init_timer,
                         light_lit: false,
+                        condition: 100,
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -1978,6 +1980,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     triggers: Vec::new(),
                     timer: init_timer,
                     light_lit: false,
+                    condition: 100,
                 });
                 let equipped = if cmd.command == 'E' {
                     let pos = cmd.arg3 as usize;
@@ -2025,6 +2028,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     triggers: Vec::new(),
                     timer: init_timer,
                         light_lit: false,
+                        condition: 100,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {
