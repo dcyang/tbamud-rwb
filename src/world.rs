@@ -309,6 +309,18 @@ pub const ITEM_POTION:    i32 = 10;
 pub const ITEM_CONTAINER: i32 = 15;
 pub const ITEM_DRINKCON:  i32 = 17;
 pub const ITEM_FOOD:      i32 = 19;
+pub const ITEM_FOUNTAIN:  i32 = 23;
+
+/// Bits inside `ObjProto.extra_flags[0]`.  Mirrors structs.h
+/// ITEM_x_* macros.  Only the ANTI-class checks are wired right now;
+/// the rest are placeholders for future use.
+pub const ITEM_ANTI_GOOD:       u32 = 1 << 9;
+pub const ITEM_ANTI_EVIL:       u32 = 1 << 10;
+pub const ITEM_ANTI_NEUTRAL:    u32 = 1 << 11;
+pub const ITEM_ANTI_MAGIC_USER: u32 = 1 << 12;
+pub const ITEM_ANTI_CLERIC:     u32 = 1 << 13;
+pub const ITEM_ANTI_THIEF:      u32 = 1 << 14;
+pub const ITEM_ANTI_WARRIOR:    u32 = 1 << 15;
 
 /// MOB_* bitflag positions in `MobProto.mob_flags[0]`.  Mirrors the
 /// MOB_* defines in structs.h.

@@ -69,6 +69,10 @@ pub enum Skill {
     Disarm,
     CureSerious,
     Heal,
+    Infravision,
+    /// Flag affect: mob skips its next attack swing.  Applied by a
+    /// successful Bash hit.  No class entry (internal only).
+    Stun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +135,8 @@ impl Skill {
             "disarm"                          => Some(Skill::Disarm),
             "cureserious" | "cureseriouswounds" => Some(Skill::CureSerious),
             "heal"                            => Some(Skill::Heal),
+            "infravision" | "infra"           => Some(Skill::Infravision),
+            "stun"                            => Some(Skill::Stun),
             _ => None,
         }
     }
@@ -182,6 +188,8 @@ impl Skill {
             Skill::Disarm        => "disarm",
             Skill::CureSerious   => "cure serious",
             Skill::Heal          => "heal",
+            Skill::Infravision   => "infravision",
+            Skill::Stun          => "stun",
         }
     }
 
@@ -189,7 +197,8 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm => SkillKind::Physical,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
+                | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
@@ -203,6 +212,7 @@ impl Skill {
                 | Skill::LightningBolt | Skill::Fireball | Skill::ShockingGrasp
                 | Skill::Invisibility  | Skill::Stoneskin
                 | Skill::CureSerious   | Skill::Heal
+                | Skill::Infravision
                                       => SkillKind::Spell,
         }
     }
@@ -212,7 +222,8 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm => 0,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
+                | Skill::Stun => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
@@ -246,6 +257,7 @@ impl Skill {
             Skill::Stoneskin     => 30,
             Skill::CureSerious   => 16,
             Skill::Heal          => 35,
+            Skill::Infravision   => 6,
         }
     }
 
@@ -299,6 +311,8 @@ impl Skill {
             Skill::Disarm        => &[Class::Warrior, Class::Thief],
             Skill::CureSerious   => &[Class::Cleric],
             Skill::Heal          => &[Class::Cleric],
+            Skill::Infravision   => &[Class::MagicUser, Class::Cleric],
+            Skill::Stun          => &[],
         }
     }
 
@@ -353,6 +367,8 @@ impl Skill {
             Skill::Disarm        => "disarm",
             Skill::CureSerious   => "cure-serious",
             Skill::Heal          => "heal",
+            Skill::Infravision   => "infravision",
+            Skill::Stun          => "stun",
         }
     }
 
@@ -379,7 +395,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Dodge, Skill::Parry, Skill::Rescue,
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
-    Skill::CureSerious, Skill::Heal,
+    Skill::CureSerious, Skill::Heal, Skill::Infravision,
 ];
 
 // ---------------------------------------------------------------------------
@@ -633,6 +649,9 @@ pub struct Character {
     /// Last N dispatched commands (transient).  Recorded at the top of
     /// `dispatch_command`; viewed via `history`.
     pub history:      std::collections::VecDeque<String>,
+    /// Moral alignment: -1000 (pure evil) → +1000 (pure good).  0 = neutral.
+    /// Persisted; thresholds are >350 good, <-350 evil, else neutral.
+    pub alignment:    i32,
     /// Player ids currently snooping this character — every line their
     /// writer task drains is also cloned (prefixed) to each snooper's
     /// mpsc.  Transient; cleared on logout.  Multiple snoopers are
@@ -641,6 +660,9 @@ pub struct Character {
     /// Target this character is snooping, if any.  Used by
     /// `do_unsnoop` to clean up the reverse pointer.
     pub snooping:     Option<u32>,
+    /// Pending `group invite` source — populated when another player
+    /// invites us, consumed by `group accept`.  Transient.
+    pub group_invite_from: Option<u32>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.
@@ -809,6 +831,26 @@ pub fn wear_pos_name(pos: usize) -> &'static str {
         WEAR_WIELD    => "wielded",
         WEAR_HOLD     => "held",
         _             => "somewhere",
+    }
+}
+
+/// Banded alignment label.  Mirrors the CircleMUD thresholds in
+/// limits.c so anti-item gates can compare cleanly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignmentBand { Good, Neutral, Evil }
+
+impl AlignmentBand {
+    pub fn of(alignment: i32) -> AlignmentBand {
+        if alignment >  350 { AlignmentBand::Good }
+        else if alignment < -350 { AlignmentBand::Evil }
+        else { AlignmentBand::Neutral }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            AlignmentBand::Good    => "good",
+            AlignmentBand::Neutral => "neutral",
+            AlignmentBand::Evil    => "evil",
+        }
     }
 }
 

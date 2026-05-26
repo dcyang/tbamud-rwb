@@ -83,7 +83,7 @@ const COMMANDS: &[&str] = &[
     "say", "tell", "who",
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
-    "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
+    "quaff", "drink", "eat", "fill", "empty", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
@@ -271,6 +271,8 @@ pub async fn dispatch_command(
         Some("quaff")     => do_quaff(rest, me, world, chars).await,
         Some("drink")     => do_drink_container(rest, me, world, chars).await,
         Some("eat")       => do_eat(rest, me, world, chars).await,
+        Some("fill")      => do_fill(rest, me, world, chars).await,
+        Some("empty")     => do_empty(rest, me, world, chars).await,
         Some("recite")    => do_recite(rest, me, world, chars).await,
         Some("use")       => do_use(rest, me, world, chars).await,
         Some("zap")       => do_zap(rest, me, world, chars).await,
@@ -1681,6 +1683,76 @@ async fn do_follow(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOut
 /// players cannot self-group.
 async fn do_group(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
     let arg = arg.trim();
+    let (sub, rest) = match arg.split_once(char::is_whitespace) {
+        Some((s, r)) => (s, r.trim()),
+        None         => (arg, ""),
+    };
+    // `group invite <player>` — must be same-room target.
+    if sub.eq_ignore_ascii_case("invite") {
+        if rest.is_empty() {
+            return CmdOutput::text("\r\nUsage: group invite <player>\r\n".to_string());
+        }
+        let target = {
+            let cl = chars.lock().await;
+            let h = cl.iter()
+                .find(|p| p.id != me.id
+                    && p.current_room == me.current_room
+                    && p.name.eq_ignore_ascii_case(rest))
+                .cloned();
+            h
+        };
+        let Some(ph) = target else {
+            return CmdOutput::text(format!(
+                "\r\nNo player named '{rest}' is here.\r\n"
+            ));
+        };
+        ph.character.lock().await.group_invite_from = Some(me.id);
+        let _ = ph.send.send(format!(
+            "\r\n{} invites you to join their group.  Type `group accept` to join.\r\n",
+            me.name,
+        ));
+        return CmdOutput::text(format!(
+            "\r\nYou invite {} to your group.\r\n", ph.name,
+        ));
+    }
+    // `group accept` — consume pending invite, follow + group.
+    if sub.eq_ignore_ascii_case("accept") {
+        let Some(lid) = me.group_invite_from.take() else {
+            return CmdOutput::text("\r\nYou have no pending group invite.\r\n".to_string());
+        };
+        let leader = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == lid).cloned();
+            h
+        };
+        let Some(lph) = leader else {
+            return CmdOutput::text("\r\nYour inviter has gone offline.\r\n".to_string());
+        };
+        // Refuse if not in the same room any more.
+        if lph.current_room != me.current_room {
+            return CmdOutput::text(format!(
+                "\r\n{} isn't here any more.\r\n", lph.name
+            ));
+        }
+        me.following = Some(lph.id);
+        me.grouped   = true;
+        // Mark the leader's own `grouped` flag so gtell + group-XP work.
+        lph.character.lock().await.grouped = true;
+        let _ = lph.send.send(format!(
+            "\r\n{} accepts your group invitation and falls in behind you.\r\n",
+            me.name,
+        ));
+        return CmdOutput::text(format!(
+            "\r\nYou accept {}'s group invitation.\r\n", lph.name,
+        ));
+    }
+    // `group decline` — clear pending invite.
+    if sub.eq_ignore_ascii_case("decline") {
+        if me.group_invite_from.take().is_none() {
+            return CmdOutput::text("\r\nYou have no pending group invite.\r\n".to_string());
+        }
+        return CmdOutput::text("\r\nGroup invitation declined.\r\n".to_string());
+    }
     if arg.is_empty() {
         // List the group: me + all online followers of me with grouped=true.
         let cl = chars.lock().await;
@@ -3337,12 +3409,14 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     };
     let god_line = if me.god.is_empty() { String::new() }
                    else { format!("God:   {}\r\n", me.god) };
+    let align_band = crate::character::AlignmentBand::of(me.alignment);
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{god_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
+        me.alignment, align_band.name(),
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
     CmdOutput::text(s)
@@ -4688,6 +4762,18 @@ async fn do_skill(
         } else {
             false
         };
+        // Bash on a non-killing hit stuns the mob for one round.
+        if hit && !dead && matches!(skill, Skill::Bash) {
+            m.apply_affect(crate::character::Affect {
+                skill:         crate::character::Skill::Stun,
+                duration:      1,
+                to_hit:        0,
+                to_dam:        0,
+                dmg_reduction: 0,
+                dot_damage:    0,
+                to_ac:          0,
+            });
+        }
         (mob_name, vnum, dead, mob_room)
     };
 
@@ -4876,6 +4962,7 @@ async fn do_cast(
         crate::character::Skill::WordOfRecall => cast_word_of_recall(me, world, chars).await,
         crate::character::Skill::Identify     => cast_identify(target, me, world).await,
         crate::character::Skill::DetectInvis  => cast_detect_invis(me),
+        crate::character::Skill::Infravision  => cast_infravision(me),
         crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
         crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         crate::character::Skill::Sleep        => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Sleep).await,
@@ -4981,6 +5068,25 @@ fn cast_sense_life(me: &mut Character) -> CmdOutput {
     me.apply_affect(aff);
     CmdOutput::text(
         "\r\nThe air shimmers. You can feel the heartbeats of those around you.\r\n",
+    )
+}
+
+fn cast_infravision(me: &mut Character) -> CmdOutput {
+    // Affect that signals render_room to skip the dark-room gate
+    // (the viewer can see in the dark).
+    let aff = crate::character::Affect {
+        skill:         crate::character::Skill::Infravision,
+        duration:      24,
+        to_hit:        0,
+        to_dam:        0,
+        dmg_reduction: 0,
+        dot_damage:    0,
+        to_ac:         0,
+    };
+    me.mana -= crate::character::Skill::Infravision.mana_cost();
+    me.apply_affect(aff);
+    CmdOutput::text(
+        "\r\nYour eyes glow with a faint red light, piercing the dark.\r\n",
     )
 }
 
@@ -7635,6 +7741,134 @@ async fn do_drink_container(
     CmdOutput::text(text)
 }
 
+/// Locate a drink container OR fountain by keyword in the player's
+/// inventory and the current-room floor.  Returns `(iid, vnum, short,
+/// item_type)` for the first match; restricted to types listed in
+/// `accept`.
+async fn find_liquid_obj(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    kw: &str,
+    accept: &[i32],
+) -> Option<(u32, crate::world::ObjVnum, String, i32)> {
+    let kw = kw.to_ascii_lowercase();
+    let w = world.lock().await;
+    let pool: Vec<u32> = me.inventory.iter().copied()
+        .chain(w.rooms.get(&me.current_room).map(|r| r.objects.clone()).unwrap_or_default())
+        .collect();
+    for iid in pool {
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+        let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+        if !accept.contains(&p.item_type) { continue; }
+        if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+            return Some((iid, o.vnum, p.short_description.clone(), p.item_type));
+        }
+    }
+    None
+}
+
+/// `fill <container> <source>` — refill a drink container from a
+/// fountain (infinite source) or another drink container (drains it).
+/// Liquid type (value[2]) is propagated from the source to the target.
+async fn do_fill(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::{ITEM_DRINKCON, ITEM_FOUNTAIN};
+    let mut parts = arg.split_whitespace();
+    let Some(con_kw) = parts.next() else {
+        return CmdOutput::text("\r\nUsage: fill <container> <source>\r\n".to_string());
+    };
+    let Some(src_kw) = parts.next() else {
+        return CmdOutput::text("\r\nFill from what?\r\n".to_string());
+    };
+    let Some((_, con_vnum, con_short, _)) =
+        find_liquid_obj(me, world, con_kw, &[ITEM_DRINKCON]).await
+    else {
+        return CmdOutput::text("\r\nYou don't have a container by that name.\r\n".to_string());
+    };
+    let Some((_, src_vnum, src_short, src_type)) =
+        find_liquid_obj(me, world, src_kw, &[ITEM_DRINKCON, ITEM_FOUNTAIN]).await
+    else {
+        return CmdOutput::text("\r\nThere's no such source here.\r\n".to_string());
+    };
+    if con_vnum == src_vnum {
+        return CmdOutput::text("\r\nYou can't fill it from itself.\r\n".to_string());
+    }
+    // Transfer.  Fountain → fill to capacity.  Drink container → drain
+    // up to its current sips; both prototypes mutate.
+    let (capacity, new_sips, liquid_type) = {
+        let mut w = world.lock().await;
+        let con_cap = w.obj_protos.get(&con_vnum).map(|p| p.value[0]).unwrap_or(0);
+        if con_cap == 0 {
+            return CmdOutput::text(format!("\r\n{con_short} has no capacity.\r\n"));
+        }
+        let liquid_type = w.obj_protos.get(&src_vnum).map(|p| p.value[2]).unwrap_or(0);
+        let to_pour = if src_type == ITEM_FOUNTAIN {
+            con_cap
+        } else {
+            let src_cur = w.obj_protos.get(&src_vnum).map(|p| p.value[1]).unwrap_or(0);
+            src_cur.min(con_cap)
+        };
+        if to_pour == 0 {
+            return CmdOutput::text(format!("\r\n{src_short} is dry.\r\n"));
+        }
+        if src_type == ITEM_DRINKCON {
+            if let Some(sp) = w.obj_protos.get_mut(&src_vnum) {
+                sp.value[1] -= to_pour;
+            }
+        }
+        if let Some(cp) = w.obj_protos.get_mut(&con_vnum) {
+            cp.value[1] = to_pour;
+            cp.value[2] = liquid_type;
+        }
+        (con_cap, to_pour, liquid_type)
+    };
+    let _ = (capacity, liquid_type);
+    chars.lock().await.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} fills {con_short} from {src_short}.\r\n", me.name),
+    );
+    CmdOutput::text(format!(
+        "\r\nYou fill {con_short} from {src_short}. ({new_sips} sips)\r\n"
+    ))
+}
+
+/// `empty <container>` — pour out a drink container onto the ground.
+async fn do_empty(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::ITEM_DRINKCON;
+    let kw = arg.trim();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nEmpty what?\r\n".to_string());
+    }
+    let Some((_, vnum, short, _)) =
+        find_liquid_obj(me, world, kw, &[ITEM_DRINKCON]).await
+    else {
+        return CmdOutput::text("\r\nYou don't have a container by that name.\r\n".to_string());
+    };
+    {
+        let mut w = world.lock().await;
+        if let Some(p) = w.obj_protos.get_mut(&vnum) {
+            if p.value[1] <= 0 {
+                return CmdOutput::text(format!("\r\n{short} is already empty.\r\n"));
+            }
+            p.value[1] = 0;
+        }
+    }
+    chars.lock().await.broadcast_room(
+        me.current_room, Some(me.id),
+        &format!("{} empties {short} onto the ground.\r\n", me.name),
+    );
+    CmdOutput::text(format!("\r\nYou empty {short}.\r\n"))
+}
+
 /// `eat <kw>` — consume an ITEM_FOOD in inventory.  Flavor text + room
 /// broadcast; the object is extracted on use.  value[0] is the filling
 /// in hours, saved for future hunger tracking (no decay tick yet).
@@ -7994,6 +8228,31 @@ async fn snapshot_obj_affects(iid: u32, world: &Arc<Mutex<World>>) -> Vec<crate:
         .unwrap_or_default()
 }
 
+/// Return Some(label) if the player is barred from wearing/wielding
+/// this object based on its `extra_flags` and their class/alignment.
+fn anti_class_block(
+    extra_flags: u32,
+    class: crate::players::Class,
+    alignment: i32,
+) -> Option<&'static str> {
+    use crate::players::Class;
+    use crate::character::AlignmentBand;
+    use crate::world::*;
+    match class {
+        Class::Warrior   if extra_flags & ITEM_ANTI_WARRIOR    != 0 => return Some("warriors"),
+        Class::Cleric    if extra_flags & ITEM_ANTI_CLERIC     != 0 => return Some("clerics"),
+        Class::Thief     if extra_flags & ITEM_ANTI_THIEF      != 0 => return Some("thieves"),
+        Class::MagicUser if extra_flags & ITEM_ANTI_MAGIC_USER != 0 => return Some("magic users"),
+        _ => {}
+    }
+    match AlignmentBand::of(alignment) {
+        AlignmentBand::Good    if extra_flags & ITEM_ANTI_GOOD    != 0 => Some("the good-aligned"),
+        AlignmentBand::Evil    if extra_flags & ITEM_ANTI_EVIL    != 0 => Some("the evil-aligned"),
+        AlignmentBand::Neutral if extra_flags & ITEM_ANTI_NEUTRAL != 0 => Some("the neutral"),
+        _ => None,
+    }
+}
+
 async fn do_wield(
     arg: &str,
     me: &mut Character,
@@ -8011,15 +8270,24 @@ async fn do_wield(
         None => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
     };
 
-    // Item must have ITEM_WEAR_WIELD bit set.
-    let wear_flags = w.obj_protos.iter()
-        .find(|(_, p)| w.obj_instances.iter().any(|o| o.id == iid && o.vnum == p.vnum))
-        .map(|(_, p)| p.wear_flags[0])
-        .unwrap_or(0);
+    // Item must have ITEM_WEAR_WIELD bit set + no anti-class block.
+    let (wear_flags, extra_flags) = {
+        let obj = w.obj_instances.iter().find(|o| o.id == iid);
+        let proto = obj.and_then(|o| w.obj_protos.get(&o.vnum));
+        (
+            proto.map(|p| p.wear_flags[0]).unwrap_or(0),
+            proto.map(|p| p.extra_flags[0]).unwrap_or(0),
+        )
+    };
     drop(w);
 
     if wear_flags & ITEM_WEAR_WIELD == 0 {
         return CmdOutput::text(format!("\r\nYou cannot wield {short}.\r\n"));
+    }
+    if let Some(bar) = anti_class_block(extra_flags, me.class, me.alignment) {
+        return CmdOutput::text(format!(
+            "\r\n{short} pulses with a runic ward against {bar}.\r\n"
+        ));
     }
     if me.equipment[WEAR_WIELD].is_some() {
         return CmdOutput::text("\r\nYou are already wielding something.\r\n");
@@ -8050,12 +8318,14 @@ async fn do_wear(
         None => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
     };
 
-    // Look up the object's wear flags.
-    let wear_flags = {
+    // Look up the object's wear flags + extra flags (for anti-class).
+    let (wear_flags, extra_flags) = {
         let obj = w.obj_instances.iter().find(|o| o.id == iid);
-        obj.and_then(|o| w.obj_protos.get(&o.vnum))
-            .map(|p| p.wear_flags[0])
-            .unwrap_or(0)
+        let proto = obj.and_then(|o| w.obj_protos.get(&o.vnum));
+        (
+            proto.map(|p| p.wear_flags[0]).unwrap_or(0),
+            proto.map(|p| p.extra_flags[0]).unwrap_or(0),
+        )
     };
     drop(w);
 
@@ -8063,6 +8333,11 @@ async fn do_wear(
         Some(s) => s,
         None => return CmdOutput::text(format!("\r\nYou cannot wear {short}.\r\n")),
     };
+    if let Some(bar) = anti_class_block(extra_flags, me.class, me.alignment) {
+        return CmdOutput::text(format!(
+            "\r\n{short} pulses with a runic ward against {bar}.\r\n"
+        ));
+    }
 
     if me.equipment[slot].is_some() {
         return CmdOutput::text(format!(
@@ -8587,6 +8862,7 @@ pub async fn save_character_to_db(
     r.autoloot     = me.autoloot;
     r.autoassist   = me.autoassist;
     r.autotitle_off = !me.autotitle;
+    r.alignment    = me.alignment;
     r.practices = me.practices;
     r.room      = me.current_room;
     r.gold      = me.gold;
@@ -8640,6 +8916,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.autoloot     = me.autoloot;
             r.autoassist   = me.autoassist;
             r.autotitle_off = !me.autotitle;
+            r.alignment    = me.alignment;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
@@ -10246,7 +10523,7 @@ pub async fn render_room(
 
     // Snapshot the viewer's inventory + equipment ids for the dark-room
     // light-source check below.  Skipped for non-player views.
-    let viewer_objs: Vec<u32> = match viewer_id {
+    let (viewer_objs, viewer_infra): (Vec<u32>, bool) = match viewer_id {
         Some(id) => {
             let ph_opt = {
                 let cl = chars.lock().await;
@@ -10260,12 +10537,14 @@ pub async fn render_room(
                     for slot in c.equipment.iter().flatten() {
                         v.push(*slot);
                     }
-                    v
+                    let infra = c.affects.iter()
+                        .any(|a| a.skill == crate::character::Skill::Infravision);
+                    (v, infra)
                 }
-                None => Vec::new(),
+                None => (Vec::new(), false),
             }
         }
-        None => Vec::new(),
+        None => (Vec::new(), false),
     };
 
     let w = world.lock().await;
@@ -10274,8 +10553,9 @@ pub async fn render_room(
     };
 
     // Dark room handling.  Immortals always see; otherwise need a lit
-    // light source on the floor or in the viewer's possession.
-    if viewer_level < LVL_IMMORT && crate::db::is_room_dark(r) {
+    // light source on the floor or in the viewer's possession, OR the
+    // viewer has Infravision active.
+    if viewer_level < LVL_IMMORT && !viewer_infra && crate::db::is_room_dark(r) {
         let room_lit = r.objects.iter().any(|&iid| {
             w.obj_instances.iter()
                 .find(|o| o.id == iid)

@@ -190,6 +190,7 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         let w = world.lock().await;
         w.mob_instances.iter()
             .filter(|m| !m.affects.iter().any(|a| a.skill == crate::character::Skill::Sleep))
+            .filter(|m| !m.affects.iter().any(|a| a.skill == crate::character::Skill::Stun))
             .filter(|m| {
                 if m.affects.iter().any(|a| a.skill == crate::character::Skill::Slow) {
                     rand::thread_rng().gen_range(0..100) >= 50
@@ -642,9 +643,30 @@ async fn resolve_player_attack(
             let gold = proto.map(|mp| mp.gold as i64).unwrap_or(0);
             (xp, gold, vnum)
         };
+        // Snapshot mob alignment for the killer's alignment shift.
+        let mob_alignment: i32 = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == p.target.id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|mp| mp.alignment).unwrap_or(0)
+        };
         kill_mob(p.target.id, target_room, &target_name, &p.attacker_name, world, chars).await;
         // Clear the player's fighting state since the mob is gone.
         clear_player_fighting(p.attacker_id, chars).await;
+        // Alignment shift: killing evil mobs nudges killer toward good,
+        // and vice versa.  Cap at ±1000.
+        if mob_alignment != 0 {
+            let kh = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
+                h
+            };
+            if let Some(kh) = kh {
+                let shift = -mob_alignment.signum() * (mob_alignment.abs().min(50));
+                let mut c = kh.character.lock().await;
+                c.alignment = (c.alignment + shift / 5).clamp(-1000, 1000);
+            }
+        }
         // Award XP, split among grouped members in the kill room.
         award_xp_split(p.attacker_id, target_room, xp, chars).await;
         // Gold drop, same split rule as XP.

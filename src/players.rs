@@ -133,6 +133,8 @@ pub struct PlayerRecord {
     /// "default = true" implicit so the saved value 0 means off
     /// and absence means on (the default).
     pub autotitle_off: bool,
+    /// Moral alignment, range -1000..=1000.  Default 0 (neutral).
+    pub alignment:     i32,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -353,6 +355,7 @@ impl PlayerDb {
                 "AuLt" => rec.autoloot  = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuAs" => rec.autoassist = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuTl" => rec.autotitle_off = val.parse::<i32>().unwrap_or(0) != 0,
+                "Algn" => rec.alignment = val.parse().unwrap_or(0),
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -466,6 +469,7 @@ impl PlayerDb {
         if rec.autoloot   { writeln!(f, "AuLt: 1")?; }
         if rec.autoassist { writeln!(f, "AuAs: 1")?; }
         if rec.autotitle_off { writeln!(f, "AuTl: 1")?; }
+        if rec.alignment != 0 { writeln!(f, "Algn: {}", rec.alignment)?; }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
         }
