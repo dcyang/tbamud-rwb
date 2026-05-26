@@ -80,7 +80,7 @@ const COMMANDS: &[&str] = &[
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
-    "emote", "socials", "note", "notes", "pose", "uptime", "peace",
+    "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -164,7 +164,7 @@ pub async fn dispatch_command(
         Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
         Some("tell")      => do_tell(rest, me, chars).await,
-        Some("who")       => do_who(me, chars).await,
+        Some("who")       => do_who(rest, me, chars).await,
         Some("score")     => do_score(me, world).await,
         Some("exp")       => do_exp(me),
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
@@ -235,11 +235,13 @@ pub async fn dispatch_command(
         Some("pose")      => do_pose(rest, me),
         Some("uptime")    => do_uptime(),
         Some("peace")     => do_peace(me, world, chars).await,
+        Some("order")     => do_order(rest, me, world, chars).await,
+        Some("pvp")       => do_pvp(me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
         Some("shutdown")  => do_shutdown(me, chars).await,
-        Some("stat")      => do_stat(rest, me, world, chars).await,
+        Some("stat")      => do_stat(rest, me, world, chars, players).await,
         Some("force")     => do_force(rest, me, world, chars).await,
         Some("set")       => do_set(rest, me, chars).await,
         Some("wizlock")   => do_wizlock(rest, me),
@@ -974,6 +976,93 @@ async fn do_scan(
 /// "You have no notes yet."
 /// `pose <text>` — set a vanity emote shown in render_room next to your
 /// "X is here" line.  `pose` or `pose -` clears.
+/// `order <mob> kill <target>` — direct your charmed mob to attack
+/// another mob in the same room.  Caller must be the mob's charmer
+/// (set by cast_charm_person) and the mob must still hold the
+/// CharmPerson affect.
+async fn do_order(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let parts: Vec<&str> = arg.splitn(3, char::is_whitespace).collect();
+    if parts.len() < 3 || !parts[1].eq_ignore_ascii_case("kill") {
+        return CmdOutput::text("\r\nUsage: order <mob> kill <target>\r\n".to_string());
+    }
+    let mob_kw    = parts[0].to_ascii_lowercase();
+    let target_kw = parts[2].to_ascii_lowercase();
+
+    let result = {
+        let mut w = world.lock().await;
+        // Find the charmed mob in the caller's room.
+        let mob_id: Option<u32> = w.rooms.get(&me.current_room).and_then(|r| {
+            r.mobs.iter().find_map(|&mid| {
+                let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+                if m.charmer != Some(me.id) { return None; }
+                if !m.affects.iter().any(|a| a.skill == crate::character::Skill::CharmPerson) {
+                    return None;
+                }
+                let p = w.mob_protos.get(&m.vnum)?;
+                if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&mob_kw)) {
+                    Some(mid)
+                } else { None }
+            })
+        });
+        let Some(mob_id) = mob_id else {
+            return CmdOutput::text(format!("\r\nYou have no '{mob_kw}' under your command here.\r\n"));
+        };
+        // Find target mob in the same room (must not be the charmed mob itself).
+        let target_id: Option<u32> = w.rooms.get(&me.current_room).and_then(|r| {
+            r.mobs.iter().find_map(|&tid| {
+                if tid == mob_id { return None; }
+                let t = w.mob_instances.iter().find(|m| m.id == tid)?;
+                let p = w.mob_protos.get(&t.vnum)?;
+                if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&target_kw)) {
+                    Some(tid)
+                } else { None }
+            })
+        });
+        let Some(target_id) = target_id else {
+            return CmdOutput::text(format!("\r\nYou see no '{target_kw}' to attack here.\r\n"));
+        };
+        // Engage.
+        let (m_name, t_name) = {
+            let m  = w.mob_instances.iter().find(|m| m.id == mob_id).unwrap();
+            let t  = w.mob_instances.iter().find(|m| m.id == target_id).unwrap();
+            let mn = w.mob_protos.get(&m.vnum).map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "your servant".to_string());
+            let tn = w.mob_protos.get(&t.vnum).map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the target".to_string());
+            (mn, tn)
+        };
+        let mob = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        mob.fighting = Some(crate::character::Target { id: target_id, is_player: false });
+        let target = w.mob_instances.iter_mut().find(|m| m.id == target_id).unwrap();
+        if target.fighting.is_none() {
+            target.fighting = Some(crate::character::Target { id: mob_id, is_player: false });
+        }
+        (m_name, t_name)
+    };
+    let (m_name, t_name) = result;
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{m_name} springs to attack {t_name}!\r\n"));
+    CmdOutput::text(format!(
+        "\r\nYou order {m_name} to attack {t_name}.\r\n"
+    ))
+}
+
+fn do_pvp(me: &mut Character) -> CmdOutput {
+    me.pvp_ok = !me.pvp_ok;
+    CmdOutput::text(format!(
+        "\r\nPvP: {}. {}\r\n",
+        if me.pvp_ok { "ENABLED" } else { "disabled" },
+        if me.pvp_ok { "You can now attack and be attacked by other consenting players." }
+        else         { "You are now safe from other players." },
+    ))
+}
+
 fn do_uptime() -> CmdOutput {
     use std::sync::atomic::Ordering;
     let boot = crate::server::BOOT_UNIX_TS.load(Ordering::Relaxed);
@@ -2010,6 +2099,7 @@ async fn do_stat(
     me: &Character,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
 ) -> CmdOutput {
     if me.level < LVL_IMMORT { return immort_huh(); }
     let arg = arg.trim();
@@ -2113,6 +2203,67 @@ async fn do_stat(
         return CmdOutput::text(s);
     }
 
+    // Numeric vnum lookup against prototypes: room → obj → mob.
+    if let Ok(vn) = arg.parse::<i32>() {
+        let w = world.lock().await;
+        if let Some(r) = w.rooms.get(&vn) {
+            let mut s = format!(
+                "\r\nRoom proto [{}] (zone {})\r\n  Name:     {}\r\n  Flags:    0x{:x}\r\n  Sector:   {}\r\n",
+                r.vnum, r.zone, r.name, r.room_flags[0], r.sector_type,
+            );
+            let mut exits = Vec::new();
+            for d in crate::world::Direction::ALL {
+                if let Some(e) = &r.exits[d as usize] {
+                    if e.to_room == crate::world::NOWHERE { continue; }
+                    exits.push(format!("{}→{}", d.name(), e.to_room));
+                }
+            }
+            s.push_str(&format!("  Exits:    {}\r\n",
+                if exits.is_empty() { "(none)".to_string() } else { exits.join(", ") }));
+            return CmdOutput::text(s);
+        }
+        if let Some(p) = w.obj_protos.get(&vn) {
+            return CmdOutput::text(format!(
+                "\r\nObject proto [{}]\r\n  Short:    {}\r\n  Type:     {}\r\n  Keys:     {}\r\n  Value:    {} {} {} {}\r\n  Wear:     0x{:x}\r\n  Extra:    0x{:x}\r\n  Weight:   {}\r\n  Cost:     {}\r\n  Level:    {}\r\n  Timer:    {}\r\n  Affects:  {:?}\r\n",
+                p.vnum, p.short_description, item_type_name(p.item_type),
+                p.name, p.value[0], p.value[1], p.value[2], p.value[3],
+                p.wear_flags[0], p.extra_flags[0],
+                p.weight, p.cost, p.level, p.timer, p.affected,
+            ));
+        }
+        if let Some(p) = w.mob_protos.get(&vn) {
+            return CmdOutput::text(format!(
+                "\r\nMob proto [{}]\r\n  Short:    {}\r\n  Keys:     {}\r\n  Level:    {}\r\n  HP dice:  {}d{}+{}\r\n  Dam dice: {}d{}+{}\r\n  AC:       {}\r\n  Hitroll:  {}\r\n  Gold:     {}\r\n  Exp:      {}\r\n  Flags:    0x{:x}\r\n  Affs:     0x{:x}\r\n",
+                p.vnum, p.short_descr, p.name, p.level,
+                p.hp_dice, p.hp_size, p.hp_add,
+                p.dam_dice, p.dam_size, p.damroll,
+                p.ac, p.hitroll, p.gold, p.exp,
+                p.mob_flags[0], p.aff_flags[0],
+            ));
+        }
+    }
+
+    // Last resort: try the player index for an offline character.
+    let offline_rec = {
+        let db = players.lock().await;
+        if let Some(canon) = db.find_name(arg) {
+            db.load_player(&canon).ok()
+        } else {
+            None
+        }
+    };
+    if let Some(r) = offline_rec {
+        let s = format!(
+            "\r\n[Offline] Player {}  (level {})\r\n  Class:    {:?}\r\n  HP:       {}/{}\r\n  Mana:     {}/{}\r\n  Exp:      {}\r\n  Gold:     {} (bank {})\r\n  Room:     {}\r\n  Hunger/Thirst: {}/{}\r\n  Active quest: {:?}  (progress {})\r\n  Completed: {}\r\n  Title:    {}\r\n",
+            r.name, r.level, r.class, r.hp, r.max_hp, r.mana, r.max_mana,
+            r.exp, r.gold, r.bank_gold, r.room,
+            r.hunger, r.thirst, r.active_quest, r.quest_progress,
+            r.completed_quests.len(),
+            if r.title.is_empty() { "(none)".to_string() } else { r.title.clone() },
+        );
+        return CmdOutput::text(s);
+    }
+
     CmdOutput::text("\r\nNo one and nothing matches that here.\r\n".to_string())
 }
 
@@ -2163,31 +2314,85 @@ async fn do_where(
     CmdOutput::text(s)
 }
 
-async fn do_who(me: &Character, chars: &SharedChars) -> CmdOutput {
-    // Snapshot titles outside the registry lock so we don't serialize on
-    // contended Character mutexes.
-    let titles: Vec<(u32, String)> = {
+async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    // Parse filters: bare word = name substring; `-c <class>` = class;
+    // `-l <lo>-<hi>` = level range.  Filters compose (all must match).
+    let mut name_substr: Option<String> = None;
+    let mut class_filter: Option<crate::players::Class> = None;
+    let mut level_range: Option<(i32, i32)> = None;
+    let toks: Vec<&str> = arg.split_whitespace().collect();
+    let mut i = 0;
+    while i < toks.len() {
+        match toks[i] {
+            "-c" => {
+                if let Some(v) = toks.get(i + 1) {
+                    class_filter = match v.to_ascii_lowercase().as_str() {
+                        "warrior"   => Some(crate::players::Class::Warrior),
+                        "thief"     => Some(crate::players::Class::Thief),
+                        "cleric"    => Some(crate::players::Class::Cleric),
+                        "magicuser" | "magic-user" | "mu" => Some(crate::players::Class::MagicUser),
+                        _           => None,
+                    };
+                    i += 2; continue;
+                }
+            }
+            "-l" => {
+                if let Some(v) = toks.get(i + 1) {
+                    let (lo, hi) = match v.split_once('-') {
+                        Some((a, b)) => (a.parse().unwrap_or(0), b.parse().unwrap_or(34)),
+                        None         => {
+                            let n = v.parse().unwrap_or(0);
+                            (n, n)
+                        }
+                    };
+                    level_range = Some((lo, hi));
+                    i += 2; continue;
+                }
+            }
+            other => {
+                name_substr = Some(other.to_ascii_lowercase());
+            }
+        }
+        i += 1;
+    }
+
+    // Snapshot titles + classes outside the registry lock to avoid
+    // serializing on contended Character mutexes.
+    let extras: Vec<(u32, String, crate::players::Class)> = {
         let cl = chars.lock().await;
         let handles: Vec<_> = cl.iter().cloned().collect();
         drop(cl);
         let mut out = Vec::new();
         for ph in handles {
-            let t = ph.character.lock().await.title.clone();
-            out.push((ph.id, t));
+            let c = ph.character.lock().await;
+            out.push((ph.id, c.title.clone(), c.class));
         }
         out
     };
+
     let cl = chars.lock().await;
     let mut s = String::from("\r\nPlayers online:\r\n");
     let mut count = 0;
     for p in cl.iter() {
+        let (_, title, class) = extras.iter().find(|(id, _, _)| *id == p.id)
+            .cloned()
+            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined));
+        if let Some(sub) = &name_substr {
+            if !p.name.to_ascii_lowercase().contains(sub) { continue; }
+        }
+        if let Some(cf) = class_filter {
+            if class != cf { continue; }
+        }
+        if let Some((lo, hi)) = level_range {
+            if p.level < lo || p.level > hi { continue; }
+        }
         let marker = if p.id == me.id { " (you)" } else { "" };
-        let title = titles.iter().find(|(id, _)| *id == p.id).map(|(_, t)| t.as_str()).unwrap_or("");
         let title_str = if title.is_empty() { String::new() } else { format!(" {title}") };
-        s.push_str(&format!("  [{:>2}] {}{}{}\r\n", p.level, p.name, title_str, marker));
+        s.push_str(&format!("  [{:>2} {:>3}] {}{}{}\r\n",
+            p.level, class.as_str(), p.name, title_str, marker));
         count += 1;
     }
-    s.push_str(&format!("\r\n{count} player(s) online.\r\n"));
+    s.push_str(&format!("\r\n{count} player(s) shown.\r\n"));
     CmdOutput::text(s)
 }
 
@@ -2854,6 +3059,45 @@ async fn do_kill(
             "\r\nA flash of white light fills the room, dispelling your violent aggression!\r\n"
         );
     }
+    drop(w);
+
+    // PvP: if the target name matches another online player in the same
+    // room, route through the player-target path.  Both parties must
+    // have `pvp_ok` set.
+    let pvp_target: Option<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.id != me.id
+            && p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(&key)).cloned();
+        h
+    };
+    if let Some(ph) = pvp_target {
+        if !me.pvp_ok {
+            return CmdOutput::text(
+                "\r\nYou need to enable PvP first (type `pvp`).\r\n".to_string()
+            );
+        }
+        let target_pvp = ph.character.lock().await.pvp_ok;
+        if !target_pvp {
+            return CmdOutput::text(format!(
+                "\r\n{} hasn't consented to PvP.\r\n", ph.name,
+            ));
+        }
+        me.fighting = Some(Target { id: ph.id, is_player: true });
+        {
+            let mut tc = ph.character.lock().await;
+            if tc.fighting.is_none() {
+                tc.fighting = Some(Target { id: me.id, is_player: false });
+            }
+        }
+        let _ = ph.send.send(format!("\r\n{} attacks you!\r\n", me.name));
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} attacks {}!\r\n", me.name, ph.name));
+        return CmdOutput::text(format!("\r\nYou attack {}!\r\n", ph.name));
+    }
+    let mut w = world.lock().await;
 
     // Find a mob in the current room whose proto.name keyword matches.
     let mob_id = {
@@ -3207,6 +3451,9 @@ async fn do_cast(
         crate::character::Skill::Slow         => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Slow).await,
         crate::character::Skill::Earthquake   => cast_earthquake(me, world, chars, learned).await,
         crate::character::Skill::CharmPerson  => cast_debuff(target, me, world, chars, learned, crate::character::Skill::CharmPerson).await,
+        crate::character::Skill::LocateObject => cast_locate_object(target, me, world, chars).await,
+        crate::character::Skill::Refresh      => cast_refresh(target, me, chars).await,
+        crate::character::Skill::Summon       => cast_summon(target, me, world, chars).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -3332,16 +3579,17 @@ async fn cast_magic_missile(
     // Hit chance: 70 base + half of learned %. Magic missile rarely misses.
     let hit_chance = (70 + learned as i32 / 2).min(99);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
-    let dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_);
+    let base_dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_);
     me.mana -= crate::character::Skill::MagicMissile.mana_cost();
 
-    let (mob_name, killed_vnum, mob_dead, mob_room) = {
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
         let mut w = world.lock().await;
         let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
             Some(m) => m,
             None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
         };
         let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
         let mob_name = w.mob_protos.get(&vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "the creature".into());
@@ -3349,6 +3597,9 @@ async fn cast_magic_missile(
         if mob_room != me.current_room {
             return CmdOutput::text("\r\nYour target is no longer here.\r\n");
         }
+        // Save for half on a hit.
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
         // Engage combat.
         let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
         if me.fighting.is_none() {
@@ -3356,10 +3607,15 @@ async fn cast_magic_missile(
             m.fighting = Some(Target { id: me.id, is_player: true });
         }
         let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
-        (mob_name, vnum, dead, mob_room)
+        (mob_name, vnum, dead, mob_room, saved, dmg)
     };
 
-    let (to_me, to_room) = if hit {
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nA glowing dart of force streaks from your hand and strikes {mob_name} for {dmg} damage (partial resist)!\r\n"),
+            format!("A glowing dart of force streaks from {}'s hand and grazes {mob_name}.\r\n", me.name),
+        )
+    } else if hit {
         (
             format!("\r\nA glowing dart of force streaks from your hand and strikes {mob_name} for {dmg} damage!\r\n"),
             format!("A glowing dart of force streaks from {}'s hand and strikes {mob_name}.\r\n", me.name),
@@ -3651,31 +3907,39 @@ async fn cast_harm(
 
     let hit_chance = (65 + learned as i32 / 4).min(95);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
-    let dmg = dice(3, 8) + me.level + (me.wis - 10).max(0) / 2;
+    let base_dmg = dice(3, 8) + me.level + (me.wis - 10).max(0) / 2;
     me.mana -= crate::character::Skill::Harm.mana_cost();
 
-    let (mob_name, killed_vnum, mob_dead, mob_room) = {
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
         let mut w = world.lock().await;
         let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
             Some(m) => (m.vnum, m.in_room),
             None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
         };
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
         let mob_name = w.mob_protos.get(&vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "the creature".into());
         if in_room != me.current_room {
             return CmdOutput::text("\r\nYour target is no longer here.\r\n");
         }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
         let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
         if me.fighting.is_none() {
             me.fighting = Some(Target { id: mob_id, is_player: false });
             m.fighting = Some(Target { id: me.id, is_player: true });
         }
         let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
-        (mob_name, vnum, dead, in_room)
+        (mob_name, vnum, dead, in_room, saved, dmg)
     };
 
-    let (to_me, to_room) = if hit {
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nYou call down divine wrath upon {mob_name}! ({dmg} damage, partial resist)\r\n"),
+            format!("{} calls down divine wrath upon {mob_name}, who endures it.\r\n", me.name),
+        )
+    } else if hit {
         (
             format!("\r\nYou call down divine wrath upon {mob_name}! ({dmg} damage)\r\n"),
             format!("{} calls down divine wrath upon {mob_name}.\r\n", me.name),
@@ -4170,6 +4434,202 @@ async fn cast_buff(
     CmdOutput::text(format!("\r\nYou cast {} on {}.\r\n", skill.name(), ph.name))
 }
 
+/// `cast locate-object <keyword>` — sweep `world.obj_instances` for the
+/// keyword and report each match's location.  Caps at 10 hits so a
+/// search for "a" doesn't pour a flood of lines into the player's
+/// terminal.  Hit% scales with learned (50 + learned/2 clamped 95).
+async fn cast_locate_object(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    me.mana -= crate::character::Skill::LocateObject.mana_cost();
+    let kw = target_kw.trim();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nLocate what?\r\n".to_string());
+    }
+    let hit_chance = (50 + me.skills.get(&crate::character::Skill::LocateObject)
+        .copied().unwrap_or(0) as i32 / 2).min(95);
+    if rand::thread_rng().gen_range(0..100) >= hit_chance {
+        return CmdOutput::text(format!("\r\nYou sense nothing called '{kw}'.\r\n"));
+    }
+    let needle = kw.to_ascii_lowercase();
+    let lines: Vec<String> = {
+        let w = world.lock().await;
+        let mut out = Vec::new();
+        for o in &w.obj_instances {
+            if out.len() >= 10 { break; }
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+            if !p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&needle))
+                && !p.short_description.to_ascii_lowercase().contains(&needle)
+            { continue; }
+            // Where is it?
+            if o.in_room != crate::world::NOWHERE {
+                let rname = w.rooms.get(&o.in_room).map(|r| r.name.as_str())
+                    .unwrap_or("(nowhere)");
+                out.push(format!(
+                    "  {} — in [{}] {}",
+                    p.short_description, o.in_room, rname,
+                ));
+            } else {
+                // Find the mob carrying this iid.
+                let carrier = w.mob_instances.iter()
+                    .find(|m| m.inventory.contains(&o.id))
+                    .and_then(|m| w.mob_protos.get(&m.vnum).map(|p| p.short_descr.clone()));
+                if let Some(carrier_name) = carrier {
+                    out.push(format!(
+                        "  {} — carried by {carrier_name}",
+                        p.short_description,
+                    ));
+                } else {
+                    out.push(format!(
+                        "  {} — somewhere unseen", p.short_description,
+                    ));
+                }
+            }
+        }
+        out
+    };
+    // Also walk the chars registry for inventory/equipment.  We do this
+    // after dropping the world lock so the per-Character locks don't
+    // serialize on it.
+    let mut player_lines: Vec<String> = Vec::new();
+    if lines.len() < 10 {
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        for ph in handles {
+            if player_lines.len() + lines.len() >= 10 { break; }
+            let c = ph.character.lock().await;
+            let inv = c.inventory.iter().copied()
+                .chain(c.equipment.iter().filter_map(|s| *s));
+            let w = world.lock().await;
+            for iid in inv {
+                if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                    if let Some(p) = w.obj_protos.get(&o.vnum) {
+                        if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&needle))
+                            || p.short_description.to_ascii_lowercase().contains(&needle)
+                        {
+                            player_lines.push(format!(
+                                "  {} — carried by {}",
+                                p.short_description, ph.name,
+                            ));
+                            if player_lines.len() + lines.len() >= 10 { break; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if lines.is_empty() && player_lines.is_empty() {
+        return CmdOutput::text(format!("\r\nYou sense nothing called '{kw}'.\r\n"));
+    }
+    let mut s = String::from("\r\nYour mind reaches out and senses:\r\n");
+    for l in &lines { s.push_str(l); s.push_str("\r\n"); }
+    for l in &player_lines { s.push_str(l); s.push_str("\r\n"); }
+    CmdOutput::text(s)
+}
+
+/// `cast refresh [target]` — restore `dice(2,8) + level` mana to the
+/// caster (no arg) or to a named player in the same room.
+async fn cast_refresh(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::db::dice;
+    me.mana -= crate::character::Skill::Refresh.mana_cost();
+    let gain = dice(2, 8) + me.level;
+    if target_kw.is_empty() {
+        me.mana = (me.mana + gain).min(me.max_mana);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} pauses, focusing inward.\r\n", me.name));
+        return CmdOutput::text(format!(
+            "\r\nClarity floods your mind. ({}/{} mana)\r\n",
+            me.mana, me.max_mana,
+        ));
+    }
+    let target_ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = target_ph else {
+        return CmdOutput::text(format!("\r\nNo one named '{target_kw}' is here.\r\n"));
+    };
+    let (new_mana, max) = {
+        let mut c = ph.character.lock().await;
+        c.mana = (c.mana + gain).min(c.max_mana);
+        (c.mana, c.max_mana)
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} focuses, and clarity floods your mind. ({}/{} mana)\r\n",
+        me.name, new_mana, max,
+    ));
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} pauses, focusing on {}.\r\n", me.name, ph.name));
+    CmdOutput::text(format!(
+        "\r\nYou restore {} mana to {}.\r\n", gain, ph.name,
+    ))
+}
+
+/// `cast summon <player>` — yank a named online player into the
+/// caster's room.  Refuses if the target is too powerful
+/// (target.level > caster.level + 5) with "They resist the call."
+async fn cast_summon(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    me.mana -= crate::character::Skill::Summon.mana_cost();
+    if target_kw.is_empty() {
+        return CmdOutput::text("\r\nSummon whom?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.id != me.id && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    if ph.level > me.level + 5 {
+        return CmdOutput::text(format!("\r\n{} resists the call.\r\n", ph.name));
+    }
+    let to_room = me.current_room;
+    let from_room = {
+        let mut c = ph.character.lock().await;
+        let f = c.current_room;
+        if f == to_room {
+            let _ = ph.send.send(format!("\r\n{} mutters about you.\r\n", me.name));
+            return CmdOutput::text(format!("\r\n{} is already here.\r\n", ph.name));
+        }
+        c.current_room = to_room;
+        f
+    };
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(ph.id, to_room);
+        cl.broadcast_room(from_room, Some(ph.id),
+            &format!("{} disappears in a flash of magic.\r\n", ph.name));
+        cl.broadcast_room(to_room, Some(ph.id),
+            &format!("{} appears, summoned by {}.\r\n", ph.name, me.name));
+    }
+    let _ = ph.send.send(format!("\r\n{} summons you!\r\n", me.name));
+    let view = render_room(to_room, Some(ph.id), world, chars).await;
+    let _ = ph.send.send(view);
+    CmdOutput::text(format!("\r\nYou summon {} to your side.\r\n", ph.name))
+}
+
 async fn cast_identify(
     target_kw: &str,
     me: &mut Character,
@@ -4332,19 +4792,22 @@ async fn cast_burning_hands(
         // Per-target hit roll.
         let hit_chance = (65 + learned as i32 / 4).min(95);
         if rand::thread_rng().gen_range(0..100) >= hit_chance { continue; }
-        let dmg = dice(2, 4) + me.level / 2
+        let base_dmg = dice(2, 4) + me.level / 2
             + crate::character::str_damage_bonus(me.int_);
 
-        let (mob_name, mob_dead, mob_room) = {
+        let (mob_name, mob_dead, mob_room, dmg, saved) = {
             let mut w = world.lock().await;
             let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
                 Some(m) => (m.vnum, m.in_room),
                 None => continue,
             };
             if in_room != me.current_room { continue; }
+            let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
             let mob_name = w.mob_protos.get(&vnum)
                 .map(|p| p.short_descr.clone())
                 .unwrap_or_else(|| "the creature".into());
+            let saved = save_vs_spell(me.level, target_level);
+            let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
             let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
             m.hp -= dmg;
             if me.fighting.is_none() {
@@ -4353,9 +4816,13 @@ async fn cast_burning_hands(
             if m.fighting.is_none() {
                 m.fighting = Some(Target { id: me.id, is_player: true });
             }
-            (mob_name, m.hp <= 0, in_room)
+            (mob_name, m.hp <= 0, in_room, dmg, saved)
         };
-        to_me.push_str(&format!("Flames sear {mob_name} for {dmg} damage!\r\n"));
+        if saved {
+            to_me.push_str(&format!("Flames sear {mob_name} for {dmg} damage (partial resist).\r\n"));
+        } else {
+            to_me.push_str(&format!("Flames sear {mob_name} for {dmg} damage!\r\n"));
+        }
 
         if mob_dead {
             // Fire DEATH triggers before extraction.
@@ -4458,17 +4925,20 @@ async fn cast_earthquake(
     let mut total_xp = 0i64;
     let mut killed_names: Vec<String> = Vec::new();
     for mob_id in mob_ids {
-        let dmg = dice(2, 8) + me.level + (me.wis - 10).max(0) / 2;
-        let (mob_name, mob_dead, mob_room) = {
+        let base_dmg = dice(2, 8) + me.level + (me.wis - 10).max(0) / 2;
+        let (mob_name, mob_dead, mob_room, dmg, saved) = {
             let mut w = world.lock().await;
             let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
                 Some(m) => (m.vnum, m.in_room),
                 None => continue,
             };
             if in_room != me.current_room { continue; }
+            let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
             let mob_name = w.mob_protos.get(&vnum)
                 .map(|p| p.short_descr.clone())
                 .unwrap_or_else(|| "the creature".into());
+            let saved = save_vs_spell(me.level, target_level);
+            let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
             let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
             m.hp -= dmg;
             if me.fighting.is_none() {
@@ -4477,9 +4947,13 @@ async fn cast_earthquake(
             if m.fighting.is_none() {
                 m.fighting = Some(Target { id: me.id, is_player: true });
             }
-            (mob_name, m.hp <= 0, in_room)
+            (mob_name, m.hp <= 0, in_room, dmg, saved)
         };
-        to_me.push_str(&format!("The shockwave hits {mob_name} for {dmg} damage!\r\n"));
+        if saved {
+            to_me.push_str(&format!("The shockwave hits {mob_name} for {dmg} damage (partial resist).\r\n"));
+        } else {
+            to_me.push_str(&format!("The shockwave hits {mob_name} for {dmg} damage!\r\n"));
+        }
 
         if mob_dead {
             fire_mob_death_triggers(mob_id, &me.name, world, chars).await;

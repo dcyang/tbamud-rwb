@@ -54,6 +54,9 @@ pub enum Skill {
     Slow,
     Earthquake,
     CharmPerson,
+    LocateObject,
+    Refresh,
+    Summon,
     Dodge,
     Parry,
 }
@@ -103,6 +106,9 @@ impl Skill {
             "slow"                            => Some(Skill::Slow),
             "earthquake"                      => Some(Skill::Earthquake),
             "charmperson" | "charm"           => Some(Skill::CharmPerson),
+            "locateobject" | "locate"         => Some(Skill::LocateObject),
+            "refresh"                         => Some(Skill::Refresh),
+            "summon"                          => Some(Skill::Summon),
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
             _ => None,
@@ -141,6 +147,9 @@ impl Skill {
             Skill::Slow         => "slow",
             Skill::Earthquake   => "earthquake",
             Skill::CharmPerson  => "charm person",
+            Skill::LocateObject => "locate object",
+            Skill::Refresh      => "refresh",
+            Skill::Summon       => "summon",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -159,7 +168,8 @@ impl Skill {
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
-                | Skill::Earthquake   | Skill::CharmPerson
+                | Skill::Earthquake   | Skill::CharmPerson | Skill::LocateObject
+                | Skill::Refresh      | Skill::Summon
                                       => SkillKind::Spell,
         }
     }
@@ -192,6 +202,9 @@ impl Skill {
             Skill::Slow         => 12,
             Skill::Earthquake   => 18,
             Skill::CharmPerson  => 14,
+            Skill::LocateObject => 10,
+            Skill::Refresh      => 4,
+            Skill::Summon       => 25,
         }
     }
 
@@ -230,6 +243,9 @@ impl Skill {
             Skill::Slow         => &[Class::MagicUser],
             Skill::Earthquake   => &[Class::MagicUser, Class::Cleric],
             Skill::CharmPerson  => &[Class::MagicUser],
+            Skill::LocateObject => &[Class::MagicUser, Class::Cleric],
+            Skill::Refresh      => &[Class::Cleric],
+            Skill::Summon       => &[Class::MagicUser],
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
         }
@@ -271,6 +287,9 @@ impl Skill {
             Skill::Slow         => "slow",
             Skill::Earthquake   => "earthquake",
             Skill::CharmPerson  => "charm-person",
+            Skill::LocateObject => "locate-object",
+            Skill::Refresh      => "refresh",
+            Skill::Summon       => "summon",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -294,7 +313,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
     Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
-    Skill::CharmPerson,
+    Skill::CharmPerson, Skill::LocateObject, Skill::Refresh, Skill::Summon,
     Skill::Dodge, Skill::Parry,
 ];
 
@@ -441,6 +460,9 @@ pub struct Character {
     pub notes:        Vec<String>,
     /// Pose — appended to "X is here, ..." in render_room.  Persisted.
     pub pose:         String,
+    /// PvP opt-in.  When false, the player can neither be attacked by
+    /// nor attack another player.  Transient.
+    pub pvp_ok:       bool,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

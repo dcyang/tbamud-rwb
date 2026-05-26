@@ -289,6 +289,7 @@ pub const MOB_AGGRESSIVE: u32 = 1 << 5;
 pub const MOB_STAY_ZONE:  u32 = 1 << 6;
 pub const MOB_WIMPY:      u32 = 1 << 7;
 pub const MOB_MEMORY:     u32 = 1 << 11;
+pub const MOB_HELPER:     u32 = 1 << 12;
 
 // ---------------------------------------------------------------------------
 // Mob prototypes & instances

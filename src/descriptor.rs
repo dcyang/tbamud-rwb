@@ -275,6 +275,7 @@ pub async fn handle_connection(
                     aliases:          p_ref.map(|p| p.aliases.clone()).unwrap_or_default(),
                     notes:            p_ref.map(|p| p.notes.clone()).unwrap_or_default(),
                     pose:             p_ref.map(|p| p.pose.clone()).unwrap_or_default(),
+                    pvp_ok:           false,
                     last_activity:    std::time::Instant::now(),
                 };
 

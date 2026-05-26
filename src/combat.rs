@@ -368,13 +368,93 @@ struct MobIntent {
     level:         i32,
 }
 
+/// Player-vs-player swing.  Mirrors resolve_player_attack's structure
+/// but the target is another Character behind a mutex.  Uses
+/// `interpreter::total_ac` for the defender's AC and `player_death`
+/// for kill resolution.
+async fn resolve_pvp_attack(
+    p: PlayerIntent,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let target_ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|h| h.id == p.target.id).cloned();
+        h
+    };
+    let Some(ph) = target_ph else {
+        clear_player_fighting(p.attacker_id, chars).await;
+        return;
+    };
+    // Damage roll first.
+    let base_dmg = {
+        let w = world.lock().await;
+        let weapon = p.weapon_iid.and_then(|iid|
+            w.obj_instances.iter().find(|o| o.id == iid)
+                .and_then(|o| w.obj_protos.get(&o.vnum)));
+        let base = if let Some(wp) = weapon {
+            dice(wp.value[1], wp.value[2])
+        } else {
+            dice(1, 4)
+        };
+        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1)
+    };
+    // Snapshot defender AC + check room/peace.
+    let (target_ac, target_room, target_name) = {
+        let c = ph.character.lock().await;
+        let ac = crate::interpreter::total_ac(&c, world).await;
+        (ac, c.current_room, c.name.clone())
+    };
+    if target_room != p.room {
+        clear_player_fighting(p.attacker_id, chars).await;
+        return;
+    }
+    let hit_chance = (60 + p.level + dex_hit_bonus(p.dex_score) + p.hit_bonus - target_ac / 10)
+        .clamp(5, 95);
+    let landed = rand::thread_rng().gen_range(0..100) < hit_chance;
+    if !landed {
+        let _ = ph.send.send(format!("\r\n{} swings at you and misses.\r\n", p.attacker_name));
+        let cl = chars.lock().await;
+        if let Some(att) = cl.iter().find(|h| h.id == p.attacker_id) {
+            let _ = att.send.send(format!("\r\nYou swing at {target_name} and miss.\r\n"));
+        }
+        cl.broadcast_room(p.room, Some(p.attacker_id),
+            &format!("{} swings at {target_name} and misses.\r\n", p.attacker_name));
+        return;
+    }
+    // Apply damage; check for death.
+    let dead = {
+        let mut c = ph.character.lock().await;
+        c.hp -= base_dmg;
+        c.hp <= 0
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} hits you for {base_dmg} damage!\r\n", p.attacker_name,
+    ));
+    {
+        let cl = chars.lock().await;
+        if let Some(att) = cl.iter().find(|h| h.id == p.attacker_id) {
+            let _ = att.send.send(format!(
+                "\r\nYou hit {target_name} for {base_dmg} damage.\r\n",
+            ));
+        }
+        cl.broadcast_room(p.room, Some(p.attacker_id),
+            &format!("{} hits {target_name}.\r\n", p.attacker_name));
+    }
+    if dead {
+        player_death(&ph, world, chars).await;
+        clear_player_fighting(p.attacker_id, chars).await;
+    }
+}
+
 async fn resolve_player_attack(
     p: PlayerIntent,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
     if p.target.is_player {
-        return; // PvP not supported in this checkpoint
+        resolve_pvp_attack(p, world, chars).await;
+        return;
     }
 
     // To-hit roll first.  Hit% = base + level + dex_hit + hit_bonus -
@@ -473,6 +553,37 @@ async fn resolve_player_attack(
             let _ = ph.send.send(to_attacker);
         }
         cl.broadcast_room(p.room, Some(p.attacker_id), &to_room);
+    }
+
+    // MOB_HELPER assist: any non-fighting mob in the room with the
+    // helper flag joins in on the side of the original victim — i.e.
+    // it engages the attacker (the player).  Skip the original target
+    // and any mob already fighting; broadcast each join.
+    if !target_dead {
+        let helpers: Vec<(u32, String)> = {
+            let mut w = world.lock().await;
+            let mut joined = Vec::new();
+            let mids: Vec<u32> = w.rooms.get(&p.room).map(|r| r.mobs.clone()).unwrap_or_default();
+            for mid in mids {
+                if mid == p.target.id { continue; }
+                let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+                if m.fighting.is_some() { continue; }
+                let Some(pr) = w.mob_protos.get(&m.vnum) else { continue; };
+                if pr.mob_flags[0] & crate::world::MOB_HELPER == 0 { continue; }
+                let short = pr.short_descr.clone();
+                let mut_m = w.mob_instances.iter_mut().find(|m| m.id == mid).unwrap();
+                mut_m.fighting = Some(Target { id: p.attacker_id, is_player: true });
+                joined.push((mid, short));
+            }
+            joined
+        };
+        if !helpers.is_empty() {
+            let cl = chars.lock().await;
+            for (_id, name) in &helpers {
+                cl.broadcast_room(p.room, None,
+                    &format!("{name} leaps to the defense!\r\n"));
+            }
+        }
     }
 
     if target_dead {
