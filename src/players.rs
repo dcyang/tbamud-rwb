@@ -577,9 +577,12 @@ pub enum SavedObjSlot {
 pub struct SavedObj {
     pub vnum:     i32,
     pub slot:     SavedObjSlot,
+    /// Item condition (0..=100); default 100 for older save files that
+    /// omit the `c=<n>` marker.
+    pub condition: i32,
     /// Vnums of objects this container holds.  Empty for non-containers
     /// and empty containers.  Format on disk: appended as space-separated
-    /// integers after the slot field, e.g. "3105 inv 100 200 300".
+    /// integers after the slot field, e.g. "3105 inv c=85 100 200".
     pub contents: Vec<i32>,
 }
 
@@ -614,10 +617,22 @@ pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
                 Err(_) => continue,
             },
         };
-        let contents: Vec<i32> = parts[2..].iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        out.push(SavedObj { vnum, slot, contents });
+        // Optional `c=<N>` condition marker, anywhere in the trailing
+        // tokens.  Everything else is parsed as content vnums.
+        let mut condition = 100i32;
+        let mut contents: Vec<i32> = Vec::new();
+        for tok in &parts[2..] {
+            if let Some(rest) = tok.strip_prefix("c=") {
+                if let Ok(n) = rest.parse::<i32>() {
+                    condition = n.clamp(0, 100);
+                    continue;
+                }
+            }
+            if let Ok(n) = tok.parse::<i32>() {
+                contents.push(n);
+            }
+        }
+        out.push(SavedObj { vnum, slot, condition, contents });
     }
     out
 }
@@ -640,17 +655,20 @@ pub fn save_objs(data_dir: &str, name: &str, entries: &[SavedObj]) -> Result<()>
     }
     let mut f = fs::File::create(&path)
         .with_context(|| format!("Cannot write objs file {path}"))?;
-    writeln!(f, "# tbamud-rwb plrobjs v1 — <vnum> <slot> [<content_vnum> ...]")?;
+    writeln!(f, "# tbamud-rwb plrobjs v1 — <vnum> <slot> [c=N] [<content_vnum> ...]")?;
     for e in entries {
         let slot_str: String = match e.slot {
             SavedObjSlot::Inv     => "inv".into(),
             SavedObjSlot::Wear(n) => n.to_string(),
         };
+        let cond_str = if e.condition < 100 {
+            format!(" c={}", e.condition)
+        } else { String::new() };
         if e.contents.is_empty() {
-            writeln!(f, "{} {slot_str}", e.vnum)?;
+            writeln!(f, "{} {slot_str}{cond_str}", e.vnum)?;
         } else {
             let inner: Vec<String> = e.contents.iter().map(|v| v.to_string()).collect();
-            writeln!(f, "{} {slot_str} {}", e.vnum, inner.join(" "))?;
+            writeln!(f, "{} {slot_str}{cond_str} {}", e.vnum, inner.join(" "))?;
         }
     }
     Ok(())

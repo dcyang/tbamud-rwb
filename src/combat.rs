@@ -1158,8 +1158,54 @@ async fn resolve_mob_attack(
             .unwrap_or_else(|| "Something".into());
         // Wimpy auto-flee: HP > 0 but below threshold.
         let wimpy_trigger = c.hp > 0 && c.wimpy > 0 && c.hp <= c.wimpy;
+        // Body-armor durability: 5% chance per landed mundane hit.
+        let armor_iid = c.equipment[crate::character::WEAR_BODY];
+        let _ = armor_iid;
         (c.hp <= 0, c.current_room, short, wimpy_trigger)
     };
+
+    // Armor durability tick (only on non-spell hits).
+    if !is_spell {
+        use rand::Rng;
+        if rand::thread_rng().gen_range(0..100) < 5 {
+            let armor_iid = {
+                let c = ph.character.lock().await;
+                c.equipment[crate::character::WEAR_BODY]
+            };
+            if let Some(iid) = armor_iid {
+                let broke = {
+                    let mut w = world.lock().await;
+                    if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                        o.condition = (o.condition - 1).max(0);
+                        o.condition == 0
+                    } else { false }
+                };
+                if broke {
+                    let short = {
+                        let w = world.lock().await;
+                        w.obj_instances.iter().find(|o| o.id == iid)
+                            .and_then(|o| w.obj_protos.get(&o.vnum))
+                            .map(|p| p.short_description.clone())
+                            .unwrap_or_else(|| "your armor".to_string())
+                    };
+                    {
+                        let mut c = ph.character.lock().await;
+                        c.equipment[crate::character::WEAR_BODY] = None;
+                    }
+                    let _ = ph.send.send(format!(
+                        "\r\n*** {short} disintegrates under the blow! ***\r\n",
+                    ));
+                    {
+                        let cl = chars.lock().await;
+                        cl.broadcast_room(m.room, Some(m.target.id),
+                            &format!("{}'s {short} disintegrates under the blow!\r\n", ph.name));
+                    }
+                    let mut w = world.lock().await;
+                    w.extract_obj(iid);
+                }
+            }
+        }
+    }
 
     let (to_victim, to_room) = if is_spell {
         let (vict_v, vict_n, room_v, room_n) = mob_spell_flavor(m.level);

@@ -347,6 +347,10 @@ pub async fn handle_connection(
                         let mut w = world.lock().await;
                         for e in entries {
                             if let Some(iid) = w.spawn_obj(e.vnum) {
+                                // Restore persisted condition.
+                                if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                                    o.condition = e.condition;
+                                }
                                 // Spawn any container contents and link them.
                                 for &cvnum in &e.contents {
                                     if let Some(cid) = w.spawn_obj(cvnum) {
@@ -702,7 +706,12 @@ async fn run_game_session(
                 }
             }
             Some((
-                crate::players::SavedObj { vnum: o.vnum, slot, contents: content_vnums },
+                crate::players::SavedObj {
+                    vnum: o.vnum,
+                    slot,
+                    condition: o.condition,
+                    contents: content_vnums,
+                },
                 to_remove_local,
             ))
         };

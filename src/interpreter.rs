@@ -76,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
-    "hp", "mana", "mv", "gold",
+    "hp", "mana", "mv", "gold", "repair",
     "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
@@ -251,6 +251,7 @@ pub async fn dispatch_command(
         Some("mana")       => CmdOutput::text(format!("\r\nMana: {}/{}\r\n", me.mana, me.max_mana)),
         Some("mv")         => CmdOutput::text(format!("\r\nMove: {}/{}\r\n", me.movement, me.max_movement)),
         Some("gold")       => CmdOutput::text(format!("\r\nGold: {}  Bank: {}\r\n", me.gold, me.bank_gold)),
+        Some("repair")     => do_repair(rest, me, world).await,
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
@@ -513,6 +514,9 @@ async fn do_inventory(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
             let v = obj_view(&w, obj);
             s.push_str(" ");
             s.push_str(&v.short);
+            if obj.condition < 100 {
+                s.push_str(&format!(" ({})", condition_label(obj.condition)));
+            }
             s.push_str("\r\n");
         }
     }
@@ -5109,6 +5113,74 @@ async fn do_worth(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
          \x20                  ----------\r\n\
          \x20  Net worth:      {:>10}\r\n",
         me.gold, me.bank_gold, item_count, item_value, total,
+    ))
+}
+
+/// `repair <item>` — at a shopkeeper's room, pay gold equal to
+/// (100 - condition) * 5 to restore the item to pristine condition.
+async fn do_repair(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nRepair what?\r\n".to_string());
+    }
+    // Must be in a shop room with the shopkeeper present.
+    let w = world.lock().await;
+    let shop_keeper_present = w.shops.iter().any(|s|
+        s.rooms.iter().any(|&rv| rv == me.current_room)
+        && w.rooms.get(&me.current_room).map(|r|
+            r.mobs.iter().any(|&mid|
+                w.mob_instances.iter().find(|m| m.id == mid)
+                    .map(|m| m.vnum == s.keeper_vnum).unwrap_or(false)
+            )).unwrap_or(false)
+    );
+    if !shop_keeper_present {
+        return CmdOutput::text(
+            "\r\nThere's no shopkeeper here to repair anything.\r\n".to_string()
+        );
+    }
+    // Find a matching item in inventory or equipment by keyword.
+    let mut target_iid: Option<u32> = None;
+    let mut target_short = String::new();
+    let mut target_cond = 0i32;
+    for &iid in me.inventory.iter()
+        .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
+    {
+        let o = match w.obj_instances.iter().find(|o| o.id == iid) {
+            Some(o) => o, None => continue,
+        };
+        let p = match w.obj_protos.get(&o.vnum) { Some(p) => p, None => continue };
+        if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+            target_iid = Some(iid);
+            target_short = p.short_description.clone();
+            target_cond = o.condition;
+            break;
+        }
+    }
+    drop(w);
+    let Some(iid) = target_iid else {
+        return CmdOutput::text(format!("\r\nYou have no '{key}' to repair.\r\n"));
+    };
+    if target_cond >= 100 {
+        return CmdOutput::text(format!(
+            "\r\n{target_short} is already in pristine condition.\r\n"
+        ));
+    }
+    let cost = (100 - target_cond) as i64 * 5;
+    if me.gold < cost {
+        return CmdOutput::text(format!(
+            "\r\nThe smith eyes you: that repair will cost {cost} gold; you have {}.\r\n",
+            me.gold,
+        ));
+    }
+    me.gold -= cost;
+    {
+        let mut w = world.lock().await;
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.condition = 100;
+        }
+    }
+    CmdOutput::text(format!(
+        "\r\nThe smith works on {target_short}, restoring it for {cost} gold.\r\n"
     ))
 }
 
@@ -10325,7 +10397,16 @@ async fn do_sell(
         if !shop.buys_types.is_empty() && !shop.buys_types.contains(&proto.item_type) {
             return CmdOutput::text("\r\nThe shopkeeper doesn't buy that kind of item.\r\n");
         }
-        let price = (proto.cost as f32 * shop.profit_sell) as i64;
+        // Broken items aren't worth purchasing.
+        if obj.condition <= 0 {
+            return CmdOutput::text(format!(
+                "\r\nThe shopkeeper sneers — {short} is broken.\r\n"
+            ));
+        }
+        // Sell price scales with condition (cond/100), so a worn item
+        // fetches proportionally less than a pristine one.
+        let cond_mult = obj.condition.max(1) as f32 / 100.0;
+        let price = ((proto.cost as f32) * shop.profit_sell * cond_mult) as i64;
         let keeper_name = w.mob_protos.get(&shop.keeper_vnum)
             .map(|p| p.short_descr.clone())
             .unwrap_or_else(|| "the shopkeeper".to_string());
@@ -10597,11 +10678,16 @@ async fn do_equipment(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     let mut s = String::from("\r\nYou are using:\r\n");
     for slot in 0..NUM_WEARS {
         if let Some(iid) = me.equipment[slot] {
-            let short = w.obj_instances.iter().find(|o| o.id == iid)
+            let obj = w.obj_instances.iter().find(|o| o.id == iid);
+            let short = obj
                 .and_then(|o| w.obj_protos.get(&o.vnum))
                 .map(|p| p.short_description.clone())
                 .unwrap_or_else(|| "(something)".into());
-            s.push_str(&format!("  <{:^22}>  {}\r\n", wear_pos_name(slot), short));
+            let cond = obj.map(|o| o.condition).unwrap_or(100);
+            let cond_tag = if cond < 100 {
+                format!(" ({})", condition_label(cond))
+            } else { String::new() };
+            s.push_str(&format!("  <{:^22}>  {short}{cond_tag}\r\n", wear_pos_name(slot)));
         }
     }
     CmdOutput::text(s)
