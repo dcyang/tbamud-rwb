@@ -2,6 +2,7 @@
 /// Mirrors main() in comm.c: parse CLI arguments, set up logging, and start the server.
 
 mod character;
+mod color;
 mod combat;
 mod config;
 mod db;

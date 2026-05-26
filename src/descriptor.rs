@@ -91,7 +91,7 @@ pub async fn handle_connection(
 
     // --- Send greeting -------------------------------------------------------
     // Mirrors the GREETINGS send in new_descriptor() (comm.c:1542).
-    let greeting_crlf = greeting.replace('\n', "\r\n");
+    let greeting_crlf = crate::color::convert(&greeting.replace('\n', "\r\n"));
     stream.write_all(greeting_crlf.as_bytes()).await?;
 
     // --- Login state machine --------------------------------------------------
@@ -165,9 +165,10 @@ pub async fn handle_connection(
                 stream.write_all(&telnet::cmd_echo_on()).await?;
             }
 
-            // Write response text
+            // Write response text (color-rendered).
             if !output.text.is_empty() {
-                stream.write_all(output.text.as_bytes()).await?;
+                let rendered = crate::color::convert(&output.text);
+                stream.write_all(rendered.as_bytes()).await?;
             }
 
             // Send echo_off after text if requested (suppresses client echo for next input)
@@ -379,7 +380,8 @@ async fn run_game_session(
     // closes (all senders dropped) or the socket errors.
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if write_half.write_all(msg.as_bytes()).await.is_err() {
+            let rendered = crate::color::convert(&msg);
+            if write_half.write_all(rendered.as_bytes()).await.is_err() {
                 break;
             }
         }
