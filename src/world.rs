@@ -330,6 +330,10 @@ pub const MOB_SCAVENGER:  u32 = 1 << 2;
 pub const MOB_ISNPC:      u32 = 1 << 3;
 pub const MOB_AWARE:      u32 = 1 << 4;
 pub const MOB_AGGRESSIVE: u32 = 1 << 5;
+/// Aggressive only against good-aligned victims (`AlignmentBand::Good`).
+pub const MOB_AGGR_GOOD:    u32 = 1 << 16;
+pub const MOB_AGGR_EVIL:    u32 = 1 << 17;
+pub const MOB_AGGR_NEUTRAL: u32 = 1 << 18;
 pub const MOB_STAY_ZONE:  u32 = 1 << 6;
 pub const MOB_WIMPY:      u32 = 1 << 7;
 pub const MOB_MEMORY:     u32 = 1 << 11;
@@ -479,6 +483,9 @@ pub struct MobInstance {
     /// Mob spec_proc — special behavior assigned by vnum at spawn time.
     /// See `MobSpec::for_vnum`.
     pub spec:      Option<MobSpec>,
+    /// Equipment slots, mirrors Character.equipment.  Populated by
+    /// zone-reset 'E' commands when arg2 is a valid wear position.
+    pub equipment: [Option<u32>; crate::character::NUM_WEARS],
 }
 
 /// Mob spec procs.  Hard-coded by vnum at spawn time (mirrors
@@ -735,6 +742,7 @@ impl World {
             affects: Vec::new(),
             charmer: None,
             spec: MobSpec::for_vnum(vnum),
+            equipment: Default::default(),
         });
         Some(id)
     }

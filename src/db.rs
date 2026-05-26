@@ -400,6 +400,12 @@ pub fn load_world(data_dir: &str) -> Result<World> {
         }
     }
 
+    // --- Inject synthetic newbie-kit prototypes ---------------------------
+    // Reserved vnums 99001-99004 with the right item_type/values so that
+    // descriptor's first-login path can spawn class-appropriate gear via
+    // World::spawn_obj without relying on world-data vnums.
+    inject_newbie_kit_protos(&mut world);
+
     // --- Run zone resets ---------------------------------------------------
     // Mirrors the initial reset_zone() pass that boot_db() performs over all
     // zones. Periodic resets are scheduled by spawn_zone_reset_tick().
@@ -414,6 +420,85 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     );
 
     Ok(world)
+}
+
+/// Vnums reserved for synthetic newbie-kit objects.  See
+/// `inject_newbie_kit_protos`.
+pub const NEWBIE_WEAPON_VNUM:  crate::world::ObjVnum = 99001;
+pub const NEWBIE_ARMOR_VNUM:   crate::world::ObjVnum = 99002;
+pub const NEWBIE_LIGHT_VNUM:   crate::world::ObjVnum = 99003;
+pub const NEWBIE_BREAD_VNUM:   crate::world::ObjVnum = 99004;
+
+/// Insert four hardcoded synthetic prototypes so the first-login path
+/// can spawn a class-aware newbie kit without depending on world-file
+/// vnums.  Idempotent — guards against double-insertion.
+fn inject_newbie_kit_protos(world: &mut crate::world::World) {
+    use crate::world::*;
+    if world.obj_protos.contains_key(&NEWBIE_WEAPON_VNUM) { return; }
+    // 99001: worn club — ITEM_WEAPON, 1d4 bludgeon
+    world.obj_protos.insert(NEWBIE_WEAPON_VNUM, ObjProto {
+        vnum: NEWBIE_WEAPON_VNUM,
+        name: "club worn".to_string(),
+        short_description: "a worn club".to_string(),
+        description: "A worn wooden club lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_WEAPON,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE | crate::character::ITEM_WEAR_WIELD, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 1, 4, 0],
+        weight: 3, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99002: tattered tunic — ITEM_ARMOR, AC 2, wear body
+    world.obj_protos.insert(NEWBIE_ARMOR_VNUM, ObjProto {
+        vnum: NEWBIE_ARMOR_VNUM,
+        name: "tunic tattered".to_string(),
+        short_description: "a tattered tunic".to_string(),
+        description: "A tattered tunic lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_ARMOR,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE | crate::character::ITEM_WEAR_BODY, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [2, 0, 0, 0],
+        weight: 4, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99003: brass lantern — ITEM_LIGHT, 24-hour
+    world.obj_protos.insert(NEWBIE_LIGHT_VNUM, ObjProto {
+        vnum: NEWBIE_LIGHT_VNUM,
+        name: "lantern brass".to_string(),
+        short_description: "a brass lantern".to_string(),
+        description: "A small brass lantern is here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_LIGHT,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 0, 24, 0],
+        weight: 2, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99004: small loaf of bread — ITEM_FOOD, value[0]=5 filling hours
+    world.obj_protos.insert(NEWBIE_BREAD_VNUM, ObjProto {
+        vnum: NEWBIE_BREAD_VNUM,
+        name: "loaf bread small".to_string(),
+        short_description: "a small loaf of bread".to_string(),
+        description: "A small loaf of bread is here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [5, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
 }
 
 /// Parse `lib/misc/socials.new` (AEdit format).
@@ -1806,6 +1891,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         affects: Vec::new(),
                         charmer: None,
                         spec: crate::world::MobSpec::for_vnum(cmd.arg1),
+                        equipment: Default::default(),
                     });
                     last_mob_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -1861,9 +1947,9 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
             }
             'G' | 'E' => {
                 // G = give-to-mob (inventory); E = equip-to-mob (wear slot).
-                // We don't model wear slots yet, so E falls back to G —
-                // the item goes into the mob's inventory either way and is
-                // not visible on the ground.
+                // For E, cmd.arg3 is the wear position (WEAR_* index from
+                // structs.h).  If valid and the slot is free, put it
+                // there; otherwise fall through to inventory.
                 let Some(mob_id) = last_mob_id else {
                     last_cmd_ok = false;
                     continue;
@@ -1886,10 +1972,23 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     decay_in: None,
                     triggers: Vec::new(),
                     timer: init_timer,
-                        light_lit: false,
+                    light_lit: false,
                 });
-                if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
-                    m.inventory.push(id);
+                let equipped = if cmd.command == 'E' {
+                    let pos = cmd.arg3 as usize;
+                    if pos < crate::character::NUM_WEARS {
+                        if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                            if m.equipment[pos].is_none() {
+                                m.equipment[pos] = Some(id);
+                                true
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false };
+                if !equipped {
+                    if let Some(m) = world.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                        m.inventory.push(id);
+                    }
                 }
                 last_cmd_ok = true;
             }

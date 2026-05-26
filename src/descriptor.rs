@@ -371,6 +371,42 @@ pub async fn handle_connection(
                     }
                 }
 
+                // First-login newbie kit.  Brand-new chars get a
+                // synthetic class-appropriate kit if their persisted
+                // last_login is still 0 AND nothing was restored above.
+                {
+                    let fresh = p_ref.map(|p| p.last_login).unwrap_or(0) == 0;
+                    let nothing = me.inventory.is_empty()
+                        && me.equipment.iter().all(|s| s.is_none());
+                    if fresh && nothing {
+                        let mut w = world.lock().await;
+                        let kit: &[crate::world::ObjVnum] = match me.class {
+                            crate::players::Class::Warrior =>
+                                &[crate::db::NEWBIE_WEAPON_VNUM,
+                                  crate::db::NEWBIE_ARMOR_VNUM,
+                                  crate::db::NEWBIE_LIGHT_VNUM,
+                                  crate::db::NEWBIE_BREAD_VNUM],
+                            crate::players::Class::Cleric |
+                            crate::players::Class::MagicUser =>
+                                &[crate::db::NEWBIE_ARMOR_VNUM,
+                                  crate::db::NEWBIE_LIGHT_VNUM,
+                                  crate::db::NEWBIE_BREAD_VNUM],
+                            crate::players::Class::Thief =>
+                                &[crate::db::NEWBIE_WEAPON_VNUM,
+                                  crate::db::NEWBIE_LIGHT_VNUM,
+                                  crate::db::NEWBIE_BREAD_VNUM],
+                            _ =>
+                                &[crate::db::NEWBIE_LIGHT_VNUM,
+                                  crate::db::NEWBIE_BREAD_VNUM],
+                        };
+                        for &vnum in kit {
+                            if let Some(iid) = w.spawn_obj(vnum) {
+                                me.inventory.push(iid);
+                            }
+                        }
+                    }
+                }
+
                 run_game_session(id, host.clone(), stream, me, world, chars, Arc::clone(&players), data_dir).await?;
                 return Ok(());
             }

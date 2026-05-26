@@ -73,6 +73,8 @@ pub enum Skill {
     /// Flag affect: mob skips its next attack swing.  Applied by a
     /// successful Bash hit.  No class entry (internal only).
     Stun,
+    ColorSpray,
+    AcidBlast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +139,8 @@ impl Skill {
             "heal"                            => Some(Skill::Heal),
             "infravision" | "infra"           => Some(Skill::Infravision),
             "stun"                            => Some(Skill::Stun),
+            "colorspray" | "color"            => Some(Skill::ColorSpray),
+            "acidblast" | "acid"              => Some(Skill::AcidBlast),
             _ => None,
         }
     }
@@ -190,6 +194,8 @@ impl Skill {
             Skill::Heal          => "heal",
             Skill::Infravision   => "infravision",
             Skill::Stun          => "stun",
+            Skill::ColorSpray    => "color spray",
+            Skill::AcidBlast     => "acid blast",
         }
     }
 
@@ -212,7 +218,8 @@ impl Skill {
                 | Skill::LightningBolt | Skill::Fireball | Skill::ShockingGrasp
                 | Skill::Invisibility  | Skill::Stoneskin
                 | Skill::CureSerious   | Skill::Heal
-                | Skill::Infravision
+                | Skill::Infravision   | Skill::ColorSpray
+                | Skill::AcidBlast
                                       => SkillKind::Spell,
         }
     }
@@ -258,6 +265,8 @@ impl Skill {
             Skill::CureSerious   => 16,
             Skill::Heal          => 35,
             Skill::Infravision   => 6,
+            Skill::ColorSpray    => 18,
+            Skill::AcidBlast     => 25,
         }
     }
 
@@ -313,6 +322,8 @@ impl Skill {
             Skill::Heal          => &[Class::Cleric],
             Skill::Infravision   => &[Class::MagicUser, Class::Cleric],
             Skill::Stun          => &[],
+            Skill::ColorSpray    => &[Class::MagicUser],
+            Skill::AcidBlast     => &[Class::MagicUser],
         }
     }
 
@@ -369,6 +380,8 @@ impl Skill {
             Skill::Heal          => "heal",
             Skill::Infravision   => "infravision",
             Skill::Stun          => "stun",
+            Skill::ColorSpray    => "color-spray",
+            Skill::AcidBlast     => "acid-blast",
         }
     }
 
@@ -396,6 +409,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
+    Skill::ColorSpray, Skill::AcidBlast,
 ];
 
 // ---------------------------------------------------------------------------

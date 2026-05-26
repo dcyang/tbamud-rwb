@@ -231,13 +231,14 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
 /// modeled — for now hidden players are skipped (gives `hide` its main
 /// utility against mundane aggro).
 async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
-    // Snapshot all online player rooms (and hidden state) for cheap lookup.
-    let live_players: Vec<(u32, crate::world::RoomVnum, bool)> = {
+    // Snapshot online player rooms + hidden + alignment band.
+    use crate::character::AlignmentBand;
+    let live_players: Vec<(u32, crate::world::RoomVnum, bool, AlignmentBand)> = {
         let cl = chars.lock().await;
         let mut v = Vec::new();
         for p in cl.iter() {
             let c = p.character.lock().await;
-            v.push((p.id, c.current_room, c.hidden));
+            v.push((p.id, c.current_room, c.hidden, AlignmentBand::of(c.alignment)));
         }
         v
     };
@@ -254,26 +255,38 @@ async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                 Some(p) => p,
                 None    => continue,
             };
-            let is_aggro  = proto.mob_flags[0] & crate::world::MOB_AGGRESSIVE != 0;
-            let has_memory = proto.mob_flags[0] & crate::world::MOB_MEMORY     != 0;
+            let flags = proto.mob_flags[0];
+            let is_aggro      = flags & crate::world::MOB_AGGRESSIVE  != 0;
+            let aggr_good     = flags & crate::world::MOB_AGGR_GOOD   != 0;
+            let aggr_evil     = flags & crate::world::MOB_AGGR_EVIL   != 0;
+            let aggr_neutral  = flags & crate::world::MOB_AGGR_NEUTRAL!= 0;
+            let has_memory    = flags & crate::world::MOB_MEMORY      != 0;
 
             // First check memory: any remembered player in this room is a
             // priority target, even if not normally aggressive.
             let mem_target = if has_memory && !m.remembers.is_empty() {
-                live_players.iter().find(|(pid, room, _)| {
+                live_players.iter().find(|(pid, room, _, _)| {
                     *room == m.in_room && m.remembers.contains(pid)
-                }).map(|&(pid, _, _)| pid)
+                }).map(|&(pid, _, _, _)| pid)
             } else { None };
 
             if let Some(pid) = mem_target {
                 v.push((m.id, pid, m.in_room, proto.short_descr.clone()));
                 continue;
             }
-            if !is_aggro { continue; }
-            // Non-hidden player in this mob's room.
+            if !is_aggro && !aggr_good && !aggr_evil && !aggr_neutral { continue; }
+            // Non-hidden player in this mob's room whose alignment matches.
             let target = live_players.iter()
-                .find(|(_, room, hidden)| *room == m.in_room && !hidden);
-            if let Some(&(pid, _, _)) = target {
+                .find(|(_, room, hidden, band)| {
+                    if *room != m.in_room || *hidden { return false; }
+                    if is_aggro { return true; }
+                    match band {
+                        AlignmentBand::Good    => aggr_good,
+                        AlignmentBand::Evil    => aggr_evil,
+                        AlignmentBand::Neutral => aggr_neutral,
+                    }
+                });
+            if let Some(&(pid, _, _, _)) = target {
                 v.push((m.id, pid, m.in_room, proto.short_descr.clone()));
             }
         }
@@ -987,9 +1000,27 @@ async fn resolve_mob_attack(
     let (dmg, is_spell): (i32, bool) = {
         let raw_mundane = {
             let w = world.lock().await;
-            match w.mob_protos.get(&m.attacker_vnum) {
-                Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
-                None    => 1,
+            // If the mob has a wielded weapon, use the weapon's dice
+            // (value[1] count + value[2] size) plus the mob's damroll.
+            // Otherwise fall back to the mob's intrinsic dam dice.
+            let wielded = w.mob_instances.iter()
+                .find(|x| x.id == m.attacker_id)
+                .and_then(|x| x.equipment[crate::character::WEAR_WIELD]);
+            let weapon_dice = wielded.and_then(|iid| {
+                let obj = w.obj_instances.iter().find(|o| o.id == iid)?;
+                let p   = w.obj_protos.get(&obj.vnum)?;
+                if p.item_type == crate::world::ITEM_WEAPON {
+                    Some((p.value[1], p.value[2]))
+                } else { None }
+            });
+            let damroll = w.mob_protos.get(&m.attacker_vnum)
+                .map(|p| p.damroll).unwrap_or(0);
+            match weapon_dice {
+                Some((dn, ds)) => (dice(dn, ds) + damroll).max(1),
+                None => match w.mob_protos.get(&m.attacker_vnum) {
+                    Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
+                    None    => 1,
+                },
             }
         };
         let (ac, reduction) = {
@@ -1194,7 +1225,14 @@ async fn kill_mob(
         let mut w = world.lock().await;
         let inv: Vec<u32> = w.mob_instances.iter()
             .find(|m| m.id == mob_id)
-            .map(|m| m.inventory.clone())
+            .map(|m| {
+                // Bundle inventory + equipped items into the corpse.
+                let mut v = m.inventory.clone();
+                for slot in m.equipment.iter().flatten() {
+                    v.push(*slot);
+                }
+                v
+            })
             .unwrap_or_default();
 
         // Clear any other mob/player fighting state targeting this mob.
