@@ -61,6 +61,9 @@ pub enum Skill {
     Dodge,
     Parry,
     Rescue,
+    LightningBolt,
+    Fireball,
+    ShockingGrasp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +118,9 @@ impl Skill {
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
             "rescue"                          => Some(Skill::Rescue),
+            "lightningbolt" | "lightning"     => Some(Skill::LightningBolt),
+            "fireball"                        => Some(Skill::Fireball),
+            "shockinggrasp" | "shockgrasp" | "shock" => Some(Skill::ShockingGrasp),
             _ => None,
         }
     }
@@ -158,6 +164,9 @@ impl Skill {
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
             Skill::Rescue       => "rescue",
+            Skill::LightningBolt => "lightning bolt",
+            Skill::Fireball      => "fireball",
+            Skill::ShockingGrasp => "shocking grasp",
         }
     }
 
@@ -176,6 +185,7 @@ impl Skill {
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
                 | Skill::Earthquake   | Skill::CharmPerson | Skill::LocateObject
                 | Skill::Refresh      | Skill::Summon       | Skill::SenseLife
+                | Skill::LightningBolt | Skill::Fireball | Skill::ShockingGrasp
                                       => SkillKind::Spell,
         }
     }
@@ -212,6 +222,9 @@ impl Skill {
             Skill::Refresh      => 4,
             Skill::Summon       => 25,
             Skill::SenseLife    => 6,
+            Skill::LightningBolt => 20,
+            Skill::Fireball      => 30,
+            Skill::ShockingGrasp => 8,
         }
     }
 
@@ -257,6 +270,9 @@ impl Skill {
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
             Skill::Rescue       => &[Class::Warrior, Class::Cleric],
+            Skill::LightningBolt => &[Class::MagicUser],
+            Skill::Fireball      => &[Class::MagicUser],
+            Skill::ShockingGrasp => &[Class::MagicUser],
         }
     }
 
@@ -303,6 +319,9 @@ impl Skill {
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
             Skill::Rescue       => "rescue",
+            Skill::LightningBolt => "lightning-bolt",
+            Skill::Fireball      => "fireball",
+            Skill::ShockingGrasp => "shocking-grasp",
         }
     }
 
@@ -327,6 +346,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::CharmPerson, Skill::LocateObject, Skill::Refresh, Skill::Summon,
     Skill::SenseLife,
     Skill::Dodge, Skill::Parry, Skill::Rescue,
+    Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
 ];
 
 // ---------------------------------------------------------------------------
@@ -566,6 +586,13 @@ pub struct Character {
     /// When true, color codes are stripped before sending to the client
     /// (mirrors CircleMUD's COLOR_OFF preference).
     pub color_off:    bool,
+    /// Compact exit display under each room title (vs the verbose
+    /// "Obvious exits:" line).
+    pub autoexit:     bool,
+    /// Auto-take items from a freshly-killed mob's corpse.
+    pub autoloot:     bool,
+    /// Auto-attack any mob that is fighting the leader you follow.
+    pub autoassist:   bool,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

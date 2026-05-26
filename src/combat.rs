@@ -89,8 +89,49 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         }
     }
 
+    // ----- Phase 0.5: autoassist sweep -----------------------------------
+    // For each follower with autoassist set, if their leader is fighting
+    // a mob in the same room and the follower isn't fighting, engage.
+    {
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        // Snapshot (follower_id, leader_id, want_assist, room) for those
+        // who'd potentially join in.
+        let mut candidates: Vec<(u32, u32, crate::world::RoomVnum)> = Vec::new();
+        for ph in &handles {
+            let c = ph.character.lock().await;
+            if !c.autoassist || c.fighting.is_some() { continue; }
+            if let Some(lid) = c.following {
+                candidates.push((ph.id, lid, c.current_room));
+            }
+        }
+        for (fid, lid, room) in candidates {
+            let leader_target = if let Some(lh) = handles.iter().find(|p| p.id == lid) {
+                let c = lh.character.lock().await;
+                if c.current_room == room { c.fighting } else { None }
+            } else { None };
+            let Some(tgt) = leader_target else { continue; };
+            if tgt.is_player { continue; } // don't autoassist into PvP
+            // Engage: set follower.fighting = tgt; back-fill mob.fighting if free.
+            if let Some(fh) = handles.iter().find(|p| p.id == fid) {
+                fh.character.lock().await.fighting = Some(tgt);
+                let _ = fh.send.send("\r\nYou rush to your leader's aid!\r\n".to_string());
+                let mut w = world.lock().await;
+                if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == tgt.id) {
+                    if m.fighting.is_none() {
+                        m.fighting = Some(crate::character::Target {
+                            id: fid, is_player: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // ----- Phase 1: snapshot all fighters --------------------------------
-    // Avoid holding two locks; collect intents then mutate.
+    // Avoid replacing two locks; collect intents then mutate.
     let player_intents: Vec<PlayerIntent> = {
         let cl = chars.lock().await;
         let mut v = Vec::new();
@@ -592,22 +633,27 @@ async fn resolve_player_attack(
     }
 
     if target_dead {
-        let (xp, killed_vnum) = {
+        let (xp, gold, killed_vnum) = {
             let w = world.lock().await;
             let m = w.mob_instances.iter().find(|m| m.id == p.target.id);
             let vnum = m.map(|m| m.vnum).unwrap_or(-1);
-            let xp = m.and_then(|m| w.mob_protos.get(&m.vnum))
-                .map(|mp| mp.exp as i64)
-                .unwrap_or(0);
-            (xp, vnum)
+            let proto = m.and_then(|m| w.mob_protos.get(&m.vnum));
+            let xp = proto.map(|mp| mp.exp as i64).unwrap_or(0);
+            let gold = proto.map(|mp| mp.gold as i64).unwrap_or(0);
+            (xp, gold, vnum)
         };
         kill_mob(p.target.id, target_room, &target_name, &p.attacker_name, world, chars).await;
         // Clear the player's fighting state since the mob is gone.
         clear_player_fighting(p.attacker_id, chars).await;
         // Award XP, split among grouped members in the kill room.
         award_xp_split(p.attacker_id, target_room, xp, chars).await;
+        // Gold drop, same split rule as XP.
+        award_gold_split(p.attacker_id, target_room, gold, chars).await;
         // Quest progress.
         notify_quest_kill(p.attacker_id, killed_vnum, world, chars).await;
+        // Autoloot: if the attacker has autoloot set, drain the freshly
+        // spawned corpse into their inventory.
+        autoloot_after_kill(p.attacker_id, &target_name, target_room, world, chars).await;
         return;
     }
 
@@ -740,6 +786,62 @@ async fn award_xp_split(
     let share = (xp / n).max(1);
     for id in recipients {
         award_xp(id, share, chars).await;
+    }
+}
+
+/// Split a mob's `gold` reward across the killer's grouped same-room
+/// allies (using the same membership rule as XP).  Floors to min 1 per
+/// recipient.  Each receives the line "You receive N gold from the
+/// corpse." through their mpsc.
+async fn award_gold_split(
+    killer_id: u32,
+    killer_room: crate::world::RoomVnum,
+    gold: i64,
+    chars: &SharedChars,
+) {
+    if gold <= 0 { return; }
+    let recipients: Vec<u32> = {
+        let cl = chars.lock().await;
+        let killer = match cl.iter().find(|p| p.id == killer_id) {
+            Some(k) => k.clone(),
+            None    => return,
+        };
+        let (killer_grouped, killer_leader) = {
+            let c = killer.character.lock().await;
+            (c.grouped, c.following.unwrap_or(killer_id))
+        };
+        if !killer_grouped {
+            vec![killer_id]
+        } else {
+            let mut ids = vec![killer_id];
+            let handles: Vec<_> = cl.iter().cloned().collect();
+            drop(cl);
+            for ph in handles {
+                if ph.id == killer_id { continue; }
+                if ph.current_room != killer_room { continue; }
+                let c = ph.character.lock().await;
+                let in_group = c.grouped && (
+                    c.id == killer_leader
+                    || c.following == Some(killer_leader)
+                );
+                if in_group { ids.push(ph.id); }
+            }
+            ids
+        }
+    };
+    let n = recipients.len() as i64;
+    let share = (gold / n).max(1);
+    for id in recipients {
+        let handle = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == id).cloned();
+            h
+        };
+        let Some(h) = handle else { continue };
+        h.character.lock().await.gold += share;
+        let _ = h.send.send(format!(
+            "\r\nYou receive {share} gold from the corpse.\r\n"
+        ));
     }
 }
 
@@ -923,6 +1025,37 @@ async fn resolve_mob_attack(
         cl.broadcast_room(m.room, Some(m.target.id), &to_room);
     }
 
+    // Snake spec_proc: 15% chance on a melee hit to apply Poison.
+    if !is_spell && !player_dead {
+        let attacker_spec = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|x| x.id == m.attacker_id)
+                .and_then(|x| x.spec)
+        };
+        if attacker_spec == Some(crate::world::MobSpec::Snake) {
+            use rand::Rng;
+            if rand::thread_rng().gen_range(0..100) < 15 {
+                let mut c = ph.character.lock().await;
+                let already = c.affects.iter().any(|a|
+                    a.skill == crate::character::Skill::Poison);
+                if !already {
+                    c.apply_affect(crate::character::Affect {
+                        skill:          crate::character::Skill::Poison,
+                        duration:       5,
+                        to_hit:         0,
+                        to_dam:         0,
+                        dmg_reduction:  0,
+                        dot_damage:     3,
+                        to_ac:          0,
+                    });
+                    let _ = ph.send.send(
+                        "\r\nVenom courses through your veins!\r\n".to_string()
+                    );
+                }
+            }
+        }
+    }
+
     if player_dead {
         player_death(&ph, world, chars).await;
     } else if trigger_wimpy {
@@ -951,6 +1084,62 @@ async fn clear_player_fighting(player_id: u32, chars: &SharedChars) {
         let mut c = h.character.lock().await;
         c.fighting = None;
     }
+}
+
+/// Autoloot: if the killer has `autoloot` set, drain the corpse just
+/// created in `room` (matching `mob_short`) into their inventory.
+/// The emptied corpse is left in the room to decay normally.
+async fn autoloot_after_kill(
+    killer_id: u32,
+    mob_short: &str,
+    room: crate::world::RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let killer = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == killer_id).cloned();
+        h
+    };
+    let Some(killer) = killer else { return };
+    let want = killer.character.lock().await.autoloot;
+    if !want { return; }
+    // Find the most recently spawned corpse in the room matching this mob.
+    let (corpse_id, drained) = {
+        let mut w = world.lock().await;
+        let cid = w.obj_instances.iter().rev()
+            .find(|o| o.in_room == room
+                && o.corpse_of.as_deref() == Some(mob_short))
+            .map(|o| o.id);
+        let Some(cid) = cid else { return; };
+        let contents = w.obj_instances.iter_mut()
+            .find(|o| o.id == cid)
+            .map(|o| std::mem::take(&mut o.contents))
+            .unwrap_or_default();
+        (cid, contents)
+    };
+    if drained.is_empty() { return; }
+    // Push the drained items into the killer's inventory.
+    let mut moved: Vec<String> = Vec::new();
+    {
+        let mut c = killer.character.lock().await;
+        let w = world.lock().await;
+        for iid in &drained {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == *iid) {
+                if let Some(p) = w.obj_protos.get(&o.vnum) {
+                    moved.push(p.short_description.clone());
+                }
+            }
+            c.inventory.push(*iid);
+        }
+    }
+    let line = if moved.len() == 1 {
+        format!("\r\nYou take {} from the corpse.\r\n", moved[0])
+    } else {
+        format!("\r\nYou loot {} items from the corpse.\r\n", moved.len())
+    };
+    let _ = killer.send.send(line);
+    let _ = corpse_id;
 }
 
 /// External entry to the `kill_mob` path — used by the immortal

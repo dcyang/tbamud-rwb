@@ -75,6 +75,7 @@ const COMMANDS: &[&str] = &[
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
+    "autoexit", "autoloot", "autoassist",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -230,6 +231,9 @@ pub async fn dispatch_command(
         Some("info") | Some("newbie") => do_info(rest, me, chars).await,
         Some("shout")     => do_shout(rest, me, world, chars).await,
         Some("color")     => do_color(rest, me),
+        Some("autoexit")   => do_toggle_auto(me, AutoFlag::Exit),
+        Some("autoloot")   => do_toggle_auto(me, AutoFlag::Loot),
+        Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -4163,6 +4167,21 @@ fn do_color(arg: &str, me: &mut Character) -> CmdOutput {
     }
 }
 
+enum AutoFlag { Exit, Loot, Assist }
+
+/// Flip a single auto-* preference.  Reports the new state.
+fn do_toggle_auto(me: &mut Character, which: AutoFlag) -> CmdOutput {
+    let (label, now_on) = match which {
+        AutoFlag::Exit   => { me.autoexit   = !me.autoexit;   ("Autoexit",   me.autoexit) }
+        AutoFlag::Loot   => { me.autoloot   = !me.autoloot;   ("Autoloot",   me.autoloot) }
+        AutoFlag::Assist => { me.autoassist = !me.autoassist; ("Autoassist", me.autoassist) }
+    };
+    CmdOutput::text(format!(
+        "\r\n{label} is now {}.\r\n",
+        if now_on { "ON" } else { "OFF" },
+    ))
+}
+
 /// `wake` — go from Sleeping to Resting (the typical "wake from a
 /// nap" transition).  No-op otherwise.
 async fn do_wake(me: &mut Character, chars: &SharedChars) -> CmdOutput {
@@ -4572,6 +4591,9 @@ async fn do_cast(
     // physical-skill bump path in `do_skill` (cp54).
     let mut out = match spell {
         crate::character::Skill::MagicMissile => cast_magic_missile(target, me, world, chars, learned).await,
+        crate::character::Skill::LightningBolt => cast_lightning_bolt(target, me, world, chars, learned).await,
+        crate::character::Skill::Fireball      => cast_fireball(me, world, chars, learned).await,
+        crate::character::Skill::ShockingGrasp => cast_shocking_grasp(target, me, world, chars, learned).await,
         crate::character::Skill::CureLight    => cast_cure_light(target, me, chars, learned).await,
         crate::character::Skill::Bless        => cast_bless(target, me, chars, learned).await,
         crate::character::Skill::BurningHands => cast_burning_hands(me, world, chars, learned).await,
@@ -4793,6 +4815,411 @@ async fn cast_magic_missile(
 
     if mob_dead {
         // Fire DEATH triggers before extraction.
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(|m| m.inventory.clone()).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+/// `lightning bolt` — single-target high-damage MagicUser spell.
+/// `dice(6, 6) + level + INT bonus` on a hit (save halves), 25 mana.
+/// Reuses the magic-missile target/engage/death flow with thicker
+/// flavor text.
+async fn cast_lightning_bolt(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    // Hit chance: 60 base + half of learned %.
+    let hit_chance = (60 + learned as i32 / 2).min(95);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let base_dmg = crate::db::dice(6, 6) + me.level
+        + crate::character::str_damage_bonus(me.int_);
+    me.mana -= crate::character::Skill::LightningBolt.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nA crackling bolt of lightning arcs into {mob_name} for {dmg} damage (partial resist)!\r\n"),
+            format!("A crackling bolt of lightning arcs from {} into {mob_name}.\r\n", me.name),
+        )
+    } else if hit {
+        (
+            format!("\r\nA crackling bolt of lightning blasts {mob_name} for {dmg} damage!\r\n"),
+            format!("A crackling bolt of lightning arcs from {} and blasts {mob_name}!\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour lightning bolt fizzles around {mob_name}.\r\n"),
+            format!("{}'s lightning bolt fizzles around {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(|m| m.inventory.clone()).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+/// `fireball` — high-damage AoE MagicUser spell.  Hits every mob in
+/// the room with `dice(8, 8) + level + INT-bonus`; per-target save
+/// halves.  30 mana.  Same kill plumbing as burning_hands (DEATH
+/// triggers, corpse, XP credited solo to caster).
+async fn cast_fireball(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::db::dice;
+
+    let mob_ids: Vec<u32> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room)
+            .map(|r| r.mobs.clone())
+            .unwrap_or_default()
+    };
+    if mob_ids.is_empty() {
+        return CmdOutput::text("\r\nA fireball arcs harmlessly through empty air.\r\n");
+    }
+    me.mana -= crate::character::Skill::Fireball.mana_cost();
+
+    let mut to_me = String::from("\r\nA roaring fireball detonates around you!\r\n");
+    let to_room = format!("{} hurls a roaring fireball into the room!\r\n", me.name);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    for mob_id in mob_ids {
+        let hit_chance = (75 + learned as i32 / 4).min(98);
+        if rand::thread_rng().gen_range(0..100) >= hit_chance { continue; }
+        let base_dmg = dice(8, 8) + me.level
+            + crate::character::str_damage_bonus(me.int_);
+
+        let (mob_name, mob_dead, mob_room, dmg, saved) = {
+            let mut w = world.lock().await;
+            let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+                Some(m) => (m.vnum, m.in_room),
+                None => continue,
+            };
+            if in_room != me.current_room { continue; }
+            let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+            let mob_name = w.mob_protos.get(&vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the creature".into());
+            let saved = save_vs_spell(me.level, target_level);
+            let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            m.hp -= dmg;
+            if me.fighting.is_none() {
+                me.fighting = Some(Target { id: mob_id, is_player: false });
+            }
+            if m.fighting.is_none() {
+                m.fighting = Some(Target { id: me.id, is_player: true });
+            }
+            (mob_name, m.hp <= 0, in_room, dmg, saved)
+        };
+        if saved {
+            to_me.push_str(&format!("Flame engulfs {mob_name} for {dmg} damage (partial resist).\r\n"));
+        } else {
+            to_me.push_str(&format!("Flame engulfs {mob_name} for {dmg} damage!\r\n"));
+        }
+
+        if mob_dead {
+            fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+            let (xp, vnum) = {
+                let w = world.lock().await;
+                let m = w.mob_instances.iter().find(|m| m.id == mob_id);
+                let v = m.map(|m| m.vnum).unwrap_or(-1);
+                let x = m.and_then(|m| w.mob_protos.get(&m.vnum))
+                    .map(|p| p.exp as i64).unwrap_or(0);
+                (x, v)
+            };
+            {
+                let mut w = world.lock().await;
+                let inv: Vec<u32> = w.mob_instances.iter()
+                    .find(|m| m.id == mob_id)
+                    .map(|m| m.inventory.clone()).unwrap_or_default();
+                for other in w.mob_instances.iter_mut() {
+                    if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                        other.fighting = None;
+                    }
+                }
+                if let Some(r) = w.rooms.get_mut(&mob_room) {
+                    r.mobs.retain(|&id| id != mob_id);
+                }
+                w.mob_instances.retain(|m| m.id != mob_id);
+                w.create_corpse(&mob_name, inv, mob_room);
+            }
+            if me.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                me.fighting = None;
+            }
+            {
+                let cl = chars.lock().await;
+                cl.broadcast_room(
+                    mob_room, None,
+                    &format!("\r\n{mob_name} is incinerated by the fireball!\r\n"),
+                );
+            }
+            to_me.push_str(&format!("\r\n{mob_name} is reduced to ash.\r\n"));
+            if xp > 0 {
+                me.exp += xp;
+                to_me.push_str(&format!("You gain {xp} experience.\r\n"));
+                let gained = me.check_level_up();
+                if gained > 0 {
+                    to_me.push_str(&format!(
+                        "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                        me.level, me.max_hp,
+                    ));
+                }
+            }
+            if let Some(qmsg) = quest_check_kill(me, vnum, world).await {
+                to_me.push_str(&qmsg);
+            }
+        }
+    }
+    CmdOutput::text(to_me)
+}
+
+/// `shocking grasp` — single-target melee-range MagicUser spell.
+/// `dice(3, 8) + level + INT-bonus` on hit, save halves.  8 mana.
+async fn cast_shocking_grasp(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let hit_chance = (75 + learned as i32 / 2).min(99);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let base_dmg = crate::db::dice(3, 8) + me.level
+        + crate::character::str_damage_bonus(me.int_);
+    me.mana -= crate::character::Skill::ShockingGrasp.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nYou grasp {mob_name} with a shocking jolt for {dmg} damage (partial resist)!\r\n"),
+            format!("{} grasps {mob_name} with a shocking jolt.\r\n", me.name),
+        )
+    } else if hit {
+        (
+            format!("\r\nYou grasp {mob_name} and electricity surges for {dmg} damage!\r\n"),
+            format!("{} grasps {mob_name} — electricity surges!\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour shocking grasp fizzles against {mob_name}.\r\n"),
+            format!("{}'s shocking grasp fizzles against {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
         fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
         let xp = {
             let w = world.lock().await;
@@ -7792,6 +8219,9 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.position     = me.position.save_key().to_string();
             r.wimpy        = me.wimpy;
             r.color_off    = me.color_off;
+            r.autoexit     = me.autoexit;
+            r.autoloot     = me.autoloot;
+            r.autoassist   = me.autoassist;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
@@ -9378,7 +9808,7 @@ pub async fn render_room(
     // the description block).  Locks the registry briefly and the
     // viewer's Character once each — no contention since dispatch is
     // serial per player.
-    let (viewer_level, viewer_brief): (i32, bool) = match viewer_id {
+    let (viewer_level, viewer_brief, viewer_autoexit): (i32, bool, bool) = match viewer_id {
         Some(id) => {
             let ph_opt = {
                 let cl = chars.lock().await;
@@ -9388,18 +9818,62 @@ pub async fn render_room(
             match ph_opt {
                 Some(ph) => {
                     let c = ph.character.lock().await;
-                    (ph.level, c.brief)
+                    (ph.level, c.brief, c.autoexit)
                 }
-                None => (0, false),
+                None => (0, false, false),
             }
         }
-        None => (0, false),
+        None => (0, false, false),
+    };
+
+    // Snapshot the viewer's inventory + equipment ids for the dark-room
+    // light-source check below.  Skipped for non-player views.
+    let viewer_objs: Vec<u32> = match viewer_id {
+        Some(id) => {
+            let ph_opt = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|p| p.id == id).cloned();
+                h
+            };
+            match ph_opt {
+                Some(ph) => {
+                    let c = ph.character.lock().await;
+                    let mut v = c.inventory.clone();
+                    for slot in c.equipment.iter().flatten() {
+                        v.push(*slot);
+                    }
+                    v
+                }
+                None => Vec::new(),
+            }
+        }
+        None => Vec::new(),
     };
 
     let w = world.lock().await;
     let Some(r) = w.rooms.get(&vnum) else {
         return "\r\nYou are nowhere.\r\n".to_string();
     };
+
+    // Dark room handling.  Immortals always see; otherwise need a lit
+    // light source on the floor or in the viewer's possession.
+    if viewer_level < LVL_IMMORT && crate::db::is_room_dark(r) {
+        let room_lit = r.objects.iter().any(|&iid| {
+            w.obj_instances.iter()
+                .find(|o| o.id == iid)
+                .map(|o| o.light_lit)
+                .unwrap_or(false)
+        });
+        let carried_lit = viewer_objs.iter().any(|iid| {
+            w.obj_instances.iter()
+                .find(|o| o.id == *iid)
+                .map(|o| o.light_lit)
+                .unwrap_or(false)
+        });
+        if !room_lit && !carried_lit {
+            return "\r\nIt is pitch black...\r\nYou can't see a thing.\r\n".to_string();
+        }
+    }
 
     let mut s = String::with_capacity(r.description.len() + 512);
     s.push_str("\r\n");
@@ -9422,7 +9896,18 @@ pub async fn render_room(
             .unwrap_or(false))
         .map(|d| d.name())
         .collect();
-    if exits.is_empty() {
+    if viewer_autoexit {
+        // Compact bracketed form, uppercase one-letter abbreviations.
+        let letters: String = exits.iter()
+            .map(|n| n.chars().next().unwrap_or('?').to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+        if letters.is_empty() {
+            s.push_str("[ Exits: None ]\r\n");
+        } else {
+            s.push_str(&format!("[ Exits: {letters} ]\r\n"));
+        }
+    } else if exits.is_empty() {
         s.push_str("Obvious exits: none.\r\n");
     } else {
         s.push_str("Obvious exits: ");

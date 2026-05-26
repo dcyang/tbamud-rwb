@@ -126,6 +126,9 @@ pub struct PlayerRecord {
     pub wimpy:         i32,
     /// Persistent color-off preference (strip ANSI codes on output).
     pub color_off:     bool,
+    pub autoexit:      bool,
+    pub autoloot:      bool,
+    pub autoassist:    bool,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -342,6 +345,9 @@ impl PlayerDb {
                 "Pos"  => rec.position = val.trim().to_string(),
                 "Wmpy" => rec.wimpy    = val.parse().unwrap_or(0),
                 "ClOf" => rec.color_off = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuEx" => rec.autoexit  = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuLt" => rec.autoloot  = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuAs" => rec.autoassist = val.parse::<i32>().unwrap_or(0) != 0,
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -451,6 +457,9 @@ impl PlayerDb {
         if rec.color_off {
             writeln!(f, "ClOf: 1")?;
         }
+        if rec.autoexit   { writeln!(f, "AuEx: 1")?; }
+        if rec.autoloot   { writeln!(f, "AuLt: 1")?; }
+        if rec.autoassist { writeln!(f, "AuAs: 1")?; }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
         }

@@ -259,6 +259,9 @@ pub async fn handle_connection(
                     info_off:     false,
                     shout_off:    false,
                     color_off:    p_ref.map(|p| p.color_off).unwrap_or(false),
+                    autoexit:     p_ref.map(|p| p.autoexit).unwrap_or(false),
+                    autoloot:     p_ref.map(|p| p.autoloot).unwrap_or(false),
+                    autoassist:   p_ref.map(|p| p.autoassist).unwrap_or(false),
                     practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
@@ -553,6 +556,9 @@ async fn run_game_session(
             rec.position     = me.position.save_key().to_string();
             rec.wimpy        = me.wimpy;
             rec.color_off    = me.color_off;
+            rec.autoexit     = me.autoexit;
+            rec.autoloot     = me.autoloot;
+            rec.autoassist   = me.autoassist;
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;

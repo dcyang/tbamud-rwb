@@ -747,6 +747,35 @@ pub const HOURS_PER_DAY:    i32 = 24;
 pub const DAYS_PER_MONTH:   i32 = 35;
 pub const MONTHS_PER_YEAR:  i32 = 17;
 
+/// Stock CircleMUD sun states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SunState { Dark, Rise, Light, Set }
+
+/// Map the current game hour to a sun state.  Matches the canonical
+/// CircleMUD bands: 0-4 = dark, 5 = rise, 6-20 = light, 21 = set,
+/// 22-23 = dark.
+pub fn sun_state() -> SunState {
+    use std::sync::atomic::Ordering;
+    let h = GAME_HOUR.load(Ordering::Relaxed);
+    match h {
+        5         => SunState::Rise,
+        6..=20    => SunState::Light,
+        21        => SunState::Set,
+        _         => SunState::Dark,
+    }
+}
+
+/// Decide whether a room is dark from the viewer's perspective.
+/// True when either (a) the room has the explicit ROOM_DARK flag, or
+/// (b) the room is outdoors (not INSIDE/CITY) AND the sun is down.
+pub fn is_room_dark(r: &crate::world::Room) -> bool {
+    use crate::world::*;
+    if (r.room_flags[0] & ROOM_DARK) != 0 { return true; }
+    let outdoors = !matches!(r.sector_type, SECT_INSIDE | SECT_CITY);
+    let dark_sun = matches!(sun_state(), SunState::Dark | SunState::Set);
+    outdoors && dark_sun
+}
+
 /// Names of the 17 game months.  Mirrors `month_name[]` in constants.c
 /// (only the first letters of each name are stock — we use full strings).
 pub const MONTH_NAMES: [&str; 17] = [
@@ -1118,6 +1147,59 @@ pub fn spawn_mob_spec_tick(
                             let mut w = world.lock().await;
                             w.extract_obj(iid);
                         }
+                    }
+                    crate::world::MobSpec::Cityguard => {
+                        // Already fighting? skip.
+                        let busy = {
+                            let w = world.lock().await;
+                            w.mob_instances.iter()
+                                .find(|m| m.id == mob_id)
+                                .map(|m| m.fighting.is_some())
+                                .unwrap_or(true)
+                        };
+                        if busy { continue; }
+                        // Find any other mob in the room currently
+                        // fighting a player; engage that mob.
+                        let aggressor = {
+                            let w = world.lock().await;
+                            w.rooms.get(&room).and_then(|r| {
+                                r.mobs.iter()
+                                    .filter(|&&mid| mid != mob_id)
+                                    .find_map(|&mid| {
+                                        let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+                                        if let Some(t) = m.fighting {
+                                            if t.is_player { return Some((mid, m.vnum)); }
+                                        }
+                                        None
+                                    })
+                            })
+                        };
+                        if let Some((tid, tvnum)) = aggressor {
+                            let target_name = {
+                                let w = world.lock().await;
+                                w.mob_protos.get(&tvnum)
+                                    .map(|p| p.short_descr.clone())
+                                    .unwrap_or_default()
+                            };
+                            {
+                                let mut w = world.lock().await;
+                                if let Some(g) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                                    g.fighting = Some(crate::character::Target {
+                                        id: tid, is_player: false,
+                                    });
+                                }
+                            }
+                            chars.lock().await.broadcast_room(
+                                room, None,
+                                &format!(
+                                    "{short} draws steel and charges {target_name}!\r\n",
+                                ),
+                            );
+                        }
+                    }
+                    crate::world::MobSpec::Snake => {
+                        // Snake's poison-on-hit lives in combat.rs;
+                        // no per-tick behavior here.
                     }
                     crate::world::MobSpec::Janitor => {
                         // Pick up the first non-corpse floor object whose

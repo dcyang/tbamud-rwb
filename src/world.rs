@@ -99,6 +99,7 @@ pub struct Exit {
 /// listed.
 pub const ROOM_DEATH:      u32 = 1 << 1;
 pub const ROOM_NOMOB:      u32 = 1 << 2;
+pub const ROOM_DARK:       u32 = 1 << 3;
 pub const ROOM_PEACEFUL:   u32 = 1 << 4;
 pub const ROOM_SOUNDPROOF: u32 = 1 << 5;
 pub const ROOM_NOMAGIC:    u32 = 1 << 7;
@@ -479,6 +480,10 @@ pub enum MobSpec {
     Fido,
     /// Picks up small items lying in its current room.
     Janitor,
+    /// Joins the fight against any mob attacking a player in its room.
+    Cityguard,
+    /// Poisonous bite — chance to apply Poison on melee hit.
+    Snake,
 }
 
 impl MobSpec {
@@ -486,9 +491,11 @@ impl MobSpec {
     /// spec_assign for these canonical vnums.
     pub fn for_vnum(vnum: MobVnum) -> Option<MobSpec> {
         match vnum {
-            1  => Some(MobSpec::Puff),    // The dragon Puff
+            1  => Some(MobSpec::Puff),       // The dragon Puff
             11 => Some(MobSpec::Fido),
             12 => Some(MobSpec::Janitor),
+            13 => Some(MobSpec::Snake),
+            18 => Some(MobSpec::Cityguard),
             _  => None,
         }
     }
