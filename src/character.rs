@@ -672,6 +672,9 @@ pub struct Character {
     /// Moral alignment: -1000 (pure evil) → +1000 (pure good).  0 = neutral.
     /// Persisted; thresholds are >350 good, <-350 evil, else neutral.
     pub alignment:    i32,
+    /// Clan name (empty = unaffiliated).  Persisted; case is preserved
+    /// but membership comparison is case-insensitive.
+    pub clan:         String,
     /// Player ids currently snooping this character — every line their
     /// writer task drains is also cloned (prefixed) to each snooper's
     /// mpsc.  Transient; cleared on logout.  Multiple snoopers are
@@ -1072,6 +1075,12 @@ impl Character {
             self.mana = self.max_mana;
             // Practice points.
             self.practices += Self::PRACTICES_PER_LEVEL;
+            // Bump every class-allowed skill the character has learned
+            // by +5% (capped at 100).  Doesn't grant new skills they
+            // haven't started practising.
+            for (_, pct) in self.skills.iter_mut() {
+                *pct = (*pct).saturating_add(5).min(100);
+            }
             gained += 1;
         }
         // Re-apply the auto-title at the new level (only when the user

@@ -71,11 +71,12 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell",
-    "kick", "bash", "backstab", "rescue", "disarm",
+    "kick", "bash", "backstab", "rescue", "disarm", "recover",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs",
+    "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
+    "clan", "ctell", "clans",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -96,7 +97,7 @@ const COMMANDS: &[&str] = &[
     "ban", "unban", "bans",
     "wiznet",
     "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
-    "status", "reload",
+    "status", "reload", "spec_assign",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -227,6 +228,7 @@ pub async fn dispatch_command(
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
+        Some("recover")   => do_recover(me, world, chars).await,
         Some("sleep")     => do_position(me, chars, crate::character::Position::Sleeping).await,
         Some("rest")      => do_position(me, chars, crate::character::Position::Resting).await,
         Some("sit")       => do_position(me, chars, crate::character::Position::Sitting).await,
@@ -242,6 +244,10 @@ pub async fn dispatch_command(
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
         Some("history")    => do_history(me),
         Some("prefs")      => do_prefs(me),
+        Some("worth")      => do_worth(me, world).await,
+        Some("clan")       => do_clan(rest, me, chars).await,
+        Some("clans")      => do_clans(me, chars).await,
+        Some("ctell")      => do_ctell(rest, me, chars).await,
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -344,6 +350,7 @@ pub async fn dispatch_command(
         Some("unsnoop")   => do_unsnoop(me, chars).await,
         Some("status")    => do_status(me, world, chars).await,
         Some("reload")    => do_reload(rest, me, chars, players).await,
+        Some("spec_assign") | Some("specassign") => do_spec_assign(rest, me, world).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -3326,6 +3333,57 @@ async fn do_reload(
     ))
 }
 
+/// `spec_assign <mob-vnum> <name|none>` (LVL_IMMORT+) — dynamically
+/// override the `spec` field on every live mob of the given vnum.
+/// Useful for hot-testing without recompiling the static
+/// `MobSpec::for_vnum` table.
+async fn do_spec_assign(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let mut parts = arg.split_whitespace();
+    let vnum_s = parts.next().unwrap_or("");
+    let name   = parts.next().unwrap_or("").to_ascii_lowercase();
+    let Ok(vnum) = vnum_s.parse::<i32>() else {
+        return CmdOutput::text(
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|none>\r\n".to_string()
+        );
+    };
+    let spec: Option<crate::world::MobSpec> = match name.as_str() {
+        "puff"      => Some(crate::world::MobSpec::Puff),
+        "fido"      => Some(crate::world::MobSpec::Fido),
+        "janitor"   => Some(crate::world::MobSpec::Janitor),
+        "cityguard" => Some(crate::world::MobSpec::Cityguard),
+        "snake"     => Some(crate::world::MobSpec::Snake),
+        "none" | "off" | "clear" => None,
+        ""          => return CmdOutput::text(
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|none>\r\n".to_string()
+        ),
+        _ => return CmdOutput::text(format!("\r\nUnknown spec '{name}'.\r\n")),
+    };
+    let touched = {
+        let mut w = world.lock().await;
+        let mut n = 0;
+        for m in w.mob_instances.iter_mut().filter(|m| m.vnum == vnum) {
+            m.spec = spec;
+            n += 1;
+        }
+        n
+    };
+    if touched == 0 {
+        return CmdOutput::text(format!("\r\nNo live mobs with vnum {vnum}.\r\n"));
+    }
+    let label = match spec {
+        Some(s) => format!("{:?}", s),
+        None    => "cleared".to_string(),
+    };
+    CmdOutput::text(format!(
+        "\r\nAssigned spec={label} to {touched} live mob(s) of vnum {vnum}.\r\n"
+    ))
+}
+
 /// Broadcast a wiznet line to every online immortal whose `wiznet_off`
 /// is false.  `msg` should be the bare body — this helper wraps it in
 /// the magenta `[wiznet] ...` envelope and CRLF.  Used by `do_wiznet`
@@ -3710,10 +3768,12 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     let mut name_substr: Option<String> = None;
     let mut class_filter: Option<crate::players::Class> = None;
     let mut level_range: Option<(i32, i32)> = None;
+    let mut afk_only: bool = false;
     let toks: Vec<&str> = arg.split_whitespace().collect();
     let mut i = 0;
     while i < toks.len() {
         match toks[i] {
+            "-afk" => { afk_only = true; i += 1; continue; }
             "-c" => {
                 if let Some(v) = toks.get(i + 1) {
                     class_filter = match v.to_ascii_lowercase().as_str() {
@@ -3778,6 +3838,7 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         if let Some((lo, hi)) = level_range {
             if p.level < lo || p.level > hi { continue; }
         }
+        if afk_only && !afk { continue; }
         let marker = if p.id == me.id { " (you)" } else { "" };
         let afk_tag = if afk { " [AFK]" } else { "" };
         let title_str = if title.is_empty() { String::new() } else { format!(" {title}") };
@@ -3811,9 +3872,11 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     };
     let god_line = if me.god.is_empty() { String::new() }
                    else { format!("God:   {}\r\n", me.god) };
+    let clan_line = if me.clan.is_empty() { String::new() }
+                    else { format!("Clan:  {}\r\n", me.clan) };
     let align_band = crate::character::AlignmentBand::of(me.alignment);
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}{clan_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -4388,10 +4451,21 @@ fn do_exp(me: &Character) -> CmdOutput {
             "\r\nYou have {} experience (max mortal level reached).\r\n", me.exp,
         ));
     }
-    CmdOutput::text(format!(
-        "\r\nLevel {}: {} experience, {} until next level.\r\n",
+    let mut s = format!(
+        "\r\nLevel {}: {} experience, {} until next level.\r\n\r\n",
         me.level, me.exp, (next - me.exp).max(0),
-    ))
+    );
+    s.push_str("Coming up:\r\n");
+    for offset in 0..5 {
+        let target = me.level + offset;
+        if target >= Character::MAX_MORTAL_LEVEL { break; }
+        let needed = Character::exp_for_level(target);
+        if needed == i64::MAX { break; }
+        s.push_str(&format!(
+            "  -> level {:>2}: {} xp\r\n", target + 1, needed,
+        ));
+    }
+    CmdOutput::text(s)
 }
 
 /// Sum of weights of every object the player is carrying (inventory +
@@ -4735,6 +4809,136 @@ fn do_color(arg: &str, me: &mut Character) -> CmdOutput {
         }
         _ => CmdOutput::text("\r\nUsage: color [on|off]\r\n".to_string()),
     }
+}
+
+/// `worth` — itemize the player's net worth: gold carried, gold in
+/// the bank, and the appraisal sum (proto.cost) of every carried or
+/// equipped object.  Container contents are recursed.
+async fn do_worth(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let w = world.lock().await;
+    let mut item_value: i64 = 0;
+    let mut item_count = 0u32;
+    let mut stack: Vec<u32> = Vec::new();
+    stack.extend(me.inventory.iter().copied());
+    for slot in me.equipment.iter().flatten() { stack.push(*slot); }
+    while let Some(iid) = stack.pop() {
+        if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+            if let Some(p) = w.obj_protos.get(&o.vnum) {
+                item_value += p.cost as i64;
+                item_count += 1;
+            }
+            stack.extend(o.contents.iter().copied());
+        }
+    }
+    drop(w);
+    let total = me.gold + me.bank_gold + item_value;
+    CmdOutput::text(format!(
+        "\r\nYour worth:\r\n\
+         \x20  Gold on hand:   {:>10}\r\n\
+         \x20  Bank balance:   {:>10}\r\n\
+         \x20  Items ({:>3}):    {:>10}\r\n\
+         \x20                  ----------\r\n\
+         \x20  Net worth:      {:>10}\r\n",
+        me.gold, me.bank_gold, item_count, item_value, total,
+    ))
+}
+
+/// `clan [name]` — empty arg shows clan + online members.  Otherwise
+/// joins the named clan (any string, no validation).  `clan -` leaves.
+async fn do_clan(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        if me.clan.is_empty() {
+            return CmdOutput::text(
+                "\r\nYou are not in any clan.  Use `clan <name>` to join one.\r\n".to_string()
+            );
+        }
+        // List online clanmates.
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        let mut s = format!("\r\n=== Clan {} ===\r\n", me.clan);
+        let mut n = 0;
+        for ph in &handles {
+            let c = ph.character.lock().await;
+            if c.clan.eq_ignore_ascii_case(&me.clan) {
+                s.push_str(&format!("  {}\r\n", ph.name));
+                n += 1;
+            }
+        }
+        s.push_str(&format!("\r\n{n} online member(s).\r\n"));
+        return CmdOutput::text(s);
+    }
+    if arg == "-" {
+        if me.clan.is_empty() {
+            return CmdOutput::text("\r\nYou aren't in a clan.\r\n".to_string());
+        }
+        let old = std::mem::take(&mut me.clan);
+        return CmdOutput::text(format!("\r\nYou leave clan {old}.\r\n"));
+    }
+    // Strip control bytes and cap at 30 chars.
+    let new: String = arg.chars()
+        .filter(|c| !c.is_control())
+        .take(30)
+        .collect();
+    if new.is_empty() {
+        return CmdOutput::text("\r\nClan name is empty after stripping.\r\n".to_string());
+    }
+    me.clan = new.clone();
+    CmdOutput::text(format!("\r\nYou are now a member of clan {new}.\r\n"))
+}
+
+/// `clans` — list all clans with member counts, derived from online
+/// players.
+async fn do_clans(_me: &Character, chars: &SharedChars) -> CmdOutput {
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for ph in &handles {
+        let c = ph.character.lock().await;
+        if c.clan.is_empty() { continue; }
+        *counts.entry(c.clan.to_ascii_lowercase()).or_insert(0) += 1;
+    }
+    if counts.is_empty() {
+        return CmdOutput::text("\r\nNo clans have online members.\r\n".to_string());
+    }
+    let mut rows: Vec<(String, u32)> = counts.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut s = String::from("\r\nClans with online members:\r\n");
+    for (name, n) in rows {
+        s.push_str(&format!("  {name:<20} {n} member(s)\r\n"));
+    }
+    CmdOutput::text(s)
+}
+
+/// `ctell <msg>` — broadcast to every online player in your clan,
+/// case-insensitive match.  Refuses if you aren't in a clan.  Honors
+/// the existing mute gate.
+async fn do_ctell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.muted { return muted_msg(); }
+    if me.clan.is_empty() {
+        return CmdOutput::text("\r\nYou aren't in any clan.\r\n".to_string());
+    }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nCtell what?\r\n".to_string());
+    }
+    let formatted = format!("\r\n@m[{}] {} ctells: '{msg}'@n\r\n", me.clan, me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let c = ph.character.lock().await;
+        if c.clan.eq_ignore_ascii_case(&me.clan) {
+            let _ = ph.send.send(formatted.clone());
+        }
+    }
+    CmdOutput::text(format!("\r\n@m[{}] You ctell: '{msg}'@n\r\n", me.clan))
 }
 
 /// `prefs` — single-screen overview of every persistent toggle.
@@ -5091,6 +5295,40 @@ async fn do_disarm(
     ));
     if let Some(b) = bump { out.text.push_str(&b); }
     out
+}
+
+/// `recover` — pull every item out of a corpse on the floor labeled
+/// "corpse of <me>" (left behind by `player_death`).  Respects the
+/// carry-cap.  Convenience wrapper around the cp133 mass-from-container
+/// path; players don't have to type `get all from corpse.<name>`.
+async fn do_recover(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    // Locate a corpse on the floor whose corpse_of starts with the
+    // player's name (we use lowercase compare and accept any "corpse of
+    // <name>" form).
+    let want_label = format!("corpse of {}", me.name).to_ascii_lowercase();
+    let corpse_iid = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+        };
+        r.objects.iter().find_map(|&iid| {
+            let o = w.obj_instances.iter().find(|o| o.id == iid)?;
+            let label = o.corpse_of.as_deref()?.to_ascii_lowercase();
+            if label == want_label { Some(iid) } else { None }
+        })
+    };
+    let Some(_cid) = corpse_iid else {
+        return CmdOutput::text(
+            "\r\nThere is no corpse of yours here.\r\n".to_string()
+        );
+    };
+    // Reuse the mass-take helper with no keyword filter.
+    do_get_all_from(me, world, chars, None, "corpse").await
 }
 
 async fn do_skill(
@@ -9122,6 +9360,19 @@ async fn do_wield(
     if me.equipment[WEAR_WIELD].is_some() {
         return CmdOutput::text("\r\nYou are already wielding something.\r\n");
     }
+    // Two-handed weapons need both hands free.
+    if extra_flags & crate::world::ITEM_2H_WEAPON != 0 {
+        if me.equipment[crate::character::WEAR_SHIELD].is_some() {
+            return CmdOutput::text(format!(
+                "\r\n{short} is two-handed; you'd have to drop your shield first.\r\n"
+            ));
+        }
+        if me.equipment[crate::character::WEAR_HOLD].is_some() {
+            return CmdOutput::text(format!(
+                "\r\n{short} is two-handed; your off-hand isn't free.\r\n"
+            ));
+        }
+    }
 
     me.inventory.remove(idx);
     me.equipment[WEAR_WIELD] = Some(iid);
@@ -9174,6 +9425,25 @@ async fn do_wear(
             "\r\nYou are already wearing something {}.\r\n",
             wear_pos_name(slot)
         ));
+    }
+    // If wearing into shield or hold slot, refuse when a two-handed
+    // weapon is wielded.
+    if (slot == crate::character::WEAR_SHIELD
+        || slot == crate::character::WEAR_HOLD)
+       && me.equipment[crate::character::WEAR_WIELD].is_some()
+    {
+        let w2 = world.lock().await;
+        let two_handed = me.equipment[crate::character::WEAR_WIELD]
+            .and_then(|iid| w2.obj_instances.iter().find(|o| o.id == iid))
+            .and_then(|o| w2.obj_protos.get(&o.vnum))
+            .map(|p| p.extra_flags[0] & crate::world::ITEM_2H_WEAPON != 0)
+            .unwrap_or(false);
+        drop(w2);
+        if two_handed {
+            return CmdOutput::text(format!(
+                "\r\nYour wielded weapon needs both hands — drop or remove it first.\r\n"
+            ));
+        }
     }
 
     me.inventory.remove(idx);
@@ -9752,6 +10022,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.autoassist   = me.autoassist;
             r.autotitle_off = !me.autotitle;
             r.alignment    = me.alignment;
+            r.clan         = me.clan.clone();
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;

@@ -321,6 +321,9 @@ pub const ITEM_ANTI_MAGIC_USER: u32 = 1 << 12;
 pub const ITEM_ANTI_CLERIC:     u32 = 1 << 13;
 pub const ITEM_ANTI_THIEF:      u32 = 1 << 14;
 pub const ITEM_ANTI_WARRIOR:    u32 = 1 << 15;
+/// Two-handed weapon (CircleMUD ITEM_2H_WEAPON).  Requires both
+/// hands — wielder may not also use WEAR_SHIELD or WEAR_HOLD.
+pub const ITEM_2H_WEAPON:       u32 = 1 << 16;
 
 /// MOB_* bitflag positions in `MobProto.mob_flags[0]`.  Mirrors the
 /// MOB_* defines in structs.h.

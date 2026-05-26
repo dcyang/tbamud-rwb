@@ -265,6 +265,7 @@ pub async fn handle_connection(
                     autotitle:    !p_ref.map(|p| p.autotitle_off).unwrap_or(false),
                     history:      std::collections::VecDeque::with_capacity(20),
                     alignment:    p_ref.map(|p| p.alignment).unwrap_or(0),
+                    clan:         p_ref.map(|p| p.clan.clone()).unwrap_or_default(),
                     snooped_by:   Vec::new(),
                     snooping:     None,
                     group_invite_from: None,
@@ -635,6 +636,7 @@ async fn run_game_session(
             rec.autoassist   = me.autoassist;
             rec.autotitle_off = !me.autotitle;
             rec.alignment    = me.alignment;
+            rec.clan         = me.clan.clone();
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;

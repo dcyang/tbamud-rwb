@@ -452,12 +452,16 @@ async fn resolve_pvp_attack(
         let weapon = p.weapon_iid.and_then(|iid|
             w.obj_instances.iter().find(|o| o.id == iid)
                 .and_then(|o| w.obj_protos.get(&o.vnum)));
-        let base = if let Some(wp) = weapon {
-            dice(wp.value[1], wp.value[2])
+        let (base, two_handed) = if let Some(wp) = weapon {
+            let b = dice(wp.value[1], wp.value[2]);
+            let th = wp.extra_flags[0] & crate::world::ITEM_2H_WEAPON != 0;
+            (b, th)
         } else {
-            dice(1, 4)
+            (dice(1, 4), false)
         };
-        (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1)
+        let raw = (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1);
+        // Two-handed weapons add +50% raw damage.
+        if two_handed { raw + raw / 2 } else { raw }
     };
     // Snapshot defender AC + check room/peace.
     let (target_ac, target_room, target_name) = {
@@ -528,12 +532,14 @@ async fn resolve_player_attack(
         let weapon = p.weapon_iid.and_then(|iid|
             w.obj_instances.iter().find(|o| o.id == iid)
                 .and_then(|o| w.obj_protos.get(&o.vnum)));
-        let base = if let Some(wp) = weapon {
-            dice(wp.value[1], wp.value[2])
+        let (base, two_handed) = if let Some(wp) = weapon {
+            let th = wp.extra_flags[0] & crate::world::ITEM_2H_WEAPON != 0;
+            (dice(wp.value[1], wp.value[2]), th)
         } else {
-            dice(1, 4)
+            (dice(1, 4), false)
         };
-        let dmg = (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1);
+        let raw = (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1);
+        let dmg = if two_handed { raw + raw / 2 } else { raw };
         (mob_ac, dmg)
     };
     let hit_chance = (60 + p.level + dex_hit_bonus(p.dex_score) + p.hit_bonus - mob_ac / 10)
