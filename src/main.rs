@@ -9,6 +9,7 @@ mod db;
 mod descriptor;
 mod interpreter;
 mod login;
+mod mail;
 mod players;
 mod server;
 mod telnet;

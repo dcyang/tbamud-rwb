@@ -382,6 +382,17 @@ async fn run_game_session(
     // Send the welcome + initial room view via the channel so it goes through
     // the same writer task as everything else.
     let _ = tx.send("\r\nWelcome to tbaMUD!  May your visit here be... Enlightening\r\n".to_string());
+    // Notify if they have mail.
+    {
+        let data_dir = players.lock().await.data_dir().to_string();
+        let msgs = crate::mail::load_mailbox(&data_dir, &my_name);
+        if !msgs.is_empty() {
+            let _ = tx.send(format!(
+                "\r\nYou have {} message(s) in your mailbox.  Type `mail list` to read.\r\n",
+                msgs.len(),
+            ));
+        }
+    }
     let _ = tx.send(interpreter::render_room(my_room, Some(my_id), &world, &chars).await);
     let _ = tx.send("\r\n> ".to_string());
 

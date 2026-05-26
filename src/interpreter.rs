@@ -79,7 +79,7 @@ const COMMANDS: &[&str] = &[
     "follow", "group", "gtell", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
-    "commands",
+    "commands", "scan", "track", "mail",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -222,6 +222,9 @@ pub async fn dispatch_command(
         Some("prompt")    => do_prompt(rest, me),
         Some("alias")     => do_alias(rest, me),
         Some("commands")  => do_commands(),
+        Some("scan")      => do_scan(rest, me, world, chars).await,
+        Some("track")     => do_track(rest, me, world, chars).await,
+        Some("mail")      => do_mail(rest, me, chars, players).await,
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -701,6 +704,260 @@ async fn do_reply(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     };
     let combined = format!("{name} {msg}");
     do_tell(&combined, me, chars).await
+}
+
+/// `mail` subcommands: `send <to> <text>`, `list`, `read <N>`,
+/// `delete <N>`. Mail is stored per-recipient under
+/// `<data_dir>/plrmail/<name>.mail`; the recipient sees a "You have
+/// new mail." notification immediately if they're online.
+async fn do_mail(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    let data_dir = players.lock().await.data_dir().to_string();
+    let parts: Vec<&str> = arg.splitn(3, char::is_whitespace).collect();
+    let sub = parts.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+
+    match sub.as_str() {
+        "" | "list" | "check" => {
+            let msgs = crate::mail::load_mailbox(&data_dir, &me.name);
+            if msgs.is_empty() {
+                return CmdOutput::text("\r\nYour mailbox is empty.\r\n".to_string());
+            }
+            let mut s = format!("\r\nYou have {} message(s):\r\n", msgs.len());
+            for (i, m) in msgs.iter().enumerate() {
+                let preview: String = m.body.chars().take(50).collect();
+                s.push_str(&format!("  [{}] from {:<14}  {}\r\n", i + 1, m.from, preview));
+            }
+            s.push_str("Use `mail read <N>` to read a message.\r\n");
+            CmdOutput::text(s)
+        }
+        "read" => {
+            let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) else {
+                return CmdOutput::text("\r\nUsage: mail read <N>\r\n".to_string());
+            };
+            let msgs = crate::mail::load_mailbox(&data_dir, &me.name);
+            let Some(m) = (n.checked_sub(1)).and_then(|i| msgs.get(i)) else {
+                return CmdOutput::text(format!("\r\nYou have no message #{n}.\r\n"));
+            };
+            CmdOutput::text(format!(
+                "\r\nFrom: {}\r\nTime: {}\r\n----------------------------------------\r\n{}\r\n",
+                m.from, m.unix_ts, m.body,
+            ))
+        }
+        "delete" | "del" => {
+            let Some(n) = parts.get(1).and_then(|s| s.parse::<usize>().ok()) else {
+                return CmdOutput::text("\r\nUsage: mail delete <N>\r\n".to_string());
+            };
+            let mut msgs = crate::mail::load_mailbox(&data_dir, &me.name);
+            let Some(i) = n.checked_sub(1) else {
+                return CmdOutput::text("\r\nBad index.\r\n".to_string());
+            };
+            if i >= msgs.len() {
+                return CmdOutput::text(format!("\r\nYou have no message #{n}.\r\n"));
+            }
+            msgs.remove(i);
+            if let Err(e) = crate::mail::save_mailbox(&data_dir, &me.name, &msgs) {
+                return CmdOutput::text(format!("\r\nSave failed: {e}\r\n"));
+            }
+            CmdOutput::text(format!("\r\nDeleted message #{n}.\r\n"))
+        }
+        "send" => {
+            // mail send <to> <text>
+            let Some(to)   = parts.get(1) else {
+                return CmdOutput::text("\r\nUsage: mail send <to> <text>\r\n".to_string());
+            };
+            let Some(text) = parts.get(2) else {
+                return CmdOutput::text("\r\nUsage: mail send <to> <text>\r\n".to_string());
+            };
+            let body = text.trim();
+            if body.is_empty() {
+                return CmdOutput::text("\r\nNo body — message not sent.\r\n".to_string());
+            }
+            // Verify the recipient exists in the player index.
+            let recipient_name = {
+                let db = players.lock().await;
+                db.find_name(to)
+            };
+            let Some(recipient_name) = recipient_name else {
+                return CmdOutput::text(format!("\r\nNo player named '{to}' on this MUD.\r\n"));
+            };
+            let unix_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64).unwrap_or(0);
+            let msg = crate::mail::MailMessage {
+                from:    me.name.clone(),
+                unix_ts,
+                body:    body.to_string(),
+            };
+            if let Err(e) = crate::mail::append_mail(&data_dir, &recipient_name, &msg) {
+                return CmdOutput::text(format!("\r\nSend failed: {e}\r\n"));
+            }
+            // Notify online recipient immediately.
+            let cl = chars.lock().await;
+            if let Some(p) = cl.iter().find(|p| p.name.eq_ignore_ascii_case(&recipient_name)) {
+                let _ = p.send.send(format!("\r\nYou have new mail from {}.\r\n", me.name));
+            }
+            CmdOutput::text(format!("\r\nMail sent to {recipient_name}.\r\n"))
+        }
+        _ => CmdOutput::text(
+            "\r\nUsage: mail send <to> <text> | list | read <N> | delete <N>\r\n".to_string(),
+        ),
+    }
+}
+
+/// `track <player>` — find the first direction toward an online player
+/// via BFS over rooms.  Bounded at depth 50 to keep the pass cheap on
+/// the 12700-room dataset.  Closed doors, hidden exits (mortals), and
+/// `ROOM_NOTRACK` rooms break the search.
+async fn do_track(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nTrack whom?\r\n".to_string());
+    }
+    let target_room = {
+        let cl = chars.lock().await;
+        let r = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg) && p.id != me.id)
+            .map(|p| p.current_room);
+        r
+    };
+    let Some(target_room) = target_room else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    if target_room == me.current_room {
+        return CmdOutput::text(format!("\r\n{arg} is right here.\r\n"));
+    }
+
+    let immortal = me.level >= LVL_IMMORT;
+    let first_hop = {
+        use std::collections::{VecDeque, HashMap};
+        let w = world.lock().await;
+        // BFS: each visited room remembers its first-hop direction.
+        let mut visited: HashMap<crate::world::RoomVnum, Direction> = HashMap::new();
+        let mut queue: VecDeque<(crate::world::RoomVnum, i32, Direction)> = VecDeque::new();
+        let Some(start) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        for d in Direction::ALL {
+            if let Some(e) = &start.exits[d as usize] {
+                if e.to_room == crate::world::NOWHERE { continue; }
+                if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
+                if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
+                if w.rooms.get(&e.to_room)
+                    .map(|r| r.room_flags[0] & crate::world::ROOM_NOTRACK != 0)
+                    .unwrap_or(true) { continue; }
+                visited.insert(e.to_room, d);
+                queue.push_back((e.to_room, 1, d));
+            }
+        }
+        let mut found: Option<Direction> = None;
+        while let Some((rv, depth, first)) = queue.pop_front() {
+            if rv == target_room { found = Some(first); break; }
+            if depth >= 50 { continue; }
+            let Some(r) = w.rooms.get(&rv) else { continue; };
+            for d in Direction::ALL {
+                if let Some(e) = &r.exits[d as usize] {
+                    if e.to_room == crate::world::NOWHERE { continue; }
+                    if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
+                    if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
+                    if w.rooms.get(&e.to_room)
+                        .map(|r| r.room_flags[0] & crate::world::ROOM_NOTRACK != 0)
+                        .unwrap_or(true) { continue; }
+                    if visited.contains_key(&e.to_room) { continue; }
+                    visited.insert(e.to_room, first);
+                    queue.push_back((e.to_room, depth + 1, first));
+                }
+            }
+        }
+        found
+    };
+    match first_hop {
+        Some(d) => CmdOutput::text(format!("\r\nYou sense {arg} is {} from here.\r\n", d.name())),
+        None    => CmdOutput::text(format!("\r\nYou cannot sense {arg}.\r\n")),
+    }
+}
+
+/// `scan [direction]` — peek into adjacent rooms.  No arg scans every
+/// open, non-hidden direction; a direction arg drills into just that
+/// one. Closed doors block (caller has to `open` first). Mortals can't
+/// see through EX_HIDDEN exits.
+async fn do_scan(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let only_dir = if arg.trim().is_empty() {
+        None
+    } else if let Some(d) = Direction::parse(arg.trim()) {
+        Some(d)
+    } else {
+        return CmdOutput::text(format!("\r\nUnknown direction '{}'.\r\n", arg.trim()));
+    };
+    let immortal = me.level >= LVL_IMMORT;
+
+    // Snapshot adjacent rooms + their occupants under a brief lock.
+    let scans: Vec<(Direction, crate::world::RoomVnum, String, Vec<String>)> = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let mut out = Vec::new();
+        for d in Direction::ALL {
+            if let Some(this_d) = only_dir { if this_d != d { continue; } }
+            let Some(e) = &r.exits[d as usize] else { continue; };
+            if e.to_room == crate::world::NOWHERE { continue; }
+            if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
+            if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
+            let Some(target) = w.rooms.get(&e.to_room) else { continue; };
+            let mut mobs: Vec<String> = Vec::new();
+            for &mid in &target.mobs {
+                if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
+                    if let Some(p) = w.mob_protos.get(&m.vnum) {
+                        mobs.push(p.short_descr.clone());
+                    }
+                }
+            }
+            out.push((d, e.to_room, target.name.clone(), mobs));
+        }
+        out
+    };
+
+    // Also gather players in those rooms (briefly).
+    let cl_snap: Vec<(u32, crate::world::RoomVnum, String)> = {
+        let cl = chars.lock().await;
+        cl.iter().map(|p| (p.id, p.current_room, p.name.clone())).collect()
+    };
+
+    if scans.is_empty() {
+        return CmdOutput::text("\r\nNo visible exits to scan.\r\n".to_string());
+    }
+    let mut s = String::from("\r\n");
+    for (d, rv, name, mobs) in &scans {
+        s.push_str(&format!("  {} → [{rv}] {name}\r\n", d.name()));
+        let players: Vec<&str> = cl_snap.iter()
+            .filter(|(id, room, _)| *id != me.id && *room == *rv)
+            .map(|(_, _, n)| n.as_str())
+            .collect();
+        if mobs.is_empty() && players.is_empty() {
+            s.push_str("      (quiet)\r\n");
+        } else {
+            for n in &players {
+                s.push_str(&format!("      {n} is here.\r\n"));
+            }
+            for m in mobs {
+                s.push_str(&format!("      {m}\r\n"));
+            }
+        }
+    }
+    CmdOutput::text(s)
 }
 
 fn do_commands() -> CmdOutput {

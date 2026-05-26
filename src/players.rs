@@ -225,6 +225,12 @@ impl PlayerDb {
         self.entries.iter().position(|e| e.name.to_lowercase() == lower)
     }
 
+    /// Case-insensitive lookup that returns the canonical capitalized
+    /// name (whatever the index file stored).
+    pub fn find_name(&self, name: &str) -> Option<String> {
+        self.find_by_name(name).map(|i| self.entries[i].name.clone())
+    }
+
     /// Create a new index entry for a freshly-created character and return
     /// the assigned player ID.  Mirrors create_entry() in players.c.
     pub fn create_entry(&mut self, name: &str) -> i64 {

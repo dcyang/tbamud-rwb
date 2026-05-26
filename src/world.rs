@@ -104,6 +104,7 @@ pub const ROOM_SOUNDPROOF: u32 = 1 << 5;
 pub const ROOM_NOMAGIC:    u32 = 1 << 7;
 pub const ROOM_TUNNEL:     u32 = 1 << 8;
 pub const ROOM_PRIVATE:    u32 = 1 << 9;
+pub const ROOM_NOTRACK:    u32 = 1 << 6;
 pub const ROOM_GODROOM:    u32 = 1 << 10;
 
 /// EX_* bits inside `Exit.exit_info`.  Mirror the same-named macros in
