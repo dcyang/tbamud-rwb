@@ -81,7 +81,10 @@ const COMMANDS: &[&str] = &[
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
+    "finger", "assist", "worship",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
+    "zreset", "olist", "mlist", "rlist", "zlist",
+    "invis", "vis", "mute", "freeze",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -128,6 +131,42 @@ pub async fn dispatch_command(
         return CmdOutput::text(String::new());
     }
     me.last_activity = std::time::Instant::now();
+
+    // Frozen players can do almost nothing.  Allow quit/look/score so
+    // they can sign off cleanly and read their state.  Everything else
+    // bails with a notice.
+    if me.frozen {
+        let first = raw.split_whitespace().next().unwrap_or("");
+        let allowed = matches!(first, "quit" | "look" | "l" | "score" | "sc");
+        if !allowed {
+            return CmdOutput::text(
+                "\r\nYou are frozen and cannot act.\r\n".to_string(),
+            );
+        }
+    }
+
+    // Speech-prefix shortcuts (single-char leader).  `: foo` → emote;
+    // `' foo` → say; `; foo` → gossip.  Translated before alias
+    // expansion so users can still alias the underlying verbs.
+    let prefixed: String;
+    let raw: &str = if let Some(first) = raw.chars().next() {
+        let verb = match first {
+            ':' => Some("emote"),
+            '\'' => Some("say"),
+            ';' => Some("gossip"),
+            _   => None,
+        };
+        if let Some(v) = verb {
+            let rest = raw[first.len_utf8()..].trim_start();
+            prefixed = if rest.is_empty() { v.to_string() }
+                       else { format!("{v} {rest}") };
+            prefixed.as_str()
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
 
     // Expand a per-player alias once.  `alias bs bash`, type `bs goblin`
     // → "bash goblin".  Recursion is prevented by only consulting the
@@ -237,6 +276,9 @@ pub async fn dispatch_command(
         Some("peace")     => do_peace(me, world, chars).await,
         Some("order")     => do_order(rest, me, world, chars).await,
         Some("pvp")       => do_pvp(me),
+        Some("finger")    => do_finger(rest, chars, players).await,
+        Some("assist")    => do_assist(rest, me, world, chars).await,
+        Some("worship")   => do_worship(rest, me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -245,6 +287,15 @@ pub async fn dispatch_command(
         Some("force")     => do_force(rest, me, world, chars).await,
         Some("set")       => do_set(rest, me, chars).await,
         Some("wizlock")   => do_wizlock(rest, me),
+        Some("zreset")    => do_zreset(rest, me, world).await,
+        Some("olist")     => do_olist(rest, me, world).await,
+        Some("mlist")     => do_mlist(rest, me, world).await,
+        Some("rlist")     => do_rlist(rest, me, world).await,
+        Some("zlist")     => do_zlist(me, world).await,
+        Some("invis")     => do_invis(rest, me),
+        Some("vis")       => do_vis(me),
+        Some("mute")      => do_mute(rest, me, chars).await,
+        Some("freeze")    => do_freeze(rest, me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -651,6 +702,7 @@ async fn do_say(
     me: &mut Character,
     chars: &SharedChars,
 ) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     if arg.is_empty() {
         return CmdOutput::text("\r\nYak yak yak...\r\n");
     }
@@ -682,6 +734,7 @@ async fn do_say_with_triggers(
 }
 
 async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let (target, msg) = match arg.find(char::is_whitespace) {
         Some(i) => (&arg[..i], arg[i..].trim_start()),
         None    => return CmdOutput::text("\r\nTell whom what?\r\n"),
@@ -1053,6 +1106,128 @@ async fn do_order(
     ))
 }
 
+/// `finger <name>` — public profile for any player.  Online players
+/// show their current title + an "(online)" tag; offline players show
+/// their last-login timestamp.  Unknown names get a "no record" reply.
+/// `assist <player>` — engage whatever mob the named player is fighting.
+/// Both must be in the same room; the leader must be currently fighting
+/// a non-player target.  Refuses if the assister is already in combat.
+/// `worship <name>` — set the deity displayed on score.  `worship -`
+/// or empty clears.  60-char cap, control-stripped.
+fn do_worship(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() || arg == "-" {
+        me.god.clear();
+        return CmdOutput::text("\r\nYou no longer follow any god.\r\n".to_string());
+    }
+    let sanitized: String = arg.chars().filter(|c| !c.is_control()).take(60).collect();
+    me.god = sanitized;
+    CmdOutput::text(format!("\r\nYou now worship {}.\r\n", me.god))
+}
+
+async fn do_assist(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.fighting.is_some() {
+        return CmdOutput::text("\r\nYou're already in a fight.\r\n".to_string());
+    }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nAssist whom?\r\n".to_string());
+    }
+    // Find target player in same room.
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.id != me.id
+            && p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNo one here by that name.\r\n".to_string());
+    };
+    let target_id = {
+        let c = ph.character.lock().await;
+        c.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+    let Some(mob_id) = target_id else {
+        return CmdOutput::text(format!("\r\n{} isn't fighting anyone.\r\n", ph.name));
+    };
+    // Engage.
+    let mob_name = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nThe target has vanished.\r\n".to_string()),
+        };
+        let name = w.mob_protos.get(&m.vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".to_string());
+        let mm = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if mm.fighting.is_none() {
+            mm.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        name
+    };
+    me.fighting = Some(Target { id: mob_id, is_player: false });
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} joins the fight against {mob_name}!\r\n", me.name));
+    CmdOutput::text(format!("\r\nYou join the fight against {mob_name}!\r\n"))
+}
+
+async fn do_finger(
+    arg: &str,
+    chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nFinger whom?\r\n".to_string());
+    }
+    // Online first.
+    let online = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    if let Some(ph) = online {
+        let (title, class) = {
+            let c = ph.character.lock().await;
+            (c.title.clone(), c.class)
+        };
+        return CmdOutput::text(format!(
+            "\r\nName:    {}{}\r\nClass:   {:?}\r\nLevel:   {}\r\nStatus:  (online)\r\n",
+            ph.name,
+            if title.is_empty() { String::new() } else { format!(" {title}") },
+            class, ph.level,
+        ));
+    }
+    // Offline.
+    let rec = {
+        let db = players.lock().await;
+        db.find_name(arg).and_then(|n| db.load_player(&n).ok())
+    };
+    let Some(r) = rec else {
+        return CmdOutput::text(format!("\r\nNo record of '{arg}' on this MUD.\r\n"));
+    };
+    let last = if r.last_login > 0 {
+        format!("unix {}", r.last_login)
+    } else {
+        "unknown".to_string()
+    };
+    CmdOutput::text(format!(
+        "\r\nName:    {}{}\r\nClass:   {:?}\r\nLevel:   {}\r\nStatus:  (offline; last login {last})\r\n",
+        r.name,
+        if r.title.is_empty() { String::new() } else { format!(" {}", r.title) },
+        r.class, r.level,
+    ))
+}
+
 fn do_pvp(me: &mut Character) -> CmdOutput {
     me.pvp_ok = !me.pvp_ok;
     CmdOutput::text(format!(
@@ -1170,6 +1345,7 @@ fn do_note(arg: &str, me: &mut Character) -> CmdOutput {
 }
 
 async fn do_emote(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let text = arg.trim();
     if text.is_empty() {
         return CmdOutput::text("\r\nEmote what?\r\n".to_string());
@@ -1457,6 +1633,7 @@ async fn do_group(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutp
 /// group with the sender (their leader or any grouped follower of the
 /// shared leader).
 async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let msg = arg.trim();
     if msg.is_empty() {
         return CmdOutput::text("\r\nGroup-tell what?\r\n".to_string());
@@ -1593,6 +1770,7 @@ async fn do_auction(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let msg = arg.trim();
     if msg.is_empty() {
         me.auction_off = !me.auction_off;
@@ -1637,6 +1815,7 @@ async fn do_whisper(
     me: &Character,
     chars: &SharedChars,
 ) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let (target, msg) = match arg.find(char::is_whitespace) {
         Some(i) => (arg[..i].trim(), arg[i..].trim()),
         None    => return CmdOutput::text("\r\nWhisper to whom what?\r\n".to_string()),
@@ -1668,6 +1847,10 @@ async fn do_whisper(
     CmdOutput::text(format!("\r\nYou whisper to {}, '{msg}'\r\n", ph.name))
 }
 
+fn muted_msg() -> CmdOutput {
+    CmdOutput::text("\r\nYou are muted and cannot speak.\r\n".to_string())
+}
+
 fn do_brief(me: &mut Character) -> CmdOutput {
     me.brief = !me.brief;
     CmdOutput::text(format!(
@@ -1694,6 +1877,7 @@ async fn do_gossip(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
+    if me.muted { return muted_msg(); }
     let msg = arg.trim();
     if msg.is_empty() {
         me.gossip_off = !me.gossip_off;
@@ -2066,6 +2250,221 @@ fn bad_value(field: &str) -> CmdOutput {
 /// `wizlock [level]` — show or set the global login threshold.
 /// 0 unlocks; any positive value blocks logins below it (immortals
 /// always bypass).  Immortal-only.
+/// `mute <player>` (immortal): toggle the target's muted state.  Muted
+/// players have their channel commands refused with "You're muted."
+async fn do_mute(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nMute whom?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    let now_muted = {
+        let mut c = ph.character.lock().await;
+        c.muted = !c.muted;
+        c.muted
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} has {}muted you.\r\n",
+        me.name, if now_muted { "" } else { "un-" },
+    ));
+    CmdOutput::text(format!(
+        "\r\nYou {} {}.\r\n",
+        if now_muted { "mute" } else { "unmute" }, ph.name,
+    ))
+}
+
+/// `freeze <player>` (immortal): toggle the target's frozen state.
+/// Frozen players have nearly all commands refused.
+async fn do_freeze(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nFreeze whom?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nNobody by that name is online.\r\n".to_string());
+    };
+    let now_frozen = {
+        let mut c = ph.character.lock().await;
+        c.frozen = !c.frozen;
+        c.frozen
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} has {}frozen you.\r\n",
+        me.name, if now_frozen { "" } else { "un-" },
+    ));
+    CmdOutput::text(format!(
+        "\r\nYou {} {}.\r\n",
+        if now_frozen { "freeze" } else { "unfreeze" }, ph.name,
+    ))
+}
+
+fn do_invis(arg: &str, me: &mut Character) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let target = arg.trim().parse::<i32>().unwrap_or(LVL_IMMORT);
+    me.invis_level = target.clamp(0, 34);
+    if me.invis_level == 0 {
+        CmdOutput::text("\r\nYou are now fully visible.\r\n".to_string())
+    } else {
+        CmdOutput::text(format!("\r\nYou fade to invis level {}.\r\n", me.invis_level))
+    }
+}
+
+fn do_vis(me: &mut Character) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    me.invis_level = 0;
+    CmdOutput::text("\r\nYou are now fully visible.\r\n".to_string())
+}
+
+async fn do_zreset(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Ok(zv) = arg.trim().parse::<i32>() else {
+        return CmdOutput::text("\r\nUsage: zreset <zone-vnum>\r\n".to_string());
+    };
+    let (mobs_before, objs_before, mobs_after, objs_after, ok) = {
+        let mut w = world.lock().await;
+        if !w.zones.contains_key(&zv) {
+            return CmdOutput::text(format!("\r\nNo zone with vnum {zv}.\r\n"));
+        }
+        let mb = w.mob_instances.len();
+        let ob = w.obj_instances.len();
+        crate::db::reset_zone(&mut w, zv);
+        let ma = w.mob_instances.len();
+        let oa = w.obj_instances.len();
+        (mb, ob, ma, oa, true)
+    };
+    let _ = ok;
+    CmdOutput::text(format!(
+        "\r\nZone {zv} reset.\r\n  Mobs:    {mobs_before} → {mobs_after}\r\n  Objects: {objs_before} → {objs_after}\r\n",
+    ))
+}
+
+/// Shared parser for vnum range args: `""`, `"N"`, `"N-M"`.
+fn parse_vnum_range(arg: &str) -> Option<(i32, i32)> {
+    let s = arg.trim();
+    if s.is_empty() { return Some((0, 60)); }
+    if let Some((a, b)) = s.split_once('-') {
+        let lo: i32 = a.parse().ok()?;
+        let hi: i32 = b.parse().ok()?;
+        if hi < lo { None } else { Some((lo, hi)) }
+    } else {
+        let n: i32 = s.parse().ok()?;
+        Some((n, n + 30))
+    }
+}
+
+async fn do_mlist(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Some((lo, hi)) = parse_vnum_range(arg) else {
+        return CmdOutput::text("\r\nBad range.\r\n".to_string());
+    };
+    let w = world.lock().await;
+    let mut s = format!("\r\nMob prototypes [{lo}..{hi}]:\r\n");
+    let mut shown = 0;
+    for (vnum, p) in w.mob_protos.range(lo..=hi) {
+        if shown >= 100 { s.push_str("  ... (truncated)\r\n"); break; }
+        s.push_str(&format!(
+            "  [{:>5}] {:<40} level={}\r\n",
+            vnum, p.short_descr.chars().take(40).collect::<String>(), p.level,
+        ));
+        shown += 1;
+    }
+    if shown == 0 { s.push_str("  (no mobs in range)\r\n"); }
+    CmdOutput::text(s)
+}
+
+async fn do_rlist(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Some((lo, hi)) = parse_vnum_range(arg) else {
+        return CmdOutput::text("\r\nBad range.\r\n".to_string());
+    };
+    let w = world.lock().await;
+    let mut s = format!("\r\nRooms [{lo}..{hi}]:\r\n");
+    let mut shown = 0;
+    for (vnum, r) in w.rooms.range(lo..=hi) {
+        if shown >= 100 { s.push_str("  ... (truncated)\r\n"); break; }
+        s.push_str(&format!(
+            "  [{:>5}] zone={:<3} {}\r\n",
+            vnum, r.zone, r.name.chars().take(50).collect::<String>(),
+        ));
+        shown += 1;
+    }
+    if shown == 0 { s.push_str("  (no rooms in range)\r\n"); }
+    CmdOutput::text(s)
+}
+
+async fn do_zlist(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let w = world.lock().await;
+    let mut s = format!("\r\nZones ({}):\r\n", w.zones.len());
+    let mut shown = 0;
+    for z in w.zones.values() {
+        if shown >= 200 { s.push_str("  ... (truncated)\r\n"); break; }
+        s.push_str(&format!(
+            "  [{:>3}] {:<30} rooms {}..{}\r\n",
+            z.number, z.name.chars().take(30).collect::<String>(),
+            z.bot, z.top,
+        ));
+        shown += 1;
+    }
+    CmdOutput::text(s)
+}
+
+async fn do_olist(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Some((lo, hi)) = parse_vnum_range(arg) else {
+        return CmdOutput::text("\r\nBad range.\r\n".to_string());
+    };
+    let w = world.lock().await;
+    let mut s = format!("\r\nObject prototypes [{lo}..{hi}]:\r\n");
+    let mut shown = 0;
+    for (vnum, p) in w.obj_protos.range(lo..=hi) {
+        if shown >= 100 { s.push_str("  ... (truncated)\r\n"); break; }
+        s.push_str(&format!(
+            "  [{:>5}] {:<35} type={:<8} level={}\r\n",
+            vnum,
+            p.short_description.chars().take(35).collect::<String>(),
+            item_type_name(p.item_type),
+            p.level,
+        ));
+        shown += 1;
+    }
+    if shown == 0 { s.push_str("  (no objects in range)\r\n"); }
+    CmdOutput::text(s)
+}
+
 fn do_wizlock(arg: &str, me: &Character) -> CmdOutput {
     use std::sync::atomic::Ordering;
     if me.level < LVL_IMMORT { return immort_huh(); }
@@ -2358,14 +2757,14 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
 
     // Snapshot titles + classes outside the registry lock to avoid
     // serializing on contended Character mutexes.
-    let extras: Vec<(u32, String, crate::players::Class)> = {
+    let extras: Vec<(u32, String, crate::players::Class, i32)> = {
         let cl = chars.lock().await;
         let handles: Vec<_> = cl.iter().cloned().collect();
         drop(cl);
         let mut out = Vec::new();
         for ph in handles {
             let c = ph.character.lock().await;
-            out.push((ph.id, c.title.clone(), c.class));
+            out.push((ph.id, c.title.clone(), c.class, c.invis_level));
         }
         out
     };
@@ -2374,9 +2773,11 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     let mut s = String::from("\r\nPlayers online:\r\n");
     let mut count = 0;
     for p in cl.iter() {
-        let (_, title, class) = extras.iter().find(|(id, _, _)| *id == p.id)
+        let (_, title, class, invis_lvl) = extras.iter().find(|(id, _, _, _)| *id == p.id)
             .cloned()
-            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined));
+            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined, 0));
+        // Hide immortal-invis players from anyone below their threshold.
+        if p.id != me.id && invis_lvl > me.level { continue; }
         if let Some(sub) = &name_substr {
             if !p.name.to_ascii_lowercase().contains(sub) { continue; }
         }
@@ -2416,8 +2817,10 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     } else {
         format!("Name:  {} {}", me.name, me.title)
     };
+    let god_line = if me.god.is_empty() { String::new() }
+                   else { format!("God:   {}\r\n", me.god) };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{god_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
@@ -3454,6 +3857,7 @@ async fn do_cast(
         crate::character::Skill::LocateObject => cast_locate_object(target, me, world, chars).await,
         crate::character::Skill::Refresh      => cast_refresh(target, me, chars).await,
         crate::character::Skill::Summon       => cast_summon(target, me, world, chars).await,
+        crate::character::Skill::SenseLife    => cast_sense_life(me),
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -3526,6 +3930,23 @@ async fn cast_detect_magic(me: &mut Character, world: &Arc<Mutex<World>>) -> Cmd
         s.push_str("  ...you sense no magic nearby.\r\n");
     }
     CmdOutput::text(s)
+}
+
+fn cast_sense_life(me: &mut Character) -> CmdOutput {
+    let aff = crate::character::Affect {
+        skill:         crate::character::Skill::SenseLife,
+        duration:      12,
+        to_hit:        0,
+        to_dam:        0,
+        dmg_reduction: 0,
+        dot_damage:    0,
+        to_ac:         0,
+    };
+    me.mana -= crate::character::Skill::SenseLife.mana_cost();
+    me.apply_affect(aff);
+    CmdOutput::text(
+        "\r\nThe air shimmers. You can feel the heartbeats of those around you.\r\n",
+    )
 }
 
 fn cast_detect_invis(me: &mut Character) -> CmdOutput {
@@ -6651,6 +7072,12 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.bank_gold       = me.bank_gold;
             r.prompt_format   = me.prompt_format.clone();
             r.aliases         = me.aliases.clone();
+            r.last_login      = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64).unwrap_or(r.last_login);
+            r.god             = me.god.clone();
+            r.muted           = me.muted;
+            r.frozen          = me.frozen;
             r.notes           = me.notes.clone();
             r.pose            = me.pose.clone();
             r
@@ -8264,7 +8691,9 @@ pub async fn render_room(
         match cl.iter().find(|p| p.id == vid) {
             Some(p) => {
                 let c = p.character.lock().await;
-                c.affects.iter().any(|a| a.skill == crate::character::Skill::DetectInvis)
+                c.affects.iter().any(|a|
+                    a.skill == crate::character::Skill::DetectInvis
+                    || a.skill == crate::character::Skill::SenseLife)
             }
             None => false,
         }
@@ -8273,16 +8702,19 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        let (hidden, pose) = {
+        let (hidden, pose, invis_lvl) = {
             let c = p.character.lock().await;
-            (c.hidden, c.pose.clone())
+            (c.hidden, c.pose.clone(), c.invis_level)
         };
+        // Immortal invis hides them from anyone below `invis_level`.
+        if invis_lvl > viewer_level { continue; }
         if !see_hidden && hidden { continue; }
         let hidden_tag = if see_hidden && hidden { " (hidden)" } else { "" };
+        let invis_tag  = if invis_lvl > 0 { format!(" [invis{}]", invis_lvl) } else { String::new() };
         if !pose.is_empty() {
-            s.push_str(&format!("{} {pose}{hidden_tag}\r\n", p.name));
+            s.push_str(&format!("{} {pose}{hidden_tag}{invis_tag}\r\n", p.name));
         } else {
-            s.push_str(&format!("{} is standing here.{hidden_tag}\r\n", p.name));
+            s.push_str(&format!("{} is standing here.{hidden_tag}{invis_tag}\r\n", p.name));
         }
     }
 

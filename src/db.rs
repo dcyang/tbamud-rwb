@@ -1487,7 +1487,7 @@ fn parse_mob_stats(line: &str) -> Result<(i32,i32,i32,i32,i32,i32,i32,i32,i32)> 
 /// commands we currently implement (M, O, G, P, R, D). E (equip) is
 /// downgraded to G (give) since we don't have equipment slots yet. T and V
 /// are dropped at parse time.
-fn reset_zone(world: &mut World, zone_vnum: i32) {
+pub fn reset_zone(world: &mut World, zone_vnum: i32) {
     // Clone the command list so we can mutate world.* during execution.
     let cmds = match world.zones.get(&zone_vnum) {
         Some(z) => z.commands.clone(),

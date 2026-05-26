@@ -152,6 +152,13 @@ pub struct PlayerRecord {
     pub notes:         Vec<String>,
     /// Pose suffix shown in render_room.
     pub pose:          String,
+    /// Unix timestamp of the player's last login (best-effort; overwritten
+    /// every auto-save).
+    pub last_login:    i64,
+    /// Name of the deity the character worships (cosmetic, empty = none).
+    pub god:           String,
+    pub muted:         bool,
+    pub frozen:        bool,
 }
 
 impl PlayerRecord {
@@ -367,6 +374,10 @@ impl PlayerDb {
                 }
                 "Note" => rec.notes.push(val.to_string()),
                 "Pose" => rec.pose = val.to_string(),
+                "LLog" => rec.last_login = val.parse().unwrap_or(0),
+                "God"  => rec.god  = val.to_string(),
+                "Mute" => rec.muted  = val.parse::<i32>().unwrap_or(0) != 0,
+                "Frzn" => rec.frozen = val.parse::<i32>().unwrap_or(0) != 0,
                 _ => {}
             }
         }
@@ -454,6 +465,10 @@ impl PlayerDb {
             writeln!(f, "Note: {note}")?;
         }
         if !rec.pose.is_empty() { writeln!(f, "Pose: {}", rec.pose)?; }
+        if rec.last_login > 0   { writeln!(f, "LLog: {}", rec.last_login)?; }
+        if !rec.god.is_empty()  { writeln!(f, "God : {}", rec.god)?; }
+        if rec.muted            { writeln!(f, "Mute: 1")?; }
+        if rec.frozen           { writeln!(f, "Frzn: 1")?; }
 
         Ok(())
     }

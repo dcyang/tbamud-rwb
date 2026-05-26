@@ -276,6 +276,10 @@ pub async fn handle_connection(
                     notes:            p_ref.map(|p| p.notes.clone()).unwrap_or_default(),
                     pose:             p_ref.map(|p| p.pose.clone()).unwrap_or_default(),
                     pvp_ok:           false,
+                    invis_level:      0,
+                    god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
+                    muted:            p_ref.map(|p| p.muted).unwrap_or(false),
+                    frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
                     last_activity:    std::time::Instant::now(),
                 };
 
@@ -518,6 +522,12 @@ async fn run_game_session(
             rec.bank_gold       = me.bank_gold;
             rec.prompt_format   = me.prompt_format.clone();
             rec.aliases         = me.aliases.clone();
+            rec.last_login      = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64).unwrap_or(rec.last_login);
+            rec.god             = me.god.clone();
+            rec.muted           = me.muted;
+            rec.frozen          = me.frozen;
             rec.notes           = me.notes.clone();
             rec.pose            = me.pose.clone();
             if let Err(e) = players_guard.save_player(&rec) {

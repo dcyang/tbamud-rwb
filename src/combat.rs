@@ -987,16 +987,26 @@ async fn player_death(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
-    let (old_room, start_room, max_hp) = {
+    // Snapshot inventory before reset so we can drop it as a corpse.
+    let (old_room, start_room, max_hp, dropped, corpse_label) = {
         let mut c = ph.character.lock().await;
         let immortal = c.level >= 34;
         let start = world.lock().await.start_room(immortal);
         let old = c.current_room;
+        let dropped: Vec<u32> = std::mem::take(&mut c.inventory);
+        let label = format!("corpse of {}", c.name);
         c.hp           = c.max_hp;
         c.current_room = start;
         c.fighting     = None;
-        (old, start, c.max_hp)
+        (old, start, c.max_hp, dropped, label)
     };
+
+    // Spawn the corpse in the death room (if it's a real room) holding
+    // the dropped inventory.  Equipped items stay on the body.
+    if old_room != crate::world::NOWHERE && !dropped.is_empty() {
+        let mut w = world.lock().await;
+        w.create_corpse(&corpse_label, dropped, old_room);
+    }
 
     // Update the registry's cached current_room.
     {

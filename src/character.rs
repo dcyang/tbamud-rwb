@@ -57,6 +57,7 @@ pub enum Skill {
     LocateObject,
     Refresh,
     Summon,
+    SenseLife,
     Dodge,
     Parry,
 }
@@ -109,6 +110,7 @@ impl Skill {
             "locateobject" | "locate"         => Some(Skill::LocateObject),
             "refresh"                         => Some(Skill::Refresh),
             "summon"                          => Some(Skill::Summon),
+            "senselife" | "sense-life"        => Some(Skill::SenseLife),
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
             _ => None,
@@ -150,6 +152,7 @@ impl Skill {
             Skill::LocateObject => "locate object",
             Skill::Refresh      => "refresh",
             Skill::Summon       => "summon",
+            Skill::SenseLife    => "sense life",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -169,7 +172,7 @@ impl Skill {
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
                 | Skill::Earthquake   | Skill::CharmPerson | Skill::LocateObject
-                | Skill::Refresh      | Skill::Summon
+                | Skill::Refresh      | Skill::Summon       | Skill::SenseLife
                                       => SkillKind::Spell,
         }
     }
@@ -205,6 +208,7 @@ impl Skill {
             Skill::LocateObject => 10,
             Skill::Refresh      => 4,
             Skill::Summon       => 25,
+            Skill::SenseLife    => 6,
         }
     }
 
@@ -246,6 +250,7 @@ impl Skill {
             Skill::LocateObject => &[Class::MagicUser, Class::Cleric],
             Skill::Refresh      => &[Class::Cleric],
             Skill::Summon       => &[Class::MagicUser],
+            Skill::SenseLife    => &[Class::Cleric, Class::MagicUser],
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
         }
@@ -290,6 +295,7 @@ impl Skill {
             Skill::LocateObject => "locate-object",
             Skill::Refresh      => "refresh",
             Skill::Summon       => "summon",
+            Skill::SenseLife    => "sense-life",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -314,6 +320,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
     Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
     Skill::CharmPerson, Skill::LocateObject, Skill::Refresh, Skill::Summon,
+    Skill::SenseLife,
     Skill::Dodge, Skill::Parry,
 ];
 
@@ -463,6 +470,19 @@ pub struct Character {
     /// PvP opt-in.  When false, the player can neither be attacked by
     /// nor attack another player.  Transient.
     pub pvp_ok:       bool,
+    /// Immortal invisibility level.  0 = visible to everyone; N > 0
+    /// hides this character from anyone whose own level is &lt; N.
+    /// Transient (cleared on reboot).
+    pub invis_level:  i32,
+    /// Name of the deity this character worships (empty for none).
+    /// Persisted.  Cosmetic only at the moment.
+    pub god:          String,
+    /// Muted: cannot use chat channels (say/tell/gossip/auction/...).
+    /// Set by `mute` immortal command.  Persisted.
+    pub muted:        bool,
+    /// Frozen: dispatch_command refuses every verb except quit/look/score.
+    /// Set by `freeze` immortal command.  Persisted.
+    pub frozen:       bool,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.
