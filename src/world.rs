@@ -426,6 +426,11 @@ pub struct MobInstance {
     pub triggers:  Vec<TriggerVnum>,
     /// Active timed effects (Poison etc).  Ticked by the combat loop.
     pub affects:   Vec<crate::character::Affect>,
+    /// Player id that currently has this mob charmed (paired with an
+    /// active `Skill::CharmPerson` affect).  `None` for non-charmed
+    /// mobs.  Allowed to be stale after the affect expires — the drag
+    /// path re-checks the affect before using this.
+    pub charmer:   Option<u32>,
 }
 
 impl MobInstance {

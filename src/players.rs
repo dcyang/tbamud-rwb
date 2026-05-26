@@ -150,6 +150,8 @@ pub struct PlayerRecord {
     pub aliases:       std::collections::HashMap<String, String>,
     /// Personal note pad.
     pub notes:         Vec<String>,
+    /// Pose suffix shown in render_room.
+    pub pose:          String,
 }
 
 impl PlayerRecord {
@@ -364,6 +366,7 @@ impl PlayerDb {
                     }
                 }
                 "Note" => rec.notes.push(val.to_string()),
+                "Pose" => rec.pose = val.to_string(),
                 _ => {}
             }
         }
@@ -450,6 +453,7 @@ impl PlayerDb {
         for note in &rec.notes {
             writeln!(f, "Note: {note}")?;
         }
+        if !rec.pose.is_empty() { writeln!(f, "Pose: {}", rec.pose)?; }
 
         Ok(())
     }

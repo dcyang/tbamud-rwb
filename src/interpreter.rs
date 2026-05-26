@@ -80,7 +80,7 @@ const COMMANDS: &[&str] = &[
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
-    "emote", "socials", "note", "notes",
+    "emote", "socials", "note", "notes", "pose", "uptime", "peace",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -232,6 +232,9 @@ pub async fn dispatch_command(
         Some("socials")   => do_socials_list(world).await,
         Some("note")      => do_note(rest, me),
         Some("notes")     => do_notes(me),
+        Some("pose")      => do_pose(rest, me),
+        Some("uptime")    => do_uptime(),
+        Some("peace")     => do_peace(me, world, chars).await,
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -969,6 +972,70 @@ async fn do_scan(
 
 /// `notes` lists current notes numbered 1..N.  Empty notepad shows
 /// "You have no notes yet."
+/// `pose <text>` — set a vanity emote shown in render_room next to your
+/// "X is here" line.  `pose` or `pose -` clears.
+fn do_uptime() -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    let boot = crate::server::BOOT_UNIX_TS.load(Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(boot);
+    let elapsed = (now - boot).max(0);
+    let days  = elapsed / 86400;
+    let hours = (elapsed % 86400) / 3600;
+    let mins  = (elapsed % 3600) / 60;
+    let secs  = elapsed % 60;
+    CmdOutput::text(format!(
+        "\r\nUp {days}d {hours}h {mins}m {secs}s.\r\nBooted at unix {boot}.\r\n"
+    ))
+}
+
+/// `peace` (immortal): clear all combat state in the caller's current
+/// room.  Affects every mob's `fighting` field and every online
+/// player's `fighting`.  Broadcasts a peaceful-calm line.
+async fn do_peace(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let room = me.current_room;
+    // Clear mob fighting in this room.
+    {
+        let mut w = world.lock().await;
+        for m in w.mob_instances.iter_mut() {
+            if m.in_room == room {
+                m.fighting = None;
+            }
+        }
+    }
+    // Clear player fighting for everyone in this room.
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().filter(|p| p.current_room == room).cloned().collect()
+    };
+    for ph in &handles {
+        let mut c = ph.character.lock().await;
+        c.fighting = None;
+    }
+    let cl = chars.lock().await;
+    cl.broadcast_room(room, None,
+        "A peaceful calm descends. All combat ceases.\r\n");
+    CmdOutput::text(format!(
+        "\r\nYou impose peace; {} combatant(s) calmed.\r\n", handles.len()
+    ))
+}
+
+fn do_pose(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() || arg == "-" {
+        me.pose.clear();
+        return CmdOutput::text("\r\nPose cleared.\r\n".to_string());
+    }
+    me.pose = arg.chars().filter(|c| !c.is_control()).take(80).collect();
+    CmdOutput::text(format!("\r\nPose set: '{}'.\r\n", me.pose))
+}
+
 fn do_notes(me: &Character) -> CmdOutput {
     if me.notes.is_empty() {
         return CmdOutput::text("\r\nYou have no notes yet.\r\n".to_string());
@@ -2682,13 +2749,24 @@ fn do_affects(me: &Character) -> CmdOutput {
         let mut parts: Vec<String> = Vec::new();
         if a.to_hit != 0 { parts.push(format!("hit {:+}", a.to_hit)); }
         if a.to_dam != 0 { parts.push(format!("dam {:+}", a.to_dam)); }
+        if a.to_ac  != 0 { parts.push(format!("AC {:+}",  a.to_ac));  }
         if a.dmg_reduction != 0 { parts.push(format!("dmg-reduction {}%", a.dmg_reduction)); }
+        if a.dot_damage    != 0 { parts.push(format!("dot {}/tick",       a.dot_damage));    }
         let mods = if parts.is_empty() { "—".to_string() } else { parts.join(", ") };
         s.push_str(&format!(
-            "  {:<14} {:<25} ({} ticks left)\r\n",
+            "  {:<14} {:<35} ({} ticks left)\r\n",
             a.name(), mods, a.duration,
         ));
     }
+    // Totals footer for quick triage.
+    let t_hit  = me.affect_hit_bonus();
+    let t_dam  = me.affect_dam_bonus();
+    let t_ac   = me.affect_ac_bonus();
+    let t_red  = me.affect_dmg_reduction();
+    s.push_str(&format!(
+        "Totals: hit {:+}, dam {:+}, AC {:+}, dmg-red {}%\r\n",
+        t_hit, t_dam, t_ac, t_red,
+    ));
     CmdOutput::text(s)
 }
 
@@ -3855,6 +3933,9 @@ async fn cast_debuff(
                 return CmdOutput::text("\r\nYour target is gone.\r\n");
             };
             m.apply_affect(aff);
+            if skill == crate::character::Skill::CharmPerson {
+                m.charmer = Some(me.id);
+            }
             m.vnum
         };
         w.mob_protos.get(&vnum).map(|p| p.short_descr.clone())
@@ -6097,6 +6178,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.prompt_format   = me.prompt_format.clone();
             r.aliases         = me.aliases.clone();
             r.notes           = me.notes.clone();
+            r.pose            = me.pose.clone();
             r
         }
         Err(e) => {
@@ -6318,6 +6400,48 @@ async fn do_move(
         let _ = ph.send.send(format!("\r\nYou follow {}.\r\n", me.name));
         let follower_view = render_room(target, Some(ph.id), world, chars).await;
         let _ = ph.send.send(follower_view);
+    }
+
+    // Drag charmed mobs whose charmer == me.id and that hold an active
+    // CharmPerson affect (the affect's presence is the real authority;
+    // charmer can go stale after expiry).
+    let dragged_mobs: Vec<String> = {
+        let mut w = world.lock().await;
+        let mids: Vec<u32> = w.mob_instances.iter()
+            .filter(|m| m.in_room == from_room
+                     && m.charmer == Some(me.id)
+                     && m.affects.iter().any(|a|
+                         a.skill == crate::character::Skill::CharmPerson))
+            .map(|m| m.id).collect();
+        let mut names = Vec::new();
+        if !mids.is_empty() {
+            if let Some(r) = w.rooms.get_mut(&from_room) {
+                r.mobs.retain(|id| !mids.contains(id));
+            }
+            if let Some(r) = w.rooms.get_mut(&target) {
+                for id in &mids { r.mobs.push(*id); }
+            }
+            for mid in mids {
+                if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
+                    m.in_room = target;
+                }
+                let name = w.mob_instances.iter().find(|m| m.id == mid)
+                    .and_then(|m| w.mob_protos.get(&m.vnum))
+                    .map(|p| p.short_descr.clone())
+                    .unwrap_or_else(|| "a creature".to_string());
+                names.push(name);
+            }
+        }
+        names
+    };
+    if !dragged_mobs.is_empty() {
+        let cl = chars.lock().await;
+        for name in &dragged_mobs {
+            cl.broadcast_room(from_room, Some(me.id),
+                &format!("{name} follows {}.\r\n", me.name));
+            cl.broadcast_room(target, Some(me.id),
+                &format!("{name} arrives, following {}.\r\n", me.name));
+        }
     }
 
     CmdOutput::text(view)
@@ -7675,15 +7799,17 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        if !see_hidden {
-            let hidden = p.character.lock().await.hidden;
-            if hidden { continue; }
-        }
-        let hidden_tag = if see_hidden {
+        let (hidden, pose) = {
             let c = p.character.lock().await;
-            if c.hidden { " (hidden)" } else { "" }
-        } else { "" };
-        s.push_str(&format!("{} is standing here.{hidden_tag}\r\n", p.name));
+            (c.hidden, c.pose.clone())
+        };
+        if !see_hidden && hidden { continue; }
+        let hidden_tag = if see_hidden && hidden { " (hidden)" } else { "" };
+        if !pose.is_empty() {
+            s.push_str(&format!("{} {pose}{hidden_tag}\r\n", p.name));
+        } else {
+            s.push_str(&format!("{} is standing here.{hidden_tag}\r\n", p.name));
+        }
     }
 
     s

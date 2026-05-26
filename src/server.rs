@@ -19,7 +19,18 @@ use crate::{
 };
 
 /// Load shared game state and start the accept loop.
+/// Unix timestamp at which `run` was first invoked.  Used by the
+/// `uptime` command. 0 means "not yet booted".
+pub static BOOT_UNIX_TS: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
 pub async fn run(config: Config) -> Result<()> {
+    // Record boot epoch for the uptime command.
+    let boot_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    BOOT_UNIX_TS.store(boot_ts, std::sync::atomic::Ordering::Relaxed);
+
     // --- Load greeting -------------------------------------------------------
     let greetings_path = format!("{}/text/greetings", config.dir);
     let greeting = Arc::new(
