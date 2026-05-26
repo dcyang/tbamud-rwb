@@ -120,6 +120,8 @@ pub struct PlayerRecord {
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
+    /// Gold on deposit at the bank.
+    pub bank_gold:     i64,
     pub exp:           i64,
     pub str_:          i32,
     pub int_:          i32,
@@ -339,6 +341,7 @@ impl PlayerDb {
                 "Hung" => rec.hunger = val.parse().unwrap_or(24),
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 "Titl" => rec.title  = val.to_string(),
+                "Bank" => rec.bank_gold = val.parse().unwrap_or(0),
                 _ => {}
             }
         }
@@ -415,6 +418,7 @@ impl PlayerDb {
         writeln!(f, "Hung: {}", rec.hunger)?;
         writeln!(f, "Thst: {}", rec.thirst)?;
         if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
+        if rec.bank_gold > 0     { writeln!(f, "Bank: {}", rec.bank_gold)?; }
 
         Ok(())
     }

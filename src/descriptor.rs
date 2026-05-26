@@ -226,6 +226,7 @@ pub async fn handle_connection(
                     inventory:    Vec::new(),
                     equipment:    Default::default(),
                     gold,
+                    bank_gold:    p_ref.map(|p| p.bank_gold).unwrap_or(0),
                     exp:          p_ref.map(|p| p.exp).unwrap_or(0),
                     hp,
                     max_hp,
@@ -266,6 +267,7 @@ pub async fn handle_connection(
                     following:        None,
                     grouped:          false,
                     gossip_off:       false,
+                    auction_off:      false,
                     brief:            false,
                     compact:          false,
                     last_activity:    std::time::Instant::now(),
@@ -497,6 +499,7 @@ async fn run_game_session(
             rec.hunger          = me.hunger;
             rec.thirst          = me.thirst;
             rec.title           = me.title.clone();
+            rec.bank_gold       = me.bank_gold;
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }

@@ -56,6 +56,16 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
             let expired = if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
                 m.tick_affects()
             } else { continue; };
+            // Pacify charmed mobs: clear their fighting state every tick
+            // so they refuse to swing.  Player attacks still wake them
+            // (Sleep is stripped on damage); we deliberately keep this
+            // *separate* from Sleep so being attacked doesn't break the
+            // charm.
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) {
+                if m.affects.iter().any(|a| a.skill == crate::character::Skill::CharmPerson) {
+                    m.fighting = None;
+                }
+            }
             if let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) {
                 let room = m.in_room;
                 let name = w.mob_protos.get(&m.vnum)

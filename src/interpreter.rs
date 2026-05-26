@@ -77,7 +77,8 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title", "gossip", "chat",
-    "brief", "compact", "time", "weather",
+    "auction", "auc", "whisper",
+    "brief", "compact", "time", "weather", "bank",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -194,10 +195,13 @@ pub async fn dispatch_command(
         Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("title")     => do_title(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
+        Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
+        Some("whisper")   => do_whisper(rest, me, chars).await,
         Some("brief")     => do_brief(me),
         Some("compact")   => do_compact(me),
         Some("time")      => do_time(),
         Some("weather")   => do_weather(),
+        Some("bank")      => do_bank(rest, me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -831,6 +835,138 @@ fn do_weather() -> CmdOutput {
     };
     let lit = if (6..20).contains(&h) { "It is daytime." } else { "It is night." };
     CmdOutput::text(format!("\r\n{lit}\r\n{desc}\r\n"))
+}
+
+/// `bank [balance | deposit N | withdraw N]` — manage gold on deposit.
+/// `balance` (or no-arg) shows both balances.  No banker-mob gating
+/// yet; available anywhere.
+fn do_bank(arg: &str, me: &mut Character) -> CmdOutput {
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    let sub = parts.first().map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+
+    if sub.is_empty() || sub == "balance" || sub == "bal" {
+        return CmdOutput::text(format!(
+            "\r\nBank balance: {} gold\r\nCarrying:     {} gold\r\n",
+            me.bank_gold, me.gold,
+        ));
+    }
+    let amount = match parts.get(1).and_then(|v| v.parse::<i64>().ok()) {
+        Some(n) if n > 0 => n,
+        _ => return CmdOutput::text("\r\nUsage: bank [balance | deposit <N> | withdraw <N>]\r\n".to_string()),
+    };
+    match sub.as_str() {
+        "deposit" | "dep" => {
+            if amount > me.gold {
+                return CmdOutput::text(format!(
+                    "\r\nYou only carry {} gold.\r\n", me.gold,
+                ));
+            }
+            me.gold       -= amount;
+            me.bank_gold  += amount;
+            CmdOutput::text(format!(
+                "\r\nYou deposit {amount} gold. (Bank: {} | Carry: {})\r\n",
+                me.bank_gold, me.gold,
+            ))
+        }
+        "withdraw" | "with" => {
+            if amount > me.bank_gold {
+                return CmdOutput::text(format!(
+                    "\r\nYou only have {} on deposit.\r\n", me.bank_gold,
+                ));
+            }
+            me.bank_gold  -= amount;
+            me.gold       += amount;
+            CmdOutput::text(format!(
+                "\r\nYou withdraw {amount} gold. (Bank: {} | Carry: {})\r\n",
+                me.bank_gold, me.gold,
+            ))
+        }
+        _ => CmdOutput::text("\r\nUsage: bank [balance | deposit <N> | withdraw <N>]\r\n".to_string()),
+    }
+}
+
+/// `auction <msg>` — yellow global trade channel.  Same shape as gossip
+/// but uses `auction_off` for the personal mute.  Refused in SOUNDPROOF
+/// rooms.
+async fn do_auction(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.auction_off = !me.auction_off;
+        return CmdOutput::text(format!(
+            "\r\nAuction channel: {}.\r\n",
+            if me.auction_off { "off" } else { "on" },
+        ));
+    }
+    if me.auction_off {
+        return CmdOutput::text("\r\nYou have the auction channel turned off.\r\n".to_string());
+    }
+    {
+        let w = world.lock().await;
+        if w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_SOUNDPROOF != 0)
+            .unwrap_or(false)
+        {
+            return CmdOutput::text(
+                "\r\nThe walls dampen your voice — no one outside can hear you.\r\n".to_string()
+            );
+        }
+    }
+    let formatted = format!("\r\n@Y{} auctions: '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let off = ph.character.lock().await.auction_off;
+        if off { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    CmdOutput::text(format!("\r\n@YYou auction, '{msg}'@n\r\n"))
+}
+
+/// `whisper <player> <msg>` — private same-room speech.  The named
+/// player and the sender see the full text; everyone else in the room
+/// sees "Name whispers something to Target." without content.
+async fn do_whisper(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let (target, msg) = match arg.find(char::is_whitespace) {
+        Some(i) => (arg[..i].trim(), arg[i..].trim()),
+        None    => return CmdOutput::text("\r\nWhisper to whom what?\r\n".to_string()),
+    };
+    if target.is_empty() || msg.is_empty() {
+        return CmdOutput::text("\r\nWhisper to whom what?\r\n".to_string());
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target)
+            && p.id != me.id).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text("\r\nThere is no one by that name here.\r\n".to_string());
+    };
+    let _ = ph.send.send(format!("\r\n{} whispers to you, '{msg}'\r\n", me.name));
+    // Manually broadcast to room peers EXCEPT me and the recipient —
+    // they each get their own copy above.
+    let cl = chars.lock().await;
+    let line = format!("\r\n{} whispers something to {}.\r\n", me.name, ph.name);
+    for peer in cl.iter() {
+        if peer.id == me.id || peer.id == ph.id { continue; }
+        if peer.current_room != me.current_room { continue; }
+        let _ = peer.send.send(line.clone());
+    }
+    CmdOutput::text(format!("\r\nYou whisper to {}, '{msg}'\r\n", ph.name))
 }
 
 fn do_brief(me: &mut Character) -> CmdOutput {
@@ -2424,6 +2560,7 @@ async fn do_cast(
         crate::character::Skill::Haste        => cast_buff(target, me, chars, learned, crate::character::Skill::Haste).await,
         crate::character::Skill::Slow         => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Slow).await,
         crate::character::Skill::Earthquake   => cast_earthquake(me, world, chars, learned).await,
+        crate::character::Skill::CharmPerson  => cast_debuff(target, me, world, chars, learned, crate::character::Skill::CharmPerson).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -3075,6 +3212,11 @@ async fn cast_debuff(
             6 + learned as i32 / 10,
             "{} slows down noticeably.\r\n",
             "{} starts moving in slow motion.\r\n",
+        ),
+        crate::character::Skill::CharmPerson => (
+            10 + learned as i32 / 10,
+            "{} looks at you with adoring eyes.\r\n",
+            "{} now follows your every word.\r\n",
         ),
         _ => return CmdOutput::text("\r\nUnsupported debuff.\r\n"),
     };
@@ -5327,6 +5469,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.hunger          = me.hunger;
             r.thirst          = me.thirst;
             r.title           = me.title.clone();
+            r.bank_gold       = me.bank_gold;
             r
         }
         Err(e) => {

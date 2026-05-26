@@ -53,6 +53,7 @@ pub enum Skill {
     Haste,
     Slow,
     Earthquake,
+    CharmPerson,
     Dodge,
     Parry,
 }
@@ -101,6 +102,7 @@ impl Skill {
             "haste"                           => Some(Skill::Haste),
             "slow"                            => Some(Skill::Slow),
             "earthquake"                      => Some(Skill::Earthquake),
+            "charmperson" | "charm"           => Some(Skill::CharmPerson),
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
             _ => None,
@@ -138,6 +140,7 @@ impl Skill {
             Skill::Haste        => "haste",
             Skill::Slow         => "slow",
             Skill::Earthquake   => "earthquake",
+            Skill::CharmPerson  => "charm person",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -156,7 +159,7 @@ impl Skill {
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
-                | Skill::Earthquake
+                | Skill::Earthquake   | Skill::CharmPerson
                                       => SkillKind::Spell,
         }
     }
@@ -188,6 +191,7 @@ impl Skill {
             Skill::Haste        => 15,
             Skill::Slow         => 12,
             Skill::Earthquake   => 18,
+            Skill::CharmPerson  => 14,
         }
     }
 
@@ -225,6 +229,7 @@ impl Skill {
             Skill::Haste        => &[Class::MagicUser],
             Skill::Slow         => &[Class::MagicUser],
             Skill::Earthquake   => &[Class::MagicUser, Class::Cleric],
+            Skill::CharmPerson  => &[Class::MagicUser],
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
         }
@@ -265,6 +270,7 @@ impl Skill {
             Skill::Haste        => "haste",
             Skill::Slow         => "slow",
             Skill::Earthquake   => "earthquake",
+            Skill::CharmPerson  => "charm-person",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -288,6 +294,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
     Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
+    Skill::CharmPerson,
     Skill::Dodge, Skill::Parry,
 ];
 
@@ -342,6 +349,9 @@ pub struct Character {
     pub equipment:    [Option<u32>; NUM_WEARS],
     /// Gold pieces.
     pub gold:         i64,
+    /// Gold on deposit at the bank (separate from carried `gold`).
+    /// Persisted across sessions.
+    pub bank_gold:    i64,
     pub exp:          i64,
     pub hp:           i32,
     pub max_hp:       i32,
@@ -406,6 +416,9 @@ pub struct Character {
     /// Personal toggle: if true, this character will neither send nor
     /// receive `gossip` channel traffic.  Not persisted across sessions.
     pub gossip_off:   bool,
+    /// Personal toggle for the auction channel (same semantics as
+    /// gossip_off).  Not persisted.
+    pub auction_off:  bool,
     /// When true, suppress the multi-line room description on every
     /// look/move and only show the room name + exits + contents.
     /// Transient (not persisted).
