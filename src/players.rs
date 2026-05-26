@@ -143,6 +143,11 @@ pub struct PlayerRecord {
     pub thirst:        i32,
     /// Vanity title (empty for new chars).
     pub title:         String,
+    /// Custom prompt format with %h/%H/%m/%M/%g/%x placeholders.
+    /// Empty means use the legacy "> " prompt.
+    pub prompt_format: String,
+    /// Per-character command aliases (first-word expansion).
+    pub aliases:       std::collections::HashMap<String, String>,
 }
 
 impl PlayerRecord {
@@ -342,6 +347,14 @@ impl PlayerDb {
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 "Titl" => rec.title  = val.to_string(),
                 "Bank" => rec.bank_gold = val.parse().unwrap_or(0),
+                "Prmt" => rec.prompt_format = val.to_string(),
+                "Alis" => {
+                    // "Alis: <name> <expansion>"
+                    let mut parts = val.splitn(2, char::is_whitespace);
+                    if let (Some(name), Some(exp)) = (parts.next(), parts.next()) {
+                        rec.aliases.insert(name.to_string(), exp.trim().to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -419,6 +432,12 @@ impl PlayerDb {
         writeln!(f, "Thst: {}", rec.thirst)?;
         if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
         if rec.bank_gold > 0     { writeln!(f, "Bank: {}", rec.bank_gold)?; }
+        if !rec.prompt_format.is_empty() { writeln!(f, "Prmt: {}", rec.prompt_format)?; }
+        let mut anames: Vec<&String> = rec.aliases.keys().collect();
+        anames.sort();
+        for name in anames {
+            writeln!(f, "Alis: {name} {}", rec.aliases[name])?;
+        }
 
         Ok(())
     }

@@ -426,6 +426,16 @@ pub struct Character {
     /// When true, the dispatcher emits a single-line prompt ("> ")
     /// rather than the default "\r\n> " between responses.  Transient.
     pub compact:      bool,
+    /// Name of the most recent player who `tell`ed this character;
+    /// `reply` routes its message back here.  Transient.
+    pub last_tell_from: Option<String>,
+    /// Custom prompt format string (empty = legacy "> ").  Placeholders:
+    /// %h/%H HP/maxHP, %m/%M mana/maxMana, %g gold, %x exp, %% literal.
+    pub prompt_format: String,
+    /// Per-character command aliases.  First-word expansion only — the
+    /// dispatcher swaps the first whitespace token for the expansion
+    /// before the verb resolution.  Persisted.
+    pub aliases:      HashMap<String, String>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

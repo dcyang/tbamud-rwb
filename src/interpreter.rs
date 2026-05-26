@@ -78,7 +78,7 @@ const COMMANDS: &[&str] = &[
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title", "gossip", "chat",
     "auction", "auc", "whisper",
-    "brief", "compact", "time", "weather", "bank",
+    "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -126,6 +126,21 @@ pub async fn dispatch_command(
         return CmdOutput::text(String::new());
     }
     me.last_activity = std::time::Instant::now();
+
+    // Expand a per-player alias once.  `alias bs bash`, type `bs goblin`
+    // → "bash goblin".  Recursion is prevented by only consulting the
+    // map for the original first token.
+    let expanded: String;
+    let raw: &str = {
+        let first_end = raw.find(char::is_whitespace).unwrap_or(raw.len());
+        let first    = &raw[..first_end];
+        if let Some(rep) = me.aliases.get(first) {
+            expanded = format!("{rep}{}", &raw[first_end..]);
+            expanded.as_str()
+        } else {
+            raw
+        }
+    };
 
     let (verb, rest) = match raw.find(char::is_whitespace) {
         Some(i) => (&raw[..i], raw[i..].trim_start()),
@@ -202,6 +217,9 @@ pub async fn dispatch_command(
         Some("time")      => do_time(),
         Some("weather")   => do_weather(),
         Some("bank")      => do_bank(rest, me),
+        Some("reply")     => do_reply(rest, me, chars).await,
+        Some("prompt")    => do_prompt(rest, me),
+        Some("alias")     => do_alias(rest, me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -640,14 +658,113 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     if msg.is_empty() {
         return CmdOutput::text("\r\nTell them what?\r\n");
     }
-    let cl = chars.lock().await;
-    match cl.find_by_name(target) {
-        Some(p) if p.id != me.id => {
-            let _ = p.send.send(format!("{} tells you, '{msg}'\r\n", me.name));
-            CmdOutput::text(format!("\r\nYou tell {}, '{msg}'\r\n", p.name))
-        }
-        _ => CmdOutput::text("\r\nNo one by that name is online.\r\n"),
+    let target_ph = {
+        let cl = chars.lock().await;
+        cl.find_by_name(target).filter(|p| p.id != me.id).cloned()
+    };
+    let Some(p) = target_ph else {
+        return CmdOutput::text("\r\nNo one by that name is online.\r\n");
+    };
+    let _ = p.send.send(format!("{} tells you, '{msg}'\r\n", me.name));
+    // Record who tell'd them so `reply` works.
+    {
+        let mut tc = p.character.lock().await;
+        tc.last_tell_from = Some(me.name.clone());
     }
+    CmdOutput::text(format!("\r\nYou tell {}, '{msg}'\r\n", p.name))
+}
+
+/// `reply <msg>` — send a tell back to the last person who tell'd us.
+async fn do_reply(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nReply with what?\r\n".to_string());
+    }
+    let Some(name) = me.last_tell_from.clone() else {
+        return CmdOutput::text("\r\nYou have no one to reply to.\r\n".to_string());
+    };
+    let combined = format!("{name} {msg}");
+    do_tell(&combined, me, chars).await
+}
+
+/// `alias` — list, set, or remove personal first-word command aliases.
+/// `alias` lists the current set; `alias <name> <cmd>` sets;
+/// `alias <name>` removes if present. Reserved verbs from the COMMANDS
+/// table can be shadowed (no validation).
+fn do_alias(arg: &str, me: &mut Character) -> CmdOutput {
+    let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        if me.aliases.is_empty() {
+            return CmdOutput::text("\r\nYou have no aliases set.\r\n".to_string());
+        }
+        let mut names: Vec<&String> = me.aliases.keys().collect();
+        names.sort();
+        let mut s = String::from("\r\nYour aliases:\r\n");
+        for n in names {
+            s.push_str(&format!("  {n:<10}  {}\r\n", me.aliases[n]));
+        }
+        return CmdOutput::text(s);
+    }
+    let name = parts[0].to_ascii_lowercase();
+    if parts.len() == 1 {
+        if me.aliases.remove(&name).is_some() {
+            CmdOutput::text(format!("\r\nAlias '{name}' removed.\r\n"))
+        } else {
+            CmdOutput::text(format!("\r\nYou have no alias called '{name}'.\r\n"))
+        }
+    } else {
+        let exp: String = parts[1].trim()
+            .chars().filter(|c| !c.is_control()).take(120).collect();
+        if exp.is_empty() {
+            me.aliases.remove(&name);
+            return CmdOutput::text(format!("\r\nAlias '{name}' removed.\r\n"));
+        }
+        me.aliases.insert(name.clone(), exp.clone());
+        CmdOutput::text(format!("\r\nAlias '{name}' → '{exp}'.\r\n"))
+    }
+}
+
+/// `prompt <fmt>` — set a custom prompt template.  Empty or `-` clears
+/// back to the legacy "> ".  Placeholders: %h/%H HP/maxHP, %m/%M
+/// mana/maxMana, %g gold, %x exp, %% literal '%'.  Caps at 80 chars,
+/// strips control bytes.
+fn do_prompt(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() || arg == "-" {
+        me.prompt_format.clear();
+        return CmdOutput::text("\r\nPrompt reset to default.\r\n".to_string());
+    }
+    let sanitized: String = arg.chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect();
+    me.prompt_format = sanitized;
+    CmdOutput::text(format!("\r\nPrompt set to: '{}'\r\n", me.prompt_format))
+}
+
+/// Substitute prompt placeholders against the player's current state.
+pub fn render_prompt(me: &Character) -> String {
+    if me.prompt_format.is_empty() {
+        return if me.compact { "> ".to_string() } else { "\r\n> ".to_string() };
+    }
+    let mut out = String::with_capacity(me.prompt_format.len() + 16);
+    let mut iter = me.prompt_format.chars().peekable();
+    while let Some(c) = iter.next() {
+        if c != '%' { out.push(c); continue; }
+        let Some(&n) = iter.peek() else { out.push('%'); break; };
+        iter.next();
+        match n {
+            'h' => out.push_str(&me.hp.to_string()),
+            'H' => out.push_str(&me.max_hp.to_string()),
+            'm' => out.push_str(&me.mana.to_string()),
+            'M' => out.push_str(&me.max_mana.to_string()),
+            'g' => out.push_str(&me.gold.to_string()),
+            'x' => out.push_str(&me.exp.to_string()),
+            '%' => out.push('%'),
+            other => { out.push('%'); out.push(other); }
+        }
+    }
+    if me.compact { out } else { format!("\r\n{out}") }
 }
 
 /// `follow <player>` — start trailing a leader; subsequent leader
@@ -2537,8 +2654,11 @@ async fn do_cast(
         ));
     }
 
-    // Dispatch.
-    match spell {
+    // Dispatch.  After the inner handler returns we roll a learn-bump
+    // for the spell (~4% per cast) whether it landed or fizzled —
+    // both consumed mana, both count as practice.  Mirrors the
+    // physical-skill bump path in `do_skill` (cp54).
+    let mut out = match spell {
         crate::character::Skill::MagicMissile => cast_magic_missile(target, me, world, chars, learned).await,
         crate::character::Skill::CureLight    => cast_cure_light(target, me, chars, learned).await,
         crate::character::Skill::Bless        => cast_bless(target, me, chars, learned).await,
@@ -2562,7 +2682,11 @@ async fn do_cast(
         crate::character::Skill::Earthquake   => cast_earthquake(me, world, chars, learned).await,
         crate::character::Skill::CharmPerson  => cast_debuff(target, me, world, chars, learned, crate::character::Skill::CharmPerson).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
+    };
+    if let Some(bump) = learn_attempt(me, spell, 4) {
+        out.text.push_str(&bump);
     }
+    out
 }
 
 async fn cast_detect_magic(me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
@@ -5470,6 +5594,8 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.thirst          = me.thirst;
             r.title           = me.title.clone();
             r.bank_gold       = me.bank_gold;
+            r.prompt_format   = me.prompt_format.clone();
+            r.aliases         = me.aliases.clone();
             r
         }
         Err(e) => {

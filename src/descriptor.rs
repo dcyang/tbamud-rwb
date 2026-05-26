@@ -270,6 +270,9 @@ pub async fn handle_connection(
                     auction_off:      false,
                     brief:            false,
                     compact:          false,
+                    last_tell_from:   None,
+                    prompt_format:    p_ref.map(|p| p.prompt_format.clone()).unwrap_or_default(),
+                    aliases:          p_ref.map(|p| p.aliases.clone()).unwrap_or_default(),
                     last_activity:    std::time::Instant::now(),
                 };
 
@@ -456,10 +459,9 @@ async fn run_game_session(
                 quit = true;
                 break 'outer;
             }
-            // Compact prompt shaves the leading CRLF.
             let prompt = {
                 let c = character.lock().await;
-                if c.compact { "> ".to_string() } else { "\r\n> ".to_string() }
+                interpreter::render_prompt(&c)
             };
             let _ = tx.send(prompt);
         }
@@ -500,6 +502,8 @@ async fn run_game_session(
             rec.thirst          = me.thirst;
             rec.title           = me.title.clone();
             rec.bank_gold       = me.bank_gold;
+            rec.prompt_format   = me.prompt_format.clone();
+            rec.aliases         = me.aliases.clone();
             if let Err(e) = players_guard.save_player(&rec) {
                 warn!(name = %my_name, error = %e, "auto-save failed at session end");
             }
