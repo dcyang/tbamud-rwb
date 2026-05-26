@@ -75,6 +75,7 @@ pub enum Skill {
     Stun,
     ColorSpray,
     AcidBlast,
+    ChillTouch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +142,7 @@ impl Skill {
             "stun"                            => Some(Skill::Stun),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
+            "chilltouch" | "chill"            => Some(Skill::ChillTouch),
             _ => None,
         }
     }
@@ -196,6 +198,7 @@ impl Skill {
             Skill::Stun          => "stun",
             Skill::ColorSpray    => "color spray",
             Skill::AcidBlast     => "acid blast",
+            Skill::ChillTouch    => "chill touch",
         }
     }
 
@@ -219,7 +222,7 @@ impl Skill {
                 | Skill::Invisibility  | Skill::Stoneskin
                 | Skill::CureSerious   | Skill::Heal
                 | Skill::Infravision   | Skill::ColorSpray
-                | Skill::AcidBlast
+                | Skill::AcidBlast     | Skill::ChillTouch
                                       => SkillKind::Spell,
         }
     }
@@ -267,6 +270,7 @@ impl Skill {
             Skill::Infravision   => 6,
             Skill::ColorSpray    => 18,
             Skill::AcidBlast     => 25,
+            Skill::ChillTouch    => 10,
         }
     }
 
@@ -324,6 +328,7 @@ impl Skill {
             Skill::Stun          => &[],
             Skill::ColorSpray    => &[Class::MagicUser],
             Skill::AcidBlast     => &[Class::MagicUser],
+            Skill::ChillTouch    => &[Class::MagicUser],
         }
     }
 
@@ -382,6 +387,7 @@ impl Skill {
             Skill::Stun          => "stun",
             Skill::ColorSpray    => "color-spray",
             Skill::AcidBlast     => "acid-blast",
+            Skill::ChillTouch    => "chill-touch",
         }
     }
 
@@ -409,7 +415,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
-    Skill::ColorSpray, Skill::AcidBlast,
+    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch,
 ];
 
 // ---------------------------------------------------------------------------

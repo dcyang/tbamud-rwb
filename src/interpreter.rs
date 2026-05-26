@@ -75,7 +75,7 @@ const COMMANDS: &[&str] = &[
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist", "autotitle", "history",
+    "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -96,6 +96,7 @@ const COMMANDS: &[&str] = &[
     "ban", "unban", "bans",
     "wiznet",
     "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
+    "status", "reload",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -240,6 +241,7 @@ pub async fn dispatch_command(
         Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
         Some("history")    => do_history(me),
+        Some("prefs")      => do_prefs(me),
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -340,6 +342,8 @@ pub async fn dispatch_command(
         Some("slay")      => do_slay(rest, me, world, chars).await,
         Some("snoop")     => do_snoop(rest, me, chars).await,
         Some("unsnoop")   => do_unsnoop(me, chars).await,
+        Some("status")    => do_status(me, world, chars).await,
+        Some("reload")    => do_reload(rest, me, chars, players).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -508,6 +512,12 @@ async fn do_get(
         return CmdOutput::text("\r\nGet what?\r\n");
     }
 
+    // `get all` / `get all.<key>` — mass pickup from the room floor.
+    if arg.eq_ignore_ascii_case("all") || arg.to_ascii_lowercase().starts_with("all.") {
+        let kw = arg.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
+        return do_get_all(me, world, chars, kw).await;
+    }
+
     // "get <obj> <container>" — pull from container; otherwise pull from room.
     let parts: Vec<&str> = arg.splitn(3, ' ').collect();
     let from_container = parts.len() >= 2
@@ -629,6 +639,12 @@ async fn do_get_from_container(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
+    // `get all <container>` / `get all.<kw> <container>` — mass pickup
+    // from the container.  Routed before the single-item logic.
+    if obj_kw.eq_ignore_ascii_case("all") || obj_kw.to_ascii_lowercase().starts_with("all.") {
+        let kw = obj_kw.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
+        return do_get_all_from(me, world, chars, kw, cont_kw).await;
+    }
     let key = obj_kw.to_ascii_lowercase();
     let mut w = world.lock().await;
 
@@ -698,6 +714,11 @@ async fn do_put(
         [_, _]     => (parts[0], parts[1]),
         _          => return CmdOutput::text("\r\nPut what in what?\r\n"),
     };
+    // `put all <container>` / `put all.<kw> <container>`
+    if obj_kw.eq_ignore_ascii_case("all") || obj_kw.to_ascii_lowercase().starts_with("all.") {
+        let kw = obj_kw.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
+        return do_put_all(me, world, chars, kw, cont_kw).await;
+    }
 
     let mut w = world.lock().await;
 
@@ -738,6 +759,10 @@ async fn do_drop(
 ) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nDrop what?\r\n");
+    }
+    if arg.eq_ignore_ascii_case("all") || arg.to_ascii_lowercase().starts_with("all.") {
+        let kw = arg.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
+        return do_drop_all(me, world, chars, kw).await;
     }
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
@@ -781,6 +806,269 @@ async fn do_drop(
     fire_obj_drop_triggers(iid, &me.name, me.current_room, world, chars).await;
 
     CmdOutput::text(format!("\r\nYou drop {}.\r\n", name))
+}
+
+/// `get all` / `get all.<kw>` — pick up every matching object on the
+/// floor.  Respects carry-weight cap; stops early when full.
+async fn do_get_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    keyword: Option<String>,
+) -> CmdOutput {
+    let mut w = world.lock().await;
+    let cap = crate::character::str_carry_cap(me.str_);
+    let candidates: Vec<u32> = w.rooms.get(&me.current_room)
+        .map(|r| r.objects.clone()).unwrap_or_default();
+    if candidates.is_empty() {
+        return CmdOutput::text("\r\nThere's nothing on the ground.\r\n".to_string());
+    }
+    let mut taken: Vec<String> = Vec::new();
+    let mut stopped_for_weight = false;
+    for iid in candidates {
+        // Match keyword filter if any.
+        let (matches, short, weight) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &keyword {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            let v = obj_view(&w, obj);
+            let wt = w.obj_protos.get(&obj.vnum).map(|p| p.weight).unwrap_or(0);
+            (m, v.short, wt)
+        };
+        if !matches { continue; }
+        // Carry-cap check.
+        if total_carry_weight(me, &w) + weight > cap {
+            stopped_for_weight = true;
+            break;
+        }
+        // Move to inventory.
+        if let Some(r) = w.rooms.get_mut(&me.current_room) {
+            r.objects.retain(|&i| i != iid);
+        }
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.in_room = crate::world::NOWHERE;
+        }
+        me.inventory.push(iid);
+        taken.push(short);
+    }
+    drop(w);
+    if taken.is_empty() {
+        return CmdOutput::text("\r\nThere's nothing matching to pick up.\r\n".to_string());
+    }
+    let mut s = format!("\r\nYou pick up {} item(s):\r\n", taken.len());
+    for n in &taken {
+        s.push_str(&format!("  {n}\r\n"));
+    }
+    if stopped_for_weight {
+        s.push_str("You couldn't carry any more.\r\n");
+    }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} picks up several items.\r\n", me.name));
+    CmdOutput::text(s)
+}
+
+/// `drop all` / `drop all.<kw>` — drop every matching inventory item.
+/// `get all <container>` / `get all.<kw> <container>` — pull every
+/// matching child out of a container.  Respects carry-weight cap.
+async fn do_get_all_from(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    keyword: Option<String>,
+    cont_kw: &str,
+) -> CmdOutput {
+    let mut w = world.lock().await;
+    let (container_iid, container_name) = match find_container(&w, me, cont_kw) {
+        Some(t) => t,
+        None => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
+    };
+    let candidates: Vec<u32> = w.obj_instances.iter()
+        .find(|o| o.id == container_iid)
+        .map(|o| o.contents.clone()).unwrap_or_default();
+    if candidates.is_empty() {
+        return CmdOutput::text(format!("\r\n{container_name} is empty.\r\n"));
+    }
+    let cap = crate::character::str_carry_cap(me.str_);
+    let mut taken: Vec<String> = Vec::new();
+    let mut stopped = false;
+    for iid in candidates {
+        let (matches, short, weight) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &keyword {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            let v = obj_view(&w, obj);
+            let wt = w.obj_protos.get(&obj.vnum).map(|p| p.weight).unwrap_or(0);
+            (m, v.short, wt)
+        };
+        if !matches { continue; }
+        if total_carry_weight(me, &w) + weight > cap {
+            stopped = true;
+            break;
+        }
+        if let Some(c) = w.obj_instances.iter_mut().find(|o| o.id == container_iid) {
+            c.contents.retain(|&i| i != iid);
+        }
+        me.inventory.push(iid);
+        taken.push(short);
+    }
+    drop(w);
+    if taken.is_empty() {
+        return CmdOutput::text(format!("\r\nNothing matching in {container_name}.\r\n"));
+    }
+    let mut s = format!("\r\nYou take {} item(s) from {container_name}:\r\n", taken.len());
+    for n in &taken { s.push_str(&format!("  {n}\r\n")); }
+    if stopped { s.push_str("You couldn't carry any more.\r\n"); }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} takes several items from {container_name}.\r\n", me.name));
+    CmdOutput::text(s)
+}
+
+async fn do_drop_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    keyword: Option<String>,
+) -> CmdOutput {
+    let mut w = world.lock().await;
+    let candidates = me.inventory.clone();
+    if candidates.is_empty() {
+        return CmdOutput::text("\r\nYou have nothing to drop.\r\n".to_string());
+    }
+    let mut dropped: Vec<String> = Vec::new();
+    for iid in candidates {
+        let (matches, short) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &keyword {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            (m, obj_view(&w, obj).short)
+        };
+        if !matches { continue; }
+        me.inventory.retain(|&i| i != iid);
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.in_room = me.current_room;
+        }
+        if let Some(r) = w.rooms.get_mut(&me.current_room) {
+            r.objects.push(iid);
+        }
+        dropped.push(short);
+    }
+    drop(w);
+    if dropped.is_empty() {
+        return CmdOutput::text("\r\nNothing matching to drop.\r\n".to_string());
+    }
+    let mut s = format!("\r\nYou drop {} item(s):\r\n", dropped.len());
+    for n in &dropped {
+        s.push_str(&format!("  {n}\r\n"));
+    }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} drops several items.\r\n", me.name));
+    CmdOutput::text(s)
+}
+
+/// `put all <container>` / `put all.<kw> <container>` — stuff every
+/// matching inventory item into the named container.  Refuses if the
+/// container can't be found; silently skips items the container can't
+/// hold (over-cap check is intentionally lax — matches `do_put`).
+async fn do_put_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    keyword: Option<String>,
+    cont_kw: &str,
+) -> CmdOutput {
+    let mut w = world.lock().await;
+    let (container_iid, container_name) = match find_container(&w, me, cont_kw) {
+        Some(t) => t,
+        None    => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
+    };
+    let candidates = me.inventory.clone();
+    let mut moved: Vec<String> = Vec::new();
+    for iid in candidates {
+        if iid == container_iid { continue; }
+        let (matches, short) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &keyword {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            (m, obj_view(&w, obj).short)
+        };
+        if !matches { continue; }
+        me.inventory.retain(|&i| i != iid);
+        if let Some(c) = w.obj_instances.iter_mut().find(|o| o.id == container_iid) {
+            c.contents.push(iid);
+        }
+        moved.push(short);
+    }
+    drop(w);
+    if moved.is_empty() {
+        return CmdOutput::text(format!("\r\nNothing matching to put in {container_name}.\r\n"));
+    }
+    let mut s = format!("\r\nYou put {} item(s) in {container_name}:\r\n", moved.len());
+    for n in &moved { s.push_str(&format!("  {n}\r\n")); }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} puts several items in {container_name}.\r\n", me.name));
+    CmdOutput::text(s)
+}
+
+/// `give all <player>` / `give all.<kw> <player>` — hand every
+/// matching inventory item to the named player in the room.
+async fn do_give_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    keyword: Option<String>,
+    target_kw: &str,
+) -> CmdOutput {
+    // Resolve target as an online player in the same room.
+    let target = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.id != me.id
+            && p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = target else {
+        return CmdOutput::text(format!(
+            "\r\nNo one named '{target_kw}' is here.\r\n"
+        ));
+    };
+    let mut w = world.lock().await;
+    let candidates = me.inventory.clone();
+    let mut handed: Vec<String> = Vec::new();
+    for iid in candidates {
+        let (matches, short) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &keyword {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            (m, obj_view(&w, obj).short)
+        };
+        if !matches { continue; }
+        me.inventory.retain(|&i| i != iid);
+        ph.character.lock().await.inventory.push(iid);
+        handed.push(short);
+    }
+    drop(w);
+    if handed.is_empty() {
+        return CmdOutput::text("\r\nNothing matching to give.\r\n".to_string());
+    }
+    let _ = ph.send.send(format!(
+        "\r\n{} gives you {} item(s).\r\n", me.name, handed.len(),
+    ));
+    let mut s = format!("\r\nYou give {} item(s) to {}:\r\n", handed.len(), ph.name);
+    for n in &handed { s.push_str(&format!("  {n}\r\n")); }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} hands several items to {}.\r\n", me.name, ph.name));
+    CmdOutput::text(s)
 }
 
 async fn do_say(
@@ -2938,6 +3226,106 @@ async fn do_unsnoop(
     ))
 }
 
+/// `status` — immortal-only global overview: online players, mob/obj
+/// counts, zone count, game-clock state, uptime.
+async fn do_status(
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let (mobs, objs, rooms, zones) = {
+        let w = world.lock().await;
+        (w.mob_instances.len(), w.obj_instances.len(),
+         w.rooms.len(), w.zones.len())
+    };
+    let online = chars.lock().await.iter().count();
+    let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
+    let d = crate::db::GAME_DAY.load(Ordering::Relaxed);
+    let mo = crate::db::GAME_MONTH.load(Ordering::Relaxed);
+    let y = crate::db::GAME_YEAR.load(Ordering::Relaxed);
+    let boot = crate::server::BOOT_UNIX_TS.load(Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    let uptime_secs = (now - boot).max(0);
+    CmdOutput::text(format!(
+        "\r\n=== Server status ===\r\n\
+         \x20  online players: {online}\r\n\
+         \x20  zones:          {zones}\r\n\
+         \x20  rooms:          {rooms}\r\n\
+         \x20  live mobs:      {mobs}\r\n\
+         \x20  live objects:   {objs}\r\n\
+         \x20  game-clock:     {h:02}:00 day {d} month {mo} year {y}\r\n\
+         \x20  uptime:         {}h {}m {}s\r\n",
+        uptime_secs / 3600,
+        (uptime_secs / 60) % 60,
+        uptime_secs % 60,
+    ))
+}
+
+/// `reload <player>` — re-read the named online player's PlayerRecord
+/// from disk and overwrite their in-memory stats (gold/exp/level/
+/// hp/mana/etc).  Equipment + inventory are NOT touched (still live
+/// in the world model).  Used to revert in-session mutations.
+async fn do_reload(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let name = arg.trim();
+    if name.is_empty() {
+        return CmdOutput::text(
+            "\r\nUsage: reload <player>\r\n".to_string()
+        );
+    }
+    let target = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.name.eq_ignore_ascii_case(name)).cloned();
+        h
+    };
+    let Some(ph) = target else {
+        return CmdOutput::text(format!(
+            "\r\nNo player named '{name}' is online.\r\n"
+        ));
+    };
+    let rec = {
+        let pl = players.lock().await;
+        pl.load_player(&ph.name)
+    };
+    let rec = match rec {
+        Ok(r) => r,
+        Err(e) => return CmdOutput::text(format!(
+            "\r\nFailed to load {}: {e}\r\n", ph.name
+        )),
+    };
+    {
+        let mut c = ph.character.lock().await;
+        c.level    = rec.level;
+        c.gold     = rec.gold;
+        c.exp      = rec.exp;
+        c.hp       = rec.hp;     c.max_hp = rec.max_hp;
+        c.mana     = rec.mana;   c.max_mana = rec.max_mana;
+        c.movement = rec.movement; c.max_movement = rec.max_movement;
+        c.alignment = rec.alignment;
+        c.title    = rec.title.clone();
+        c.god      = rec.god.clone();
+        c.practices = rec.practices;
+        c.bank_gold = rec.bank_gold;
+        c.hunger   = rec.hunger;
+        c.thirst   = rec.thirst;
+    }
+    let _ = ph.send.send(format!(
+        "\r\n{} has reverted your stats from disk.\r\n", me.name,
+    ));
+    CmdOutput::text(format!(
+        "\r\nReloaded {}'s stats from disk.\r\n", ph.name,
+    ))
+}
+
 /// Broadcast a wiznet line to every online immortal whose `wiznet_off`
 /// is false.  `msg` should be the bare body — this helper wraps it in
 /// the magenta `[wiznet] ...` envelope and CRLF.  Used by `do_wiznet`
@@ -4349,6 +4737,39 @@ fn do_color(arg: &str, me: &mut Character) -> CmdOutput {
     }
 }
 
+/// `prefs` — single-screen overview of every persistent toggle.
+fn do_prefs(me: &Character) -> CmdOutput {
+    fn flag(b: bool) -> &'static str { if b { "ON " } else { "off" } }
+    let s = format!(
+        "\r\nYour preferences:\r\n\
+         \x20  color       {}     (`color on|off`)\r\n\
+         \x20  autoexit    {}     (`autoexit`)\r\n\
+         \x20  autoloot    {}     (`autoloot`)\r\n\
+         \x20  autoassist  {}     (`autoassist`)\r\n\
+         \x20  autotitle   {}     (`autotitle`)\r\n\
+         \x20  brief       {}     (`brief`)\r\n\
+         \x20  compact     {}     (`compact`)\r\n\
+         \x20  gossip      {}     (`gossip` with no arg toggles)\r\n\
+         \x20  auction     {}     (`auction`)\r\n\
+         \x20  info        {}     (`info`)\r\n\
+         \x20  shout       {}     (`shout`)\r\n\
+         \x20  wimpy       {}\r\n",
+        flag(!me.color_off),
+        flag(me.autoexit),
+        flag(me.autoloot),
+        flag(me.autoassist),
+        flag(me.autotitle),
+        flag(me.brief),
+        flag(me.compact),
+        flag(!me.gossip_off),
+        flag(!me.auction_off),
+        flag(!me.info_off),
+        flag(!me.shout_off),
+        if me.wimpy > 0 { format!("{} HP", me.wimpy) } else { "off".to_string() },
+    );
+    CmdOutput::text(s)
+}
+
 /// `history` — show the last 20 dispatched commands (most recent
 /// last).  Includes the `history` invocation itself, since recording
 /// happens before dispatch.
@@ -4990,6 +5411,7 @@ async fn do_cast(
         crate::character::Skill::Infravision  => cast_infravision(me),
         crate::character::Skill::ColorSpray   => cast_color_spray(me, world, chars, learned).await,
         crate::character::Skill::AcidBlast    => cast_acid_blast(target, me, world, chars, learned).await,
+        crate::character::Skill::ChillTouch   => cast_chill_touch(target, me, world, chars, learned).await,
         crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
         crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         crate::character::Skill::Sleep        => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Sleep).await,
@@ -5499,6 +5921,164 @@ async fn cast_acid_blast(
         (
             format!("\r\nYour acid blast hisses past {mob_name}.\r\n"),
             format!("{}'s acid blast hisses past {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(mob_corpse_contents).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+/// `chill touch` — single-target MU damage spell that also drains
+/// the victim's offensive output for a short duration.  `dice(1, 8) +
+/// level + INT-bonus`, hit chance `(75 + learned/2).min(99)`, save-for-
+/// half; on a non-saved hit, applies `Affect { ChillTouch, duration: 5,
+/// to_dam: -2, .. }` to the mob (reduces its melee damage via the
+/// existing affect_dam_bonus path).  10 mana.
+async fn cast_chill_touch(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let hit_chance = (75 + learned as i32 / 2).min(99);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let base_dmg = crate::db::dice(1, 8) + me.level
+        + crate::character::str_damage_bonus(me.int_);
+    me.mana -= crate::character::Skill::ChillTouch.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit {
+            m.hp -= dmg;
+            if !saved {
+                m.apply_affect(crate::character::Affect {
+                    skill:         crate::character::Skill::ChillTouch,
+                    duration:      5,
+                    to_hit:        0,
+                    to_dam:        -2,
+                    dmg_reduction: 0,
+                    dot_damage:    0,
+                    to_ac:         0,
+                });
+            }
+            m.hp <= 0
+        } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nA chilling touch grips {mob_name} for {dmg} damage (partial resist).\r\n"),
+            format!("A chilling touch from {} grips {mob_name}.\r\n", me.name),
+        )
+    } else if hit {
+        (
+            format!("\r\nA chilling touch from your hand saps {mob_name} for {dmg} damage!\r\n"),
+            format!("A chilling touch from {} saps {mob_name}.\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour chill touch fades against {mob_name}.\r\n"),
+            format!("{}'s chill touch fades against {mob_name}.\r\n", me.name),
         )
     };
     {
@@ -8732,6 +9312,11 @@ async fn do_give(
     if target_kw.is_empty() {
         return CmdOutput::text("\r\nGive it to whom?\r\n");
     }
+    // `give all <player>` / `give all.<kw> <player>`
+    if obj_kw.eq_ignore_ascii_case("all") || obj_kw.to_ascii_lowercase().starts_with("all.") {
+        let kw = obj_kw.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
+        return do_give_all(me, world, chars, kw, target_kw).await;
+    }
     // "give <N> [coins|gold|money] <target>"
     if let Ok(amount) = obj_kw.parse::<i64>() {
         // Strip optional "coins"/"gold"/"money" word.
@@ -10891,6 +11476,19 @@ pub async fn render_room(
                             s.push(')');
                         }
                     }
+                    // Append "(fighting <target-mob>)" when engaged
+                    // against another mob; player-target case is left
+                    // implicit (the player's own listing shows it).
+                    if let Some(t) = m.fighting.filter(|t| !t.is_player) {
+                        if let Some(label) = w.mob_instances.iter().find(|x| x.id == t.id)
+                            .and_then(|x| w.mob_protos.get(&x.vnum))
+                            .map(|p| p.short_descr.clone())
+                        {
+                            s.push_str(" (fighting ");
+                            s.push_str(&label);
+                            s.push(')');
+                        }
+                    }
                     s.push_str("\r\n");
                 }
             }
@@ -10916,11 +11514,11 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        let (hidden, invisible_aff, pose, invis_lvl, position) = {
+        let (hidden, invisible_aff, pose, invis_lvl, position, fighting) = {
             let c = p.character.lock().await;
             let invisible = c.affects.iter()
                 .any(|a| a.skill == crate::character::Skill::Invisibility);
-            (c.hidden, invisible, c.pose.clone(), c.invis_level, c.position)
+            (c.hidden, invisible, c.pose.clone(), c.invis_level, c.position, c.fighting)
         };
         // Immortal invis hides them from anyone below `invis_level`.
         if invis_lvl > viewer_level { continue; }
@@ -10928,11 +11526,26 @@ pub async fn render_room(
         if !see_hidden && invisible { continue; }
         let hidden_tag = if see_hidden && invisible { " (invis)" } else { "" };
         let invis_tag  = if invis_lvl > 0 { format!(" [invis{}]", invis_lvl) } else { String::new() };
+        // "(fighting X)" suffix when engaged — needs a fresh world lock.
+        let fight_tag: String = if let Some(t) = fighting {
+            let w = world.lock().await;
+            let name = if t.is_player {
+                None  // skip cross-player fight tag here; sender's own line shows it
+            } else {
+                w.mob_instances.iter().find(|x| x.id == t.id)
+                    .and_then(|x| w.mob_protos.get(&x.vnum))
+                    .map(|p| p.short_descr.clone())
+            };
+            match name {
+                Some(n) => format!(" (fighting {n})"),
+                None => String::new(),
+            }
+        } else { String::new() };
         if !pose.is_empty() {
-            s.push_str(&format!("{} {pose}{hidden_tag}{invis_tag}\r\n", p.name));
+            s.push_str(&format!("{} {pose}{fight_tag}{hidden_tag}{invis_tag}\r\n", p.name));
         } else {
             s.push_str(&format!(
-                "{} {}.{hidden_tag}{invis_tag}\r\n",
+                "{} {}.{fight_tag}{hidden_tag}{invis_tag}\r\n",
                 p.name, position.room_verb(),
             ));
         }

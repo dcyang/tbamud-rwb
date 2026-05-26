@@ -376,6 +376,19 @@ pub async fn handle_connection(
                 // last_login is still 0 AND nothing was restored above.
                 {
                     let fresh = p_ref.map(|p| p.last_login).unwrap_or(0) == 0;
+                    // Seed class-allowed skills/spells to a baseline
+                    // percentage so newbies aren't completely useless.
+                    if fresh && me.skills.is_empty() {
+                        for &sk in crate::character::ALL_SKILLS {
+                            if sk.is_class_allowed(me.class) {
+                                let pct = match sk.kind() {
+                                    crate::character::SkillKind::Physical => 30,
+                                    crate::character::SkillKind::Spell    => 25,
+                                };
+                                me.skills.insert(sk, pct);
+                            }
+                        }
+                    }
                     let nothing = me.inventory.is_empty()
                         && me.equipment.iter().all(|s| s.is_none());
                     if fresh && nothing {

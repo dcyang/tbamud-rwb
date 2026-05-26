@@ -1015,13 +1015,19 @@ async fn resolve_mob_attack(
             });
             let damroll = w.mob_protos.get(&m.attacker_vnum)
                 .map(|p| p.damroll).unwrap_or(0);
-            match weapon_dice {
-                Some((dn, ds)) => (dice(dn, ds) + damroll).max(1),
+            // Affect-based damage modifier (e.g. ChillTouch's to_dam: -2).
+            let affect_dam: i32 = w.mob_instances.iter()
+                .find(|x| x.id == m.attacker_id)
+                .map(|x| x.affects.iter().map(|a| a.to_dam).sum::<i32>())
+                .unwrap_or(0);
+            let base = match weapon_dice {
+                Some((dn, ds)) => dice(dn, ds) + damroll,
                 None => match w.mob_protos.get(&m.attacker_vnum) {
-                    Some(p) => (dice(p.dam_dice, p.dam_size) + p.damroll).max(1),
+                    Some(p) => dice(p.dam_dice, p.dam_size) + p.damroll,
                     None    => 1,
                 },
-            }
+            };
+            (base + affect_dam).max(1)
         };
         let (ac, reduction) = {
             let me = ph.character.lock().await;
