@@ -518,10 +518,21 @@ async fn resolve_pvp_attack(
             let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
             h
         };
-        if let Some(kh) = killer_h {
-            kh.character.lock().await.pkills += 1;
-        }
-        ph.character.lock().await.pdeaths += 1;
+        let (k_lvl, k_name) = if let Some(kh) = killer_h.as_ref() {
+            let mut c = kh.character.lock().await;
+            c.pkills += 1;
+            (c.level, c.name.clone())
+        } else { (p.level, p.attacker_name.clone()) };
+        let (v_lvl, v_name) = {
+            let mut c = ph.character.lock().await;
+            c.pdeaths += 1;
+            (c.level, c.name.clone())
+        };
+        let room_name = {
+            let w = world.lock().await;
+            w.rooms.get(&p.room).map(|r| r.name.clone()).unwrap_or_default()
+        };
+        log_pvp_kill(&k_name, k_lvl, &v_name, v_lvl, p.room, &room_name).await;
         player_death(&ph, world, chars).await;
         clear_player_fighting(p.attacker_id, chars).await;
     }
@@ -542,9 +553,11 @@ async fn resolve_player_attack(
     // damage roll (same world lock).
     let (mob_ac, dmg): (i32, i32) = {
         let w = world.lock().await;
-        let mob_ac = w.mob_instances.iter().find(|m| m.id == p.target.id)
+        let mob_inst = w.mob_instances.iter().find(|m| m.id == p.target.id);
+        let mob_ac = mob_inst
             .and_then(|m| w.mob_protos.get(&m.vnum))
-            .map(|pr| pr.ac).unwrap_or(0);
+            .map(|pr| pr.ac).unwrap_or(0)
+            + mob_inst.map(|m| m.bonus_ac).unwrap_or(0);
         let weapon = p.weapon_iid.and_then(|iid|
             w.obj_instances.iter().find(|o| o.id == iid)
                 .and_then(|o| w.obj_protos.get(&o.vnum)));
@@ -1047,10 +1060,12 @@ async fn resolve_mob_attack(
             let damroll = w.mob_protos.get(&m.attacker_vnum)
                 .map(|p| p.damroll).unwrap_or(0);
             // Affect-based damage modifier (e.g. ChillTouch's to_dam: -2).
-            let affect_dam: i32 = w.mob_instances.iter()
-                .find(|x| x.id == m.attacker_id)
+            let mob_inst = w.mob_instances.iter().find(|x| x.id == m.attacker_id);
+            let affect_dam: i32 = mob_inst
                 .map(|x| x.affects.iter().map(|a| a.to_dam).sum::<i32>())
                 .unwrap_or(0);
+            // Equipment damroll bonus (cp155).
+            let eq_dam: i32 = mob_inst.map(|x| x.bonus_damroll).unwrap_or(0);
             let base = match weapon_dice {
                 Some((dn, ds)) => dice(dn, ds) + damroll,
                 None => match w.mob_protos.get(&m.attacker_vnum) {
@@ -1058,7 +1073,7 @@ async fn resolve_mob_attack(
                     None    => 1,
                 },
             };
-            (base + affect_dam).max(1)
+            (base + affect_dam + eq_dam).max(1)
         };
         let (ac, reduction) = {
             let me = ph.character.lock().await;
@@ -1415,6 +1430,34 @@ fn should_cast(p: &crate::world::MobProto) -> bool {
     ];
     let bag = format!("{} {}", p.name.to_ascii_lowercase(), p.short_descr.to_ascii_lowercase());
     KW.iter().any(|k| bag.contains(k))
+}
+
+/// Append a single line to `<data_dir>/log/pkill.log`.  Best-effort;
+/// failures log a warn but don't propagate.  Creates the dir on demand.
+async fn log_pvp_kill(
+    killer_name: &str, killer_level: i32,
+    victim_name: &str, victim_level: i32,
+    room: crate::world::RoomVnum, room_name: &str,
+) {
+    let Some(players_arc) = crate::interpreter::PLAYERS_HANDLE.get() else { return; };
+    let data_dir = players_arc.lock().await.data_dir().to_string();
+    let dir = format!("{data_dir}/log");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "Failed to create pkill.log dir");
+        return;
+    }
+    let path = format!("{dir}/pkill.log");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    let line = format!(
+        "[{ts}] {killer_name} (lvl {killer_level}) slew {victim_name} (lvl {victim_level}) in [{room}] {room_name}\n",
+    );
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => { let _ = f.write_all(line.as_bytes()); }
+        Err(e)    => tracing::warn!(error = %e, "Failed to append pkill.log"),
+    }
 }
 
 /// Pick the (dice_n, dice_s) pool for a mob caster of the given level.

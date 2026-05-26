@@ -1896,6 +1896,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         charmer: None,
                         spec: crate::world::MobSpec::for_vnum(cmd.arg1),
                         equipment: Default::default(),
+                        bonus_damroll: 0, bonus_hitroll: 0, bonus_ac: 0,
                     });
                     last_mob_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -2119,6 +2120,21 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
             }
             _ => { last_cmd_ok = false; }
         }
+    }
+
+    // Auto-equip pass: any mob in this zone with empty equipment slots
+    // and wearable items in its inventory now picks them up.  Iterates
+    // a snapshot of ids since `auto_equip_mob` mutates `world`.
+    let mob_ids: Vec<u32> = world.mob_instances.iter()
+        .filter_map(|m| {
+            world.rooms.get(&m.in_room)
+                .map(|r| r.zone)
+                .filter(|&z| z == zone_vnum)
+                .map(|_| m.id)
+        })
+        .collect();
+    for id in mob_ids {
+        world.auto_equip_mob(id);
     }
 }
 

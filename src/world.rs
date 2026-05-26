@@ -492,6 +492,11 @@ pub struct MobInstance {
     /// Equipment slots, mirrors Character.equipment.  Populated by
     /// zone-reset 'E' commands when arg2 is a valid wear position.
     pub equipment: [Option<u32>; crate::character::NUM_WEARS],
+    /// Cumulative bonus from worn/wielded items (APPLY_DAMROLL,
+    /// APPLY_HITROLL, APPLY_AC).  Updated by `auto_equip_mob`.
+    pub bonus_damroll: i32,
+    pub bonus_hitroll: i32,
+    pub bonus_ac:      i32,
 }
 
 /// Mob spec procs.  Hard-coded by vnum at spawn time (mirrors
@@ -772,8 +777,53 @@ impl World {
             charmer: None,
             spec: MobSpec::for_vnum(vnum),
             equipment: Default::default(),
+            bonus_damroll: 0, bonus_hitroll: 0, bonus_ac: 0,
         });
         Some(id)
+    }
+
+    /// Scan a freshly-spawned mob's inventory and auto-equip the first
+    /// weapon (into `WEAR_WIELD`) plus the first armor for each slot
+    /// the wear flags permit.  Items already worn / wielded stay put.
+    /// Returns the count of items moved into slots.
+    pub fn auto_equip_mob(&mut self, mob_id: u32) -> u32 {
+        use crate::character::{auto_wear_slot, NUM_WEARS, WEAR_WIELD, ITEM_WEAR_WIELD};
+        let inv = match self.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m.inventory.clone(),
+            None => return 0,
+        };
+        let mut moved = 0u32;
+        for iid in inv {
+            let Some(o) = self.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let Some(p) = self.obj_protos.get(&o.vnum) else { continue; };
+            let wear_flags = p.wear_flags[0];
+            // Skip non-wearable items (no wear-flag bits beyond TAKE).
+            // Try WIELD first, then any other slot via auto_wear_slot.
+            let slot: Option<usize> = if wear_flags & ITEM_WEAR_WIELD != 0 {
+                Some(WEAR_WIELD)
+            } else { auto_wear_slot(wear_flags) };
+            let Some(slot) = slot else { continue; };
+            if slot >= NUM_WEARS { continue; }
+            // Snapshot the proto's affect list before mutating mob (so
+            // both borrows don't overlap).
+            let affs: Vec<crate::world::ObjAffect> = self.obj_protos.get(&o.vnum)
+                .map(|p| p.affected.clone()).unwrap_or_default();
+            let m = self.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            if m.equipment[slot].is_some() { continue; }
+            m.equipment[slot] = Some(iid);
+            m.inventory.retain(|&i| i != iid);
+            for a in affs {
+                use crate::world::*;
+                match a.location {
+                    APPLY_HITROLL => m.bonus_hitroll += a.modifier,
+                    APPLY_DAMROLL => m.bonus_damroll += a.modifier,
+                    APPLY_AC      => m.bonus_ac      += a.modifier,
+                    _ => {}
+                }
+            }
+            moved += 1;
+        }
+        moved
     }
 
     pub fn spawn_obj(&mut self, vnum: ObjVnum) -> Option<u32> {

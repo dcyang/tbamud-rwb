@@ -76,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
-    "clan", "ctell", "clans", "map",
+    "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -97,7 +97,7 @@ const COMMANDS: &[&str] = &[
     "ban", "unban", "bans",
     "wiznet",
     "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
-    "status", "reload", "spec_assign", "top",
+    "status", "reload", "spec_assign", "top", "pkilllog",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -317,7 +317,7 @@ pub async fn dispatch_command(
         Some("peace")     => do_peace(me, world, chars).await,
         Some("order")     => do_order(rest, me, world, chars).await,
         Some("pvp")       => do_pvp(me),
-        Some("finger")    => do_finger(rest, chars, players).await,
+        Some("finger") | Some("whois") => do_finger(rest, chars, players).await,
         Some("assist")    => do_assist(rest, me, world, chars).await,
         Some("worship")   => do_worship(rest, me),
         Some("afk")       => do_afk(rest, me),
@@ -353,6 +353,7 @@ pub async fn dispatch_command(
         Some("reload")    => do_reload(rest, me, chars, players).await,
         Some("spec_assign") | Some("specassign") => do_spec_assign(rest, me, world).await,
         Some("top")       => do_top(rest, me, chars).await,
+        Some("pkilllog") | Some("pkill_log") => do_pkill_log(me, players).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2033,6 +2034,32 @@ async fn do_group(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutp
         Some((s, r)) => (s, r.trim()),
         None         => (arg, ""),
     };
+    // `group disband` — leader clears the group for every follower.
+    if sub.eq_ignore_ascii_case("disband") {
+        // Snapshot all online players currently following me + grouped.
+        let followers: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        let mut count = 0u32;
+        for ph in followers {
+            if ph.id == me.id { continue; }
+            let mut c = ph.character.lock().await;
+            if c.following == Some(me.id) && c.grouped {
+                c.grouped   = false;
+                c.following = None;
+                drop(c);
+                let _ = ph.send.send(format!(
+                    "\r\n{} has disbanded the group.\r\n", me.name,
+                ));
+                count += 1;
+            }
+        }
+        me.grouped = false;
+        return CmdOutput::text(format!(
+            "\r\nYou disband the group ({count} follower(s) released).\r\n"
+        ));
+    }
     // `group invite <player>` — must be same-room target.
     if sub.eq_ignore_ascii_case("invite") {
         if rest.is_empty() {
@@ -3309,6 +3336,26 @@ async fn do_status(
     ))
 }
 
+/// `pkilllog` (LVL_IMMORT+) — dump the last 20 entries of
+/// `<data_dir>/log/pkill.log`.
+async fn do_pkill_log(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let data_dir = players.lock().await.data_dir().to_string();
+    let path = format!("{data_dir}/log/pkill.log");
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    if body.is_empty() {
+        return CmdOutput::text("\r\nNo PvP kills recorded yet.\r\n".to_string());
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let tail = lines.iter().rev().take(20).rev().copied().collect::<Vec<_>>();
+    let mut s = String::from("\r\n=== Last 20 PvP kills ===\r\n");
+    for l in tail {
+        s.push_str(l);
+        s.push_str("\r\n");
+    }
+    CmdOutput::text(s)
+}
+
 /// `top [xp|level|pkills]` — leaderboard over online players.
 /// Defaults to `xp` ranking.  Ties broken alphabetically by name.
 async fn do_top(arg: &str, _me: &Character, chars: &SharedChars) -> CmdOutput {
@@ -3633,6 +3680,28 @@ async fn do_stat(
 ) -> CmdOutput {
     if me.level < LVL_IMMORT { return immort_huh(); }
     let arg = arg.trim();
+
+    // `stat zone <vnum>` — summary of a zone's mobs/rooms/objects.
+    if let Some(rest) = arg.strip_prefix("zone ").or_else(|| arg.strip_prefix("zone\t")) {
+        let Ok(zv) = rest.trim().parse::<i32>() else {
+            return CmdOutput::text("\r\nUsage: stat zone <vnum>\r\n".to_string());
+        };
+        let w = world.lock().await;
+        let Some(z) = w.zones.get(&zv) else {
+            return CmdOutput::text(format!("\r\nNo zone with vnum {zv}.\r\n"));
+        };
+        let rooms_in_zone: Vec<i32> = w.rooms.iter()
+            .filter(|(_, r)| r.zone == zv).map(|(v, _)| *v).collect();
+        let mob_count = w.mob_instances.iter()
+            .filter(|m| rooms_in_zone.contains(&m.in_room)).count();
+        let obj_count = w.obj_instances.iter()
+            .filter(|o| rooms_in_zone.contains(&o.in_room)).count();
+        return CmdOutput::text(format!(
+            "\r\nZone [{}] {}\r\n  Bottom:   {}\r\n  Top:      {}\r\n  Lifespan: {} minutes\r\n  Reset mode: {}\r\n  Rooms in zone: {}\r\n  Live mobs:     {}\r\n  Live objects:  {}\r\n",
+            zv, z.name, z.bot, z.top, z.lifespan, z.reset_mode,
+            rooms_in_zone.len(), mob_count, obj_count,
+        ));
+    }
 
     // No arg or "room" → describe the current room.
     if arg.is_empty() || arg.eq_ignore_ascii_case("room") {
@@ -9924,6 +9993,19 @@ async fn do_give(
     };
     if target_kw.is_empty() {
         return CmdOutput::text("\r\nGive it to whom?\r\n");
+    }
+    // `give all coins <player>` / `give all gold <player>` / `give all money <player>`
+    if obj_kw.eq_ignore_ascii_case("all") {
+        for kw in ["coins ", "gold ", "money "] {
+            if let Some(rest) = target_kw.to_ascii_lowercase().strip_prefix(kw) {
+                // Reconstruct the literal player name from the trailing part of target_kw.
+                let split_at = kw.len();
+                let actual_target = target_kw[split_at..].trim();
+                let _ = rest;
+                let amount = me.gold;
+                return do_give_gold(amount, actual_target, me, world, chars).await;
+            }
+        }
     }
     // `give all <player>` / `give all.<kw> <player>`
     if obj_kw.eq_ignore_ascii_case("all") || obj_kw.to_ascii_lowercase().starts_with("all.") {
