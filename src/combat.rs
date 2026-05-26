@@ -137,6 +137,12 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         let mut v = Vec::new();
         for p in cl.iter() {
             let me = p.character.lock().await;
+            // Position gate: only Standing/Fighting players swing.
+            // Sitting/Resting/Sleeping skip their attacks this tick.
+            if !matches!(me.position,
+                crate::character::Position::Standing
+                | crate::character::Position::Fighting)
+            { continue; }
             if let Some(tgt) = me.fighting {
                 v.push(PlayerIntent {
                     attacker_id:   p.id,
@@ -1002,13 +1008,22 @@ async fn resolve_mob_attack(
     }
 
     // Decide whether this mob is a spellcaster and rolls a cast this round.
-    let cast_attempt = {
+    // `MagicUser` spec mobs cast more often (50%) than legacy keyword
+    // casters (30%).
+    let (cast_attempt, is_magic_user_spec) = {
         let w = world.lock().await;
-        let casts = w.mob_protos.get(&m.attacker_vnum)
+        let proto_casts = w.mob_protos.get(&m.attacker_vnum)
             .map(|p| should_cast(p))
             .unwrap_or(false);
-        casts
-    } && rand::thread_rng().gen_range(0..100) < 30;
+        let spec_caster = w.mob_instances.iter()
+            .find(|x| x.id == m.attacker_id)
+            .and_then(|x| x.spec)
+            == Some(crate::world::MobSpec::MagicUser);
+        let casts = proto_casts || spec_caster;
+        let chance = if spec_caster { 50 } else { 30 };
+        let attempt = casts && rand::thread_rng().gen_range(0..100) < chance;
+        (attempt, spec_caster)
+    };
 
     // Roll mob damage. Spell attacks (when cast_attempt) use a separate
     // dice pool that ignores mundane AC but is still reduced by
@@ -1052,7 +1067,8 @@ async fn resolve_mob_attack(
             (ac, r)
         };
         if cast_attempt {
-            let raw = dice(2, 4) + m.level / 2;
+            let (dn, ds) = mob_spell_dice(m.level);
+            let raw = dice(dn, ds) + m.level / 2;
             let after = (raw * (100 - reduction)) / 100;
             (after.max(1), true)
         } else {
@@ -1084,9 +1100,10 @@ async fn resolve_mob_attack(
     };
 
     let (to_victim, to_room) = if is_spell {
+        let (vict_v, vict_n, room_v, room_n) = mob_spell_flavor(m.level);
         (
-            format!("\r\n{mob_short_name} conjures a glowing dart of force that strikes you for {dmg} damage!\r\n"),
-            format!("\r\n{mob_short_name} hurls a glowing dart of force at {}.\r\n", ph.name),
+            format!("\r\n{mob_short_name} {vict_v} {vict_n} you for {dmg} damage!\r\n"),
+            format!("\r\n{mob_short_name} {room_v} {room_n} at {}.\r\n", ph.name),
         )
     } else {
         (
@@ -1094,6 +1111,7 @@ async fn resolve_mob_attack(
             format!("\r\n{mob_short_name} hits {}.\r\n", ph.name),
         )
     };
+    let _ = is_magic_user_spec;
     let _ = ph.send.send(to_victim);
     {
         let cl = chars.lock().await;
@@ -1322,7 +1340,7 @@ async fn player_death(
     // the dropped inventory.  Equipped items stay on the body.
     if old_room != crate::world::NOWHERE && !dropped.is_empty() {
         let mut w = world.lock().await;
-        w.create_corpse(&corpse_label, dropped, old_room);
+        w.create_pc_corpse(&corpse_label, dropped, old_room);
     }
 
     // Update the registry's cached current_room.
@@ -1397,6 +1415,28 @@ fn should_cast(p: &crate::world::MobProto) -> bool {
     ];
     let bag = format!("{} {}", p.name.to_ascii_lowercase(), p.short_descr.to_ascii_lowercase());
     KW.iter().any(|k| bag.contains(k))
+}
+
+/// Pick the (dice_n, dice_s) pool for a mob caster of the given level.
+/// Mirrors a simplified CircleMUD spell-pool ladder.
+fn mob_spell_dice(level: i32) -> (i32, i32) {
+    match level {
+        0..=9    => (1, 4),    // magic missile
+        10..=19  => (3, 6),    // lightning bolt
+        20..=29  => (4, 6),    // fireball
+        _        => (5, 6),    // harm
+    }
+}
+
+/// Pick (victim-verb, victim-noun, room-verb, room-noun) flavor strings
+/// for a tier-`level` mob spell.
+fn mob_spell_flavor(level: i32) -> (&'static str, &'static str, &'static str, &'static str) {
+    match level {
+        0..=9    => ("hurls a", "magic missile at",       "hurls a",   "magic missile"),
+        10..=19  => ("arcs a", "lightning bolt into",     "arcs a",    "lightning bolt"),
+        20..=29  => ("hurls a", "roaring fireball at",    "hurls a",   "fireball"),
+        _        => ("calls down", "withering harm upon", "calls down","harm"),
+    }
 }
 
 // Tiny no-op so unused imports don't warn during incremental builds.

@@ -263,7 +263,7 @@ pub async fn dispatch_command(
         Some("list")      => do_list(me, world).await,
         Some("buy")       => do_buy(rest, me, world, chars).await,
         Some("sell")      => do_sell(rest, me, world, chars).await,
-        Some("flee")      => do_flee(me, world, chars).await,
+        Some("flee")      => do_flee(rest, me, world, chars).await,
         Some("wield")     => do_wield(rest, me, world, chars).await,
         Some("wear")      => do_wear(rest, me, world, chars).await,
         Some("remove")    => do_remove(rest, me, world, chars).await,
@@ -3429,7 +3429,7 @@ async fn do_spec_assign(
     let name   = parts.next().unwrap_or("").to_ascii_lowercase();
     let Ok(vnum) = vnum_s.parse::<i32>() else {
         return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|none>\r\n".to_string()
         );
     };
     let spec: Option<crate::world::MobSpec> = match name.as_str() {
@@ -3438,9 +3438,10 @@ async fn do_spec_assign(
         "janitor"   => Some(crate::world::MobSpec::Janitor),
         "cityguard" => Some(crate::world::MobSpec::Cityguard),
         "snake"     => Some(crate::world::MobSpec::Snake),
+        "magicuser" | "mu" => Some(crate::world::MobSpec::MagicUser),
         "none" | "off" | "clear" => None,
         ""          => return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|none>\r\n".to_string()
         ),
         _ => return CmdOutput::text(format!("\r\nUnknown spec '{name}'.\r\n")),
     };
@@ -4433,6 +4434,41 @@ fn do_skills(me: &Character) -> CmdOutput {
 }
 
 fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
+    // `practice all` — spend remaining practice points one at a time
+    // across every class-allowed skill in round-robin, until either
+    // budget is exhausted or no skill is below 90% cap.
+    if arg.trim().eq_ignore_ascii_case("all") {
+        if !is_guild_room_for(me.current_room, me.class) {
+            return CmdOutput::text(format!(
+                "\r\nYou must visit a {:?} guild to practice your art.\r\n", me.class,
+            ));
+        }
+        if me.practices <= 0 {
+            return CmdOutput::text(
+                "\r\nYou have no practice points to spend.\r\n".to_string()
+            );
+        }
+        let mut spent = 0i32;
+        loop {
+            if me.practices <= 0 { break; }
+            let mut any_eligible = false;
+            for &skill in crate::character::ALL_SKILLS {
+                if me.practices <= 0 { break; }
+                if !skill.is_class_allowed(me.class) { continue; }
+                let pct = me.skills.entry(skill).or_insert(0);
+                if *pct >= 90 { continue; }
+                *pct = (*pct + 10).min(90);
+                me.practices -= 1;
+                spent += 1;
+                any_eligible = true;
+            }
+            if !any_eligible { break; }
+        }
+        return CmdOutput::text(format!(
+            "\r\nYou practice diligently: spent {spent} point(s); {} left.\r\n",
+            me.practices,
+        ));
+    }
     if arg.is_empty() {
         // Show skills + remaining practices budget.
         let mut out = do_skills(me).text;
@@ -5554,6 +5590,9 @@ async fn do_skill(
     use rand::Rng;
     use crate::db::dice;
 
+    // Snap pre-reveal hidden state so Backstab can double damage from
+    // ambush; the reveal call below would otherwise clear it.
+    let was_hidden = me.hidden;
     me.reveal();
     // Class restriction.
     if !skill.is_class_allowed(me.class) {
@@ -5568,6 +5607,71 @@ async fn do_skill(
             "\r\nYou are unfamiliar with the art of {}. Try `practice {}`.\r\n",
             skill.name(), skill.name(),
         ));
+    }
+
+    // PvP path for Bash: if the named target is a same-room player
+    // (and both sides have pvp_ok), apply knockdown directly.
+    if matches!(skill, Skill::Bash) && !arg.is_empty() {
+        let key_pvp = arg.to_ascii_lowercase();
+        let pvp_target = {
+            let cl = chars.lock().await;
+            let h = cl.iter()
+                .find(|p| p.id != me.id
+                    && p.current_room == me.current_room
+                    && p.name.to_ascii_lowercase() == key_pvp)
+                .cloned();
+            h
+        };
+        if let Some(ph) = pvp_target {
+            let (target_pvp_ok, target_name) = {
+                let c = ph.character.lock().await;
+                (c.pvp_ok, c.name.clone())
+            };
+            if !me.pvp_ok || !target_pvp_ok {
+                return CmdOutput::text(
+                    "\r\nBoth of you need `pvp` set on for that.\r\n".to_string()
+                );
+            }
+            use rand::Rng;
+            let learned = *me.skills.get(&skill).unwrap_or(&0) as i32;
+            let chance = (30 + learned / 2).min(85);
+            let landed = rand::thread_rng().gen_range(1..=100) <= chance;
+            if !landed {
+                let cl = chars.lock().await;
+                cl.broadcast_room(me.current_room, Some(me.id),
+                    &format!("{} tries to bash {target_name} but stumbles.\r\n", me.name));
+                let _ = ph.send.send(format!(
+                    "\r\n{} tries to bash you but stumbles.\r\n", me.name,
+                ));
+                return CmdOutput::text(format!(
+                    "\r\nYou fail to bash {target_name}.\r\n"
+                ));
+            }
+            // Knock to Sitting + apply 1-round Stun affect.
+            {
+                let mut c = ph.character.lock().await;
+                c.position = crate::character::Position::Sitting;
+                c.apply_affect(crate::character::Affect {
+                    skill:         crate::character::Skill::Stun,
+                    duration:      1,
+                    to_hit:        0,
+                    to_dam:        0,
+                    dmg_reduction: 0,
+                    dot_damage:    0,
+                    to_ac:         0,
+                });
+            }
+            let _ = ph.send.send(format!(
+                "\r\n{} bashes you to the ground!\r\n", me.name,
+            ));
+            let cl = chars.lock().await;
+            cl.broadcast_room(me.current_room, Some(me.id),
+                &format!("{} bashes {target_name} to the ground!\r\n", me.name));
+            let _ = learn_attempt(me, Skill::Bash, 5);
+            return CmdOutput::text(format!(
+                "\r\nYou bash {target_name} flat!\r\n"
+            ));
+        }
     }
 
     // Choose target: either the explicit arg, or our current fighting target.
@@ -5623,7 +5727,11 @@ async fn do_skill(
         let dmg = match skill {
             Skill::Kick     => dice(1, 6) + me.level / 2 + str_b,
             Skill::Bash     => dice(2, 4) + me.level + str_b,
-            Skill::Backstab => dice(3, 6) + me.level * 2 + str_b,
+            Skill::Backstab => {
+                let base = dice(3, 6) + me.level * 2 + str_b;
+                // From-hidden ambush doubles damage.
+                if was_hidden { base * 2 } else { base }
+            }
             _ => 0,
         };
         (hit, dmg.max(1))
@@ -5675,10 +5783,13 @@ async fn do_skill(
     };
 
     // Broadcast + reply.
+    let ambush_tag = if was_hidden && matches!(skill, Skill::Backstab) {
+        " from the shadows"
+    } else { "" };
     let (to_me, to_room) = if hit {
         (
-            format!("\r\nYou {verb} {mob_name} for {dmg} damage!\r\n"),
-            format!("{} {verb}s {mob_name}.\r\n", me.name),
+            format!("\r\nYou {verb}{ambush_tag} {mob_name} for {dmg} damage!\r\n"),
+            format!("{} {verb}s{ambush_tag} {mob_name}.\r\n", me.name),
         )
     } else {
         (
@@ -8530,6 +8641,7 @@ async fn do_steal(
 }
 
 async fn do_flee(
+    arg: &str,
     me: &mut Character,
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
@@ -8537,23 +8649,41 @@ async fn do_flee(
     if me.fighting.is_none() {
         return CmdOutput::text("\r\nYou are not fighting anyone.\r\n");
     }
-    // Pick a random valid exit.
+    // If the player typed `flee <dir>`, try that direction first.  Else
+    // pick a random valid exit (original behavior).
+    let preferred_dir = Direction::parse(arg.trim());
     let target = {
         let w = world.lock().await;
         let r = match w.rooms.get(&me.current_room) {
             Some(r) => r,
             None => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
         };
-        let candidates: Vec<(Direction, RoomVnum)> = Direction::ALL.iter()
-            .filter_map(|d| {
-                r.exits[*d as usize].as_ref().and_then(|e| {
-                    if e.to_room != crate::world::NOWHERE && w.rooms.contains_key(&e.to_room) {
-                        Some((*d, e.to_room))
-                    } else { None }
+        // Use the preferred direction if it's a valid open exit.
+        if let Some(d) = preferred_dir {
+            if let Some(e) = r.exits[d as usize].as_ref() {
+                let closed = e.exit_info & crate::world::EX_CLOSED != 0;
+                if e.to_room != crate::world::NOWHERE
+                    && !closed
+                    && w.rooms.contains_key(&e.to_room)
+                {
+                    Some((d, e.to_room))
+                } else { None }
+            } else { None }
+        } else {
+            let candidates: Vec<(Direction, RoomVnum)> = Direction::ALL.iter()
+                .filter_map(|d| {
+                    r.exits[*d as usize].as_ref().and_then(|e| {
+                        if e.to_room != crate::world::NOWHERE
+                            && (e.exit_info & crate::world::EX_CLOSED == 0)
+                            && w.rooms.contains_key(&e.to_room)
+                        {
+                            Some((*d, e.to_room))
+                        } else { None }
+                    })
                 })
-            })
-            .collect();
-        candidates.choose(&mut rand::thread_rng()).copied()
+                .collect();
+            candidates.choose(&mut rand::thread_rng()).copied()
+        }
     };
 
     let Some((dir, to)) = target else {

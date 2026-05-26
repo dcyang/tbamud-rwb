@@ -273,6 +273,9 @@ pub const CORPSE_VNUM: ObjVnum = -1;
 
 /// Seconds before a corpse decays and is removed from the world (5 min).
 pub const CORPSE_DECAY_SECS: i32 = 300;
+/// Player corpses linger far longer so the owner has a chance to
+/// `recover` after a respawn trip.
+pub const PC_CORPSE_DECAY_SECS: i32 = 1800;
 
 /// ITEM_* item-type constants (mirror structs.h).  Used by parsers and
 /// gameplay (containers, weapons, armor).
@@ -506,6 +509,9 @@ pub enum MobSpec {
     Cityguard,
     /// Poisonous bite — chance to apply Poison on melee hit.
     Snake,
+    /// In combat, casts a tier-appropriate damage spell at higher
+    /// cadence than the legacy keyword-matching `should_cast` heuristic.
+    MagicUser,
 }
 
 impl MobSpec {
@@ -687,8 +693,28 @@ impl World {
         contents: Vec<u32>,
         room: RoomVnum,
     ) -> u32 {
+        self.create_corpse_with_decay(mob_short, contents, room, CORPSE_DECAY_SECS)
+    }
+
+    /// PC-corpse variant: same fields but a much longer decay so the
+    /// owner has time to retrieve their stuff.
+    pub fn create_pc_corpse(
+        &mut self,
+        label: &str,
+        contents: Vec<u32>,
+        room: RoomVnum,
+    ) -> u32 {
+        self.create_corpse_with_decay(label, contents, room, PC_CORPSE_DECAY_SECS)
+    }
+
+    fn create_corpse_with_decay(
+        &mut self,
+        label: &str,
+        contents: Vec<u32>,
+        room: RoomVnum,
+        decay_secs: i32,
+    ) -> u32 {
         let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);
-        // Reparent the contained objects to no-room (they live inside the corpse).
         for &cid in &contents {
             if let Some(o) = self.obj_instances.iter_mut().find(|o| o.id == cid) {
                 o.in_room = NOWHERE;
@@ -700,8 +726,8 @@ impl World {
             in_room: room,
             contents,
             triggers: Vec::new(),
-            corpse_of: Some(mob_short.to_string()),
-            decay_in: Some(CORPSE_DECAY_SECS),
+            corpse_of: Some(label.to_string()),
+            decay_in: Some(decay_secs),
             timer: None,
             light_lit: false,
         });

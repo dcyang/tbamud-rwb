@@ -1329,6 +1329,10 @@ pub fn spawn_mob_spec_tick(
                         // Snake's poison-on-hit lives in combat.rs;
                         // no per-tick behavior here.
                     }
+                    crate::world::MobSpec::MagicUser => {
+                        // MagicUser's combat-cast logic lives in
+                        // combat.rs (resolve_mob_attack); no idle tick.
+                    }
                     crate::world::MobSpec::Janitor => {
                         // Pick up the first non-corpse floor object whose
                         // weight ≤ 5 (CircleMUD's threshold) — but we don't
