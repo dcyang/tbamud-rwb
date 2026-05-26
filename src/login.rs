@@ -238,6 +238,20 @@ impl LoginSession {
             ConnState::NameConfirm => {
                 match input.chars().next().map(|c| c.to_ascii_uppercase()) {
                     Some('Y') => {
+                        // Wizlock blocks new-character creation entirely
+                        // (a brand-new mortal is level 1).
+                        let wl = crate::interpreter::WIZLOCK_LEVEL
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        if wl > 0 {
+                            return LoginOutput {
+                                text:       format!(
+                                    "\r\nNew character creation is disabled (wizlock {wl}).\r\n",
+                                ),
+                                echo_on:    false,
+                                disconnect: true,
+                                ..Default::default()
+                            };
+                        }
                         let name = self.player_name.clone().unwrap_or_default();
                         self.state = ConnState::NewPassword;
                         return LoginOutput::send_echo_off(format!(
@@ -300,6 +314,22 @@ impl LoginSession {
                 // Correct password
                 tracing::info!(name = %name, "Player authenticated");
                 self.level = rec.level;
+
+                // Wizlock gate: refuse if their level is below the
+                // global threshold and they aren't already an immortal.
+                let wl = crate::interpreter::WIZLOCK_LEVEL
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if wl > 0 && rec.level < wl.min(34) && rec.level < 34 {
+                    tracing::info!(name = %name, wizlock = wl, "Wizlock kick");
+                    return LoginOutput {
+                        text:       format!(
+                            "\r\nThe game is locked to mortals below level {wl}. Try again later.\r\n",
+                        ),
+                        echo_on:    true,
+                        disconnect: true,
+                        ..Default::default()
+                    };
+                }
 
                 let motd_text = if self.level >= 34 /* LVL_IMMORT */ {
                     texts.imotd.clone()

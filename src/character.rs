@@ -52,6 +52,7 @@ pub enum Skill {
     Armor,
     Haste,
     Slow,
+    Earthquake,
     Dodge,
     Parry,
 }
@@ -99,6 +100,7 @@ impl Skill {
             "armor"                           => Some(Skill::Armor),
             "haste"                           => Some(Skill::Haste),
             "slow"                            => Some(Skill::Slow),
+            "earthquake"                      => Some(Skill::Earthquake),
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
             _ => None,
@@ -135,6 +137,7 @@ impl Skill {
             Skill::Armor        => "armor",
             Skill::Haste        => "haste",
             Skill::Slow         => "slow",
+            Skill::Earthquake   => "earthquake",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -153,6 +156,7 @@ impl Skill {
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
+                | Skill::Earthquake
                                       => SkillKind::Spell,
         }
     }
@@ -183,6 +187,7 @@ impl Skill {
             Skill::Armor        => 10,
             Skill::Haste        => 15,
             Skill::Slow         => 12,
+            Skill::Earthquake   => 18,
         }
     }
 
@@ -219,6 +224,7 @@ impl Skill {
             Skill::Armor        => &[Class::Cleric],
             Skill::Haste        => &[Class::MagicUser],
             Skill::Slow         => &[Class::MagicUser],
+            Skill::Earthquake   => &[Class::MagicUser, Class::Cleric],
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
         }
@@ -258,6 +264,7 @@ impl Skill {
             Skill::Armor        => "armor",
             Skill::Haste        => "haste",
             Skill::Slow         => "slow",
+            Skill::Earthquake   => "earthquake",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
         }
@@ -280,7 +287,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::DetectInvis, Skill::DetectMagic,
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
-    Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow,
+    Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
     Skill::Dodge, Skill::Parry,
 ];
 
@@ -399,6 +406,10 @@ pub struct Character {
     /// Personal toggle: if true, this character will neither send nor
     /// receive `gossip` channel traffic.  Not persisted across sessions.
     pub gossip_off:   bool,
+    /// Timestamp of the last command this player dispatched.  Refreshed
+    /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
+    /// to disconnect long-idle mortals.  Not persisted.
+    pub last_activity: std::time::Instant,
 }
 
 impl Character {

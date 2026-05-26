@@ -46,6 +46,13 @@ pub struct ForceCmdMsg {
 }
 pub static FORCE_CMD_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<ForceCmdMsg>> = OnceLock::new();
 
+/// Global wizlock level — players below this can't log in (except
+/// immortals, who always bypass).  0 means unlocked.  Toggled by the
+/// `wizlock` command; read by `login::Password` after a successful
+/// auth check.
+pub static WIZLOCK_LEVEL: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
 // ---------------------------------------------------------------------------
 // Command table
 // ---------------------------------------------------------------------------
@@ -70,7 +77,7 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title", "gossip", "chat",
-    "goto", "transfer", "purge", "shutdown", "stat", "force", "set",
+    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -116,6 +123,7 @@ pub async fn dispatch_command(
     if raw.is_empty() {
         return CmdOutput::text(String::new());
     }
+    me.last_activity = std::time::Instant::now();
 
     let (verb, rest) = match raw.find(char::is_whitespace) {
         Some(i) => (&raw[..i], raw[i..].trim_start()),
@@ -192,6 +200,7 @@ pub async fn dispatch_command(
         Some("stat")      => do_stat(rest, me, world, chars).await,
         Some("force")     => do_force(rest, me, world, chars).await,
         Some("set")       => do_set(rest, me, chars).await,
+        Some("wizlock")   => do_wizlock(rest, me),
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -1146,6 +1155,33 @@ async fn do_set(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
 
 fn bad_value(field: &str) -> CmdOutput {
     CmdOutput::text(format!("\r\nBad value for '{field}'.\r\n"))
+}
+
+/// `wizlock [level]` — show or set the global login threshold.
+/// 0 unlocks; any positive value blocks logins below it (immortals
+/// always bypass).  Immortal-only.
+fn do_wizlock(arg: &str, me: &Character) -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let arg = arg.trim();
+    if arg.is_empty() {
+        let cur = WIZLOCK_LEVEL.load(Ordering::Relaxed);
+        return CmdOutput::text(if cur <= 0 {
+            "\r\nWizlock is currently OFF.\r\n".to_string()
+        } else {
+            format!("\r\nWizlock is set to level {cur}.\r\n")
+        });
+    }
+    let Ok(v) = arg.parse::<i32>() else {
+        return CmdOutput::text("\r\nUsage: wizlock [<level>]   (0 disables)\r\n".to_string());
+    };
+    let v = v.clamp(0, 34);
+    WIZLOCK_LEVEL.store(v, Ordering::Relaxed);
+    CmdOutput::text(if v == 0 {
+        "\r\nWizlock disabled.\r\n".to_string()
+    } else {
+        format!("\r\nWizlock set to level {v}.\r\n")
+    })
 }
 
 /// `stat [name]` — inspect a player/mob/obj/room.  With no arg or
@@ -2316,6 +2352,7 @@ async fn do_cast(
         crate::character::Skill::Armor        => cast_buff(target, me, chars, learned, crate::character::Skill::Armor).await,
         crate::character::Skill::Haste        => cast_buff(target, me, chars, learned, crate::character::Skill::Haste).await,
         crate::character::Skill::Slow         => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Slow).await,
+        crate::character::Skill::Earthquake   => cast_earthquake(me, world, chars, learned).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     }
 }
@@ -3467,6 +3504,120 @@ async fn cast_burning_hands(
         }
     }
 
+    CmdOutput::text(to_me)
+}
+
+/// `earthquake` — AoE that auto-hits every mob in the caster's room.
+/// Damage is `dice(2, 8) + level + (wis-10)/2`.  Slain mobs follow the
+/// normal kill path (corpse + DEATH triggers + XP).  Mana drains
+/// regardless of how many targets are present.
+async fn cast_earthquake(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use crate::db::dice;
+    me.mana -= crate::character::Skill::Earthquake.mana_cost();
+    let _ = learned;            // No to-hit roll — earthquake always hits.
+
+    let mob_ids: Vec<u32> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).map(|r| r.mobs.clone()).unwrap_or_default()
+    };
+
+    let to_room = format!("{} invokes an earthquake!\r\n", me.name);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+    let mut to_me = String::from("\r\nThe ground heaves and cracks as you invoke an earthquake!\r\n");
+    if mob_ids.is_empty() {
+        to_me.push_str("Dust settles — nothing here to shake.\r\n");
+        return CmdOutput::text(to_me);
+    }
+
+    let mut total_xp = 0i64;
+    let mut killed_names: Vec<String> = Vec::new();
+    for mob_id in mob_ids {
+        let dmg = dice(2, 8) + me.level + (me.wis - 10).max(0) / 2;
+        let (mob_name, mob_dead, mob_room) = {
+            let mut w = world.lock().await;
+            let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+                Some(m) => (m.vnum, m.in_room),
+                None => continue,
+            };
+            if in_room != me.current_room { continue; }
+            let mob_name = w.mob_protos.get(&vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the creature".into());
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            m.hp -= dmg;
+            if me.fighting.is_none() {
+                me.fighting = Some(Target { id: mob_id, is_player: false });
+            }
+            if m.fighting.is_none() {
+                m.fighting = Some(Target { id: me.id, is_player: true });
+            }
+            (mob_name, m.hp <= 0, in_room)
+        };
+        to_me.push_str(&format!("The shockwave hits {mob_name} for {dmg} damage!\r\n"));
+
+        if mob_dead {
+            fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+            let xp = {
+                let w = world.lock().await;
+                w.mob_instances.iter().find(|m| m.id == mob_id)
+                    .and_then(|m| w.mob_protos.get(&m.vnum))
+                    .map(|p| p.exp as i64).unwrap_or(0)
+            };
+            total_xp += xp;
+            {
+                let mut w = world.lock().await;
+                let inv: Vec<u32> = w.mob_instances.iter()
+                    .find(|m| m.id == mob_id)
+                    .map(|m| m.inventory.clone()).unwrap_or_default();
+                for other in w.mob_instances.iter_mut() {
+                    if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                        other.fighting = None;
+                    }
+                }
+                if let Some(r) = w.rooms.get_mut(&mob_room) {
+                    r.mobs.retain(|&id| id != mob_id);
+                }
+                w.mob_instances.retain(|m| m.id != mob_id);
+                w.create_corpse(&mob_name, inv, mob_room);
+            }
+            {
+                let cl = chars.lock().await;
+                cl.broadcast_room(mob_room, None,
+                    &format!("{mob_name} is crushed by falling rubble.\r\n"));
+            }
+            killed_names.push(mob_name);
+        }
+    }
+    let still_have_target = {
+        let w = world.lock().await;
+        me.fighting.map(|t| !t.is_player
+            && w.mob_instances.iter().any(|m| m.id == t.id)).unwrap_or(false)
+    };
+    if !still_have_target { me.fighting = None; }
+    if !killed_names.is_empty() {
+        for name in &killed_names {
+            to_me.push_str(&format!("You have slain {name}!\r\n"));
+        }
+        if total_xp > 0 {
+            me.exp += total_xp;
+            to_me.push_str(&format!("You gain {total_xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                to_me.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+    }
     CmdOutput::text(to_me)
 }
 

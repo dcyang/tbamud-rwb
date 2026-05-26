@@ -266,6 +266,7 @@ pub async fn handle_connection(
                     following:        None,
                     grouped:          false,
                     gossip_off:       false,
+                    last_activity:    std::time::Instant::now(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline

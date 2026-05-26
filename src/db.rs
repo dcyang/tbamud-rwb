@@ -651,6 +651,55 @@ pub fn spawn_decay_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
     });
 }
 
+/// Background task that disconnects mortals who have been idle longer
+/// than `IDLE_LIMIT_SECS` since their last command.  Immortals are
+/// exempt.  Disconnect is performed by posting a "quit" command
+/// through the FORCE_CMD_TX channel — that routes through the normal
+/// dispatcher loop and triggers the usual auto-save + cleanup path.
+pub fn spawn_idle_kick_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const TICK_SECONDS:     u64 = 60;
+    const IDLE_LIMIT_SECS:  u64 = 30 * 60;       // 30 minutes
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let handles: Vec<crate::character::PlayerHandle> = {
+                let cl = chars.lock().await;
+                cl.iter().cloned().collect()
+            };
+            let now = std::time::Instant::now();
+            for ph in handles {
+                let kick = {
+                    let c = ph.character.lock().await;
+                    c.level < 34
+                        && now.duration_since(c.last_activity).as_secs() > IDLE_LIMIT_SECS
+                };
+                if !kick { continue; }
+                let _ = ph.send.send(
+                    "\r\nYou have been idle too long — link severed.\r\n".to_string(),
+                );
+                if let Some(tx) = crate::interpreter::FORCE_CMD_TX.get() {
+                    let _ = tx.send(crate::interpreter::ForceCmdMsg {
+                        player:  ph.name.clone(),
+                        command: "quit".to_string(),
+                        world:   std::sync::Arc::clone(&world),
+                        chars:   std::sync::Arc::clone(&chars),
+                    });
+                }
+            }
+        }
+    });
+}
+
 /// Background task that ticks each online mortal's hunger/thirst once
 /// per game-hour (~60s of real time).  `-1` is the never-hungry
 /// sentinel (immortals).  At 0 the player gets a one-shot warning; at
