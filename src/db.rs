@@ -374,6 +374,18 @@ pub fn load_world(data_dir: &str) -> Result<World> {
         tracing::info!(count = world.shops.len(), "Loaded shops");
     }
 
+    // --- Socials database --------------------------------------------------
+    let socials_path = format!("{data_dir}/misc/socials.new");
+    if std::path::Path::new(&socials_path).exists() {
+        match parse_socials_new(&socials_path) {
+            Ok(socials) => {
+                world.socials = socials;
+                tracing::info!(count = world.socials.len(), "Loaded socials");
+            }
+            Err(e) => tracing::warn!(error = %e, "socials.new parse error, skipping"),
+        }
+    }
+
     // --- Help database ------------------------------------------------------
     let help_path = format!("{data_dir}/text/help/help.hlp");
     if std::path::Path::new(&help_path).exists() {
@@ -402,6 +414,78 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     );
 
     Ok(world)
+}
+
+/// Parse `lib/misc/socials.new` (AEdit format).
+///
+/// Each social begins with a tilde header:
+///   `~<name> <cmd> <hide> <min_position> <target_required> <action>`
+///
+/// followed by up to 12 message lines (we only read the first 5,
+/// which align with our runtime Social slots).  `#` placeholders mean
+/// "say nothing for this slot".  Records are separated by blank lines.
+fn parse_socials_new(path: &str) -> Result<Vec<crate::world::Social>> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("reading socials file {path}"))?;
+    let mut out = Vec::new();
+    let mut lines = contents.lines().peekable();
+
+    while let Some(raw) = lines.next() {
+        let line = raw.trim();
+        if !line.starts_with('~') { continue; }
+        // Strip the leading '~' and split header tokens.
+        let header = &line[1..];
+        let toks: Vec<&str> = header.split_whitespace().collect();
+        if toks.is_empty() { continue; }
+        let name           = toks[0].to_string();
+        let min_position   = toks.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let target_required: i32 = toks.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+        let mut slots: [String; 5] = Default::default();
+        let mut slot_i = 0usize;
+        // Read until we've captured 5 slots OR the next `~` appears OR EOF.
+        // Trailing `#`-only lines beyond 5 are skipped; we don't honor
+        // the 12-slot full format yet.
+        while slot_i < 5 {
+            let Some(&peek) = lines.peek() else { break; };
+            if peek.trim_start().starts_with('~') { break; }
+            let l = lines.next().unwrap();
+            let t = l.trim_end();
+            if t.is_empty() { continue; }
+            if t.trim_start() == "#" {
+                slot_i += 1;                // empty slot
+                continue;
+            }
+            slots[slot_i] = t.to_string();
+            slot_i += 1;
+        }
+        // Drain any remaining slot lines (#s) until we hit the next ~
+        // or blank, so we don't accidentally include them in the next
+        // entry's slot 0.
+        while let Some(&peek) = lines.peek() {
+            let pt = peek.trim_start();
+            if pt.starts_with('~') || pt.is_empty() { break; }
+            // Only consume `#` placeholders; real text would belong to
+            // this entry's trailing slot or a malformed file.
+            if pt == "#" { lines.next(); } else { break; }
+        }
+        // Skip the blank separator if any.
+        while let Some(&peek) = lines.peek() {
+            if peek.trim().is_empty() { lines.next(); } else { break; }
+        }
+
+        out.push(crate::world::Social {
+            name,
+            min_position,
+            target_required: target_required > 0,
+            actor_no_arg:    std::mem::take(&mut slots[0]),
+            room_no_arg:     std::mem::take(&mut slots[1]),
+            actor_target:    std::mem::take(&mut slots[2]),
+            room_target:     std::mem::take(&mut slots[3]),
+            victim_target:   std::mem::take(&mut slots[4]),
+        });
+    }
+    Ok(out)
 }
 
 /// Parse a CircleMUD-style help file.  Each entry is:

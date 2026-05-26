@@ -79,6 +79,7 @@ const COMMANDS: &[&str] = &[
     "follow", "group", "gtell", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
+    "commands",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -220,6 +221,7 @@ pub async fn dispatch_command(
         Some("reply")     => do_reply(rest, me, chars).await,
         Some("prompt")    => do_prompt(rest, me),
         Some("alias")     => do_alias(rest, me),
+        Some("commands")  => do_commands(),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -238,7 +240,21 @@ pub async fn dispatch_command(
             }
             CmdOutput::text("\r\nHuh?!\r\n")
         }
-        _ => CmdOutput::text(format!("\r\nHuh?!? ({raw})\r\n")),
+        _ => {
+            // Fallback: dynamic social lookup against loaded socials.
+            let social = {
+                let w = world.lock().await;
+                let lv = verb.to_ascii_lowercase();
+                w.socials.iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(&lv)
+                          || s.name.to_ascii_lowercase().starts_with(&lv))
+                    .cloned()
+            };
+            if let Some(s) = social {
+                return do_social(rest, me, chars, &s).await;
+            }
+            CmdOutput::text(format!("\r\nHuh?!? ({raw})\r\n"))
+        }
     }
 }
 
@@ -685,6 +701,78 @@ async fn do_reply(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     };
     let combined = format!("{name} {msg}");
     do_tell(&combined, me, chars).await
+}
+
+fn do_commands() -> CmdOutput {
+    let mut names: Vec<&str> = COMMANDS.iter().copied().collect();
+    names.sort();
+    let mut s = String::from("\r\nAvailable commands:\r\n");
+    for chunk in names.chunks(5) {
+        s.push_str("  ");
+        for name in chunk {
+            s.push_str(&format!("{name:<12}"));
+        }
+        s.push_str("\r\n");
+    }
+    CmdOutput::text(s)
+}
+
+// ---------------------------------------------------------------------------
+// Socials — loaded from lib/misc/socials.new at boot into World.socials.
+// dispatch_command falls back to a name lookup when the canonical-verb
+// match misses, then routes through do_social with the resolved entry.
+// ---------------------------------------------------------------------------
+
+async fn do_social(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+    s: &crate::world::Social,
+) -> CmdOutput {
+    let arg = arg.trim();
+    let fill = |s: &str, target: &str| s.replace("$n", &me.name).replace("$N", target);
+
+    if arg.is_empty() {
+        if !s.actor_no_arg.is_empty() {
+            let cl = chars.lock().await;
+            if !s.room_no_arg.is_empty() {
+                cl.broadcast_room(me.current_room, Some(me.id),
+                    &format!("{}\r\n", fill(&s.room_no_arg, "")));
+            }
+            return CmdOutput::text(format!("\r\n{}\r\n", fill(&s.actor_no_arg, "")));
+        }
+        return CmdOutput::text(format!("\r\n{} who?\r\n", s.name));
+    }
+    let target_ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.id != me.id
+            && p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = target_ph else {
+        return CmdOutput::text(format!("\r\nNo one named '{arg}' is here.\r\n"));
+    };
+    let to_actor  = fill(&s.actor_target,  &ph.name);
+    let to_victim = fill(&s.victim_target, &ph.name);
+    let to_room   = fill(&s.room_target,   &ph.name);
+    if !to_victim.is_empty() {
+        let _ = ph.send.send(format!("\r\n{to_victim}\r\n"));
+    }
+    if !to_room.is_empty() {
+        let cl = chars.lock().await;
+        for peer in cl.iter() {
+            if peer.id == me.id || peer.id == ph.id { continue; }
+            if peer.current_room != me.current_room { continue; }
+            let _ = peer.send.send(format!("\r\n{to_room}\r\n"));
+        }
+    }
+    CmdOutput::text(if to_actor.is_empty() {
+        format!("\r\nYou {} at {}.\r\n", s.name, ph.name)
+    } else {
+        format!("\r\n{to_actor}\r\n")
+    })
 }
 
 /// `alias` — list, set, or remove personal first-word command aliases.

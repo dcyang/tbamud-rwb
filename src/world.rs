@@ -471,6 +471,7 @@ pub struct World {
     pub quests:        BTreeMap<QuestVnum, Quest>,
     pub triggers:      BTreeMap<TriggerVnum, Trigger>,
     pub help:          Vec<HelpEntry>,
+    pub socials:       Vec<Social>,
 }
 
 /// One entry from the help database (lib/text/help/help.hlp).  Keywords
@@ -480,6 +481,26 @@ pub struct HelpEntry {
     pub keywords:  Vec<String>,
     pub min_level: i32,
     pub body:      String,
+}
+
+/// One social emote loaded from `lib/misc/socials.new`.  The five
+/// `String` slots align with the runtime interpreter format:
+///   0 — actor with no target
+///   1 — room peers with no target
+///   2 — actor with a target ($N → target name)
+///   3 — room peers with a target ($n → actor, $N → target)
+///   4 — target sees the emote done to them ($n → actor)
+/// Empty strings mean "say nothing" (the socials file uses `#`).
+#[derive(Debug, Clone, Default)]
+pub struct Social {
+    pub name:          String,
+    pub min_position:  i32,
+    pub target_required: bool,
+    pub actor_no_arg:  String,
+    pub room_no_arg:   String,
+    pub actor_target:  String,
+    pub room_target:   String,
+    pub victim_target: String,
 }
 
 impl World {
