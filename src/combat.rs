@@ -506,6 +506,16 @@ async fn resolve_pvp_attack(
             &format!("{} hits {target_name}.\r\n", p.attacker_name));
     }
     if dead {
+        // PvP counters: bump killer.pkills and victim.pdeaths.
+        let killer_h = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
+            h
+        };
+        if let Some(kh) = killer_h {
+            kh.character.lock().await.pkills += 1;
+        }
+        ph.character.lock().await.pdeaths += 1;
         player_death(&ph, world, chars).await;
         clear_player_fighting(p.attacker_id, chars).await;
     }
@@ -1282,7 +1292,9 @@ async fn player_death(
     chars: &SharedChars,
 ) {
     // Snapshot inventory before reset so we can drop it as a corpse.
-    let (old_room, start_room, max_hp, dropped, corpse_label) = {
+    // Mortals also lose 10% of their current XP on death (floor at the
+    // current level's XP threshold so they don't level down).
+    let (old_room, start_room, max_hp, dropped, corpse_label, xp_lost) = {
         let mut c = ph.character.lock().await;
         let immortal = c.level >= 34;
         let start = world.lock().await.start_room(immortal);
@@ -1292,7 +1304,18 @@ async fn player_death(
         c.hp           = c.max_hp;
         c.current_room = start;
         c.fighting     = None;
-        (old, start, c.max_hp, dropped, label)
+        // XP penalty for mortals only.
+        let lost = if !immortal && c.exp > 0 {
+            let pre_threshold = if c.level > 0 {
+                crate::character::Character::exp_for_level(c.level - 1)
+            } else { 0 };
+            let raw_loss = (c.exp / 10).max(1);
+            let new_exp  = (c.exp - raw_loss).max(pre_threshold);
+            let actual   = c.exp - new_exp;
+            c.exp = new_exp;
+            actual
+        } else { 0 };
+        (old, start, c.max_hp, dropped, label, lost)
     };
 
     // Spawn the corpse in the death room (if it's a real room) holding
@@ -1321,10 +1344,16 @@ async fn player_death(
             &format!("\r\n{} materializes here, looking dazed.\r\n", ph.name));
     }
 
-    let _ = ph.send.send(format!(
+    let mut msg = format!(
         "\r\n\r\n*** You have died. ***\r\n\r\nYou awaken at the temple, restored to {} hp.\r\n",
         max_hp,
-    ));
+    );
+    if xp_lost > 0 {
+        msg.push_str(&format!(
+            "Your soul lingers behind — you lose {} experience.\r\n", xp_lost,
+        ));
+    }
+    let _ = ph.send.send(msg);
     // Show the new room.
     let view = crate::interpreter::render_room(start_room, Some(ph.id), world, chars).await;
     let _ = ph.send.send(view);

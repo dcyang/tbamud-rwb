@@ -137,6 +137,8 @@ pub struct PlayerRecord {
     pub alignment:     i32,
     /// Clan affiliation; empty for unaffiliated characters.
     pub clan:          String,
+    pub pkills:        i32,
+    pub pdeaths:       i32,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -359,6 +361,8 @@ impl PlayerDb {
                 "AuTl" => rec.autotitle_off = val.parse::<i32>().unwrap_or(0) != 0,
                 "Algn" => rec.alignment = val.parse().unwrap_or(0),
                 "Clan" => rec.clan      = val.to_string(),
+                "Pkil" => rec.pkills    = val.parse().unwrap_or(0),
+                "Pdth" => rec.pdeaths   = val.parse().unwrap_or(0),
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -474,6 +478,8 @@ impl PlayerDb {
         if rec.autotitle_off { writeln!(f, "AuTl: 1")?; }
         if rec.alignment != 0 { writeln!(f, "Algn: {}", rec.alignment)?; }
         if !rec.clan.is_empty() { writeln!(f, "Clan: {}", rec.clan)?; }
+        if rec.pkills  > 0 { writeln!(f, "Pkil: {}", rec.pkills)?; }
+        if rec.pdeaths > 0 { writeln!(f, "Pdth: {}", rec.pdeaths)?; }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
         }

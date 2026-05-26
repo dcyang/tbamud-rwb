@@ -266,9 +266,12 @@ pub async fn handle_connection(
                     history:      std::collections::VecDeque::with_capacity(20),
                     alignment:    p_ref.map(|p| p.alignment).unwrap_or(0),
                     clan:         p_ref.map(|p| p.clan.clone()).unwrap_or_default(),
+                    pkills:       p_ref.map(|p| p.pkills).unwrap_or(0),
+                    pdeaths:      p_ref.map(|p| p.pdeaths).unwrap_or(0),
                     snooped_by:   Vec::new(),
                     snooping:     None,
                     group_invite_from: None,
+                    clan_invite_from:  None,
                     practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
@@ -637,6 +640,8 @@ async fn run_game_session(
             rec.autotitle_off = !me.autotitle;
             rec.alignment    = me.alignment;
             rec.clan         = me.clan.clone();
+            rec.pkills       = me.pkills;
+            rec.pdeaths      = me.pdeaths;
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;

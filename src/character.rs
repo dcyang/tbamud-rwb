@@ -675,6 +675,10 @@ pub struct Character {
     /// Clan name (empty = unaffiliated).  Persisted; case is preserved
     /// but membership comparison is case-insensitive.
     pub clan:         String,
+    /// Career PvP kill count (this character has killed N players).
+    pub pkills:       i32,
+    /// Career PvP death count.
+    pub pdeaths:      i32,
     /// Player ids currently snooping this character — every line their
     /// writer task drains is also cloned (prefixed) to each snooper's
     /// mpsc.  Transient; cleared on logout.  Multiple snoopers are
@@ -686,6 +690,9 @@ pub struct Character {
     /// Pending `group invite` source — populated when another player
     /// invites us, consumed by `group accept`.  Transient.
     pub group_invite_from: Option<u32>,
+    /// Pending `clan invite` — Some(inviter_id) when someone wants
+    /// us in their clan; cleared by accept/decline.  Transient.
+    pub clan_invite_from:  Option<u32>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

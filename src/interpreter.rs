@@ -76,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
-    "clan", "ctell", "clans",
+    "clan", "ctell", "clans", "map",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -97,7 +97,7 @@ const COMMANDS: &[&str] = &[
     "ban", "unban", "bans",
     "wiznet",
     "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
-    "status", "reload", "spec_assign",
+    "status", "reload", "spec_assign", "top",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -218,7 +218,7 @@ pub async fn dispatch_command(
         Some("drop")      => do_drop(rest, me, world, chars).await,
         Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
-        Some("tell")      => do_tell(rest, me, chars).await,
+        Some("tell")      => do_tell(rest, me, chars, players).await,
         Some("who")       => do_who(rest, me, chars).await,
         Some("score")     => do_score(me, world).await,
         Some("exp")       => do_exp(me),
@@ -248,6 +248,7 @@ pub async fn dispatch_command(
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
+        Some("map")        => do_map(me, world).await,
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -298,7 +299,7 @@ pub async fn dispatch_command(
         Some("time")      => do_time(),
         Some("weather")   => do_weather(),
         Some("bank")      => do_bank(rest, me),
-        Some("reply")     => do_reply(rest, me, chars).await,
+        Some("reply")     => do_reply(rest, me, chars, players).await,
         Some("prompt")    => do_prompt(rest, me),
         Some("alias")     => do_alias(rest, me),
         Some("commands")  => do_commands(),
@@ -351,6 +352,7 @@ pub async fn dispatch_command(
         Some("status")    => do_status(me, world, chars).await,
         Some("reload")    => do_reload(rest, me, chars, players).await,
         Some("spec_assign") | Some("specassign") => do_spec_assign(rest, me, world).await,
+        Some("top")       => do_top(rest, me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -1114,7 +1116,12 @@ async fn do_say_with_triggers(
     out
 }
 
-async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+async fn do_tell(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
     if me.muted { return muted_msg(); }
     let (target, msg) = match arg.find(char::is_whitespace) {
         Some(i) => (&arg[..i], arg[i..].trim_start()),
@@ -1128,7 +1135,32 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         cl.find_by_name(target).filter(|p| p.id != me.id).cloned()
     };
     let Some(p) = target_ph else {
-        return CmdOutput::text("\r\nNo one by that name is online.\r\n");
+        // Offline fallback: if the player exists on disk, queue a mail
+        // entry.  Otherwise refuse outright.
+        let (data_dir, canonical) = {
+            let pl = players.lock().await;
+            (pl.data_dir().to_string(), pl.find_name(target))
+        };
+        let Some(canonical) = canonical else {
+            return CmdOutput::text(
+                "\r\nNo player by that name exists.\r\n".to_string()
+            );
+        };
+        let body = format!("[offline tell] {msg}");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0);
+        let entry = crate::mail::MailMessage {
+            from: me.name.clone(), unix_ts: ts, body,
+        };
+        if let Err(e) = crate::mail::append_mail(&data_dir, &canonical, &entry) {
+            return CmdOutput::text(format!(
+                "\r\n{} is offline and the mail queue is broken: {e}\r\n", canonical,
+            ));
+        }
+        return CmdOutput::text(format!(
+            "\r\n{canonical} is offline — your tell has been queued as mail.\r\n"
+        ));
     };
     let _ = p.send.send(format!("{} tells you, '{msg}'\r\n", me.name));
     // Record who tell'd them so `reply` works; also grab the AFK msg
@@ -1146,7 +1178,12 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
 }
 
 /// `reply <msg>` — send a tell back to the last person who tell'd us.
-async fn do_reply(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+async fn do_reply(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
     let msg = arg.trim();
     if msg.is_empty() {
         return CmdOutput::text("\r\nReply with what?\r\n".to_string());
@@ -1155,7 +1192,7 @@ async fn do_reply(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         return CmdOutput::text("\r\nYou have no one to reply to.\r\n".to_string());
     };
     let combined = format!("{name} {msg}");
-    do_tell(&combined, me, chars).await
+    do_tell(&combined, me, chars, players).await
 }
 
 /// `mail` subcommands: `send <to> <text>`, `list`, `read <N>`,
@@ -3272,6 +3309,50 @@ async fn do_status(
     ))
 }
 
+/// `top [xp|level|pkills]` — leaderboard over online players.
+/// Defaults to `xp` ranking.  Ties broken alphabetically by name.
+async fn do_top(arg: &str, _me: &Character, chars: &SharedChars) -> CmdOutput {
+    let metric = arg.trim().to_ascii_lowercase();
+    let metric = if metric.is_empty() { "xp".to_string() } else { metric };
+    let valid = matches!(metric.as_str(),
+        "xp" | "exp" | "level" | "lvl" | "pkills" | "pkill" | "gold");
+    if !valid {
+        return CmdOutput::text(
+            "\r\nUsage: top [xp|level|pkills|gold]\r\n".to_string()
+        );
+    }
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    // Snapshot the metric for each online player.
+    let mut rows: Vec<(String, i64, i32, i32, i64, i32)> = Vec::new();
+    for ph in &handles {
+        let c = ph.character.lock().await;
+        rows.push((ph.name.clone(), c.exp, c.level, c.pkills, c.gold, c.pdeaths));
+    }
+    rows.sort_by(|a, b| {
+        let cmp = match metric.as_str() {
+            "level" | "lvl"   => b.2.cmp(&a.2),
+            "pkills" | "pkill"=> b.3.cmp(&a.3),
+            "gold"            => b.4.cmp(&a.4),
+            _                 => b.1.cmp(&a.1),
+        };
+        cmp.then_with(|| a.0.cmp(&b.0))
+    });
+    let mut s = format!("\r\n=== Top players by {metric} ===\r\n");
+    for (i, (name, exp, level, pk, gold, pd)) in rows.iter().take(10).enumerate() {
+        s.push_str(&format!(
+            "  {:>2}. {name:<16} lvl {level:>2}  xp {exp:>10}  pk {pk:>3}/{pd:<3}  gold {gold:>8}\r\n",
+            i + 1,
+        ));
+    }
+    if rows.is_empty() {
+        s.push_str("  (no online players)\r\n");
+    }
+    CmdOutput::text(s)
+}
+
 /// `reload <player>` — re-read the named online player's PlayerRecord
 /// from disk and overwrite their in-memory stats (gold/exp/level/
 /// hp/mana/etc).  Equipment + inventory are NOT touched (still live
@@ -3874,9 +3955,12 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
                    else { format!("God:   {}\r\n", me.god) };
     let clan_line = if me.clan.is_empty() { String::new() }
                     else { format!("Clan:  {}\r\n", me.clan) };
+    let pvp_line = if me.pkills + me.pdeaths > 0 {
+        format!("PvP:   {} kills / {} deaths\r\n", me.pkills, me.pdeaths)
+    } else { String::new() };
     let align_band = crate::character::AlignmentBand::of(me.alignment);
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}{clan_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -4847,6 +4931,74 @@ async fn do_worth(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 /// joins the named clan (any string, no validation).  `clan -` leaves.
 async fn do_clan(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
     let arg = arg.trim();
+    // `clan invite <player>` — must be in a clan, target in same room.
+    if let Some(rest) = arg.strip_prefix("invite ").or_else(|| arg.strip_prefix("invite\t")) {
+        let target_name = rest.trim();
+        if target_name.is_empty() {
+            return CmdOutput::text("\r\nUsage: clan invite <player>\r\n".to_string());
+        }
+        if me.clan.is_empty() {
+            return CmdOutput::text(
+                "\r\nYou aren't in a clan; nothing to invite to.\r\n".to_string()
+            );
+        }
+        let target = {
+            let cl = chars.lock().await;
+            let h = cl.iter()
+                .find(|p| p.id != me.id
+                    && p.current_room == me.current_room
+                    && p.name.eq_ignore_ascii_case(target_name))
+                .cloned();
+            h
+        };
+        let Some(ph) = target else {
+            return CmdOutput::text(format!(
+                "\r\nNo player named '{target_name}' is here.\r\n"
+            ));
+        };
+        ph.character.lock().await.clan_invite_from = Some(me.id);
+        let _ = ph.send.send(format!(
+            "\r\n{} invites you to join clan {}.  Type `clan accept` to join.\r\n",
+            me.name, me.clan,
+        ));
+        return CmdOutput::text(format!(
+            "\r\nYou invite {} to join clan {}.\r\n", ph.name, me.clan,
+        ));
+    }
+    // `clan accept` — consume pending invite, inherit inviter's clan.
+    if arg.eq_ignore_ascii_case("accept") {
+        let Some(inviter_id) = me.clan_invite_from.take() else {
+            return CmdOutput::text("\r\nYou have no pending clan invite.\r\n".to_string());
+        };
+        let inviter = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == inviter_id).cloned();
+            h
+        };
+        let Some(iph) = inviter else {
+            return CmdOutput::text("\r\nThe inviter has gone offline.\r\n".to_string());
+        };
+        let new_clan = iph.character.lock().await.clan.clone();
+        if new_clan.is_empty() {
+            return CmdOutput::text(
+                "\r\nThe inviter has since left their clan.\r\n".to_string()
+            );
+        }
+        me.clan = new_clan.clone();
+        let _ = iph.send.send(format!(
+            "\r\n{} has joined clan {new_clan}.\r\n", me.name,
+        ));
+        return CmdOutput::text(format!(
+            "\r\nYou join clan {new_clan}.\r\n"
+        ));
+    }
+    // `clan decline` — clear pending invite.
+    if arg.eq_ignore_ascii_case("decline") {
+        if me.clan_invite_from.take().is_none() {
+            return CmdOutput::text("\r\nYou have no pending clan invite.\r\n".to_string());
+        }
+        return CmdOutput::text("\r\nClan invitation declined.\r\n".to_string());
+    }
     if arg.is_empty() {
         if me.clan.is_empty() {
             return CmdOutput::text(
@@ -4939,6 +5091,67 @@ async fn do_ctell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         }
     }
     CmdOutput::text(format!("\r\n@m[{}] You ctell: '{msg}'@n\r\n", me.clan))
+}
+
+/// `map` — 5x5 ASCII mini-map centered on the caller's current room.
+/// Walks the exits up to 2 hops in each cardinal direction; cells
+/// follow the standard "[#]" (room exists) / "[ ]" (unknown) /
+/// "[@]" (you are here) convention.  Up/Down indicated below.
+async fn do_map(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    use crate::world::Direction;
+    let w = world.lock().await;
+    if !w.rooms.contains_key(&me.current_room) {
+        return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+    }
+    fn step(w: &World, room: crate::world::RoomVnum, dir: Direction) -> Option<crate::world::RoomVnum> {
+        let r = w.rooms.get(&room)?;
+        let e = r.exits[dir as usize].as_ref()?;
+        if e.to_room == crate::world::NOWHERE { return None; }
+        if e.exit_info & crate::world::EX_CLOSED != 0 { return None; }
+        if w.rooms.contains_key(&e.to_room) { Some(e.to_room) } else { None }
+    }
+    // Build a 5x5 grid (-2..=2, -2..=2).  Walk N|S then E|W from caller.
+    let mut grid = [[" . "; 5]; 5];
+    for dy in -2..=2i32 {
+        for dx in -2..=2i32 {
+            let mut room = Some(me.current_room);
+            let (vdir, vsteps) = if dy > 0 { (Direction::North, dy) }
+                                 else if dy < 0 { (Direction::South, -dy) }
+                                 else { (Direction::North, 0) };
+            for _ in 0..vsteps {
+                room = room.and_then(|r| step(&w, r, vdir));
+            }
+            let (hdir, hsteps) = if dx > 0 { (Direction::East, dx) }
+                                 else if dx < 0 { (Direction::West, -dx) }
+                                 else { (Direction::East, 0) };
+            for _ in 0..hsteps {
+                room = room.and_then(|r| step(&w, r, hdir));
+            }
+            let y = (2 - dy) as usize;
+            let x = (dx + 2) as usize;
+            grid[y][x] = if dx == 0 && dy == 0 { "[@]" }
+                         else if room.is_some() { "[#]" } else { " . " };
+        }
+    }
+    let up = step(&w, me.current_room, Direction::Up).is_some();
+    let dn = step(&w, me.current_room, Direction::Down).is_some();
+    let room_name = w.rooms.get(&me.current_room).map(|r| r.name.clone()).unwrap_or_default();
+    drop(w);
+    let mut s = String::from("\r\n");
+    for row in grid.iter() {
+        for cell in row.iter() {
+            s.push_str(cell);
+        }
+        s.push_str("\r\n");
+    }
+    s.push_str(&format!("\r\nHere: {room_name}\r\n"));
+    let mut updn = Vec::new();
+    if up { updn.push("up"); }
+    if dn { updn.push("down"); }
+    if !updn.is_empty() {
+        s.push_str(&format!("Vertical: {}\r\n", updn.join(", ")));
+    }
+    CmdOutput::text(s)
 }
 
 /// `prefs` — single-screen overview of every persistent toggle.
@@ -10023,6 +10236,8 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.autotitle_off = !me.autotitle;
             r.alignment    = me.alignment;
             r.clan         = me.clan.clone();
+            r.pkills       = me.pkills;
+            r.pdeaths      = me.pdeaths;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
