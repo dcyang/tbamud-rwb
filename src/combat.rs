@@ -299,6 +299,9 @@ async fn regen_tick(chars: &SharedChars) {
         if c.mana < c.max_mana {
             c.mana = (c.mana + 1 + c.level / 4).min(c.max_mana);
         }
+        if c.movement < c.max_movement {
+            c.movement = (c.movement + 1 + c.level / 3).min(c.max_movement);
+        }
     }
 }
 

@@ -117,6 +117,8 @@ pub struct PlayerRecord {
     pub max_hp:        i32,
     pub mana:          i32,
     pub max_mana:      i32,
+    pub movement:      i32,
+    pub max_movement:  i32,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -325,6 +327,11 @@ impl PlayerDb {
                     if let Some(p) = parts.next() { rec.mana     = p.trim().parse().unwrap_or(0); }
                     if let Some(p) = parts.next() { rec.max_mana = p.trim().parse().unwrap_or(0); }
                 }
+                "Move" => {
+                    let mut parts = val.split('/');
+                    if let Some(p) = parts.next() { rec.movement     = p.trim().parse().unwrap_or(0); }
+                    if let Some(p) = parts.next() { rec.max_movement = p.trim().parse().unwrap_or(0); }
+                }
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -421,6 +428,9 @@ impl PlayerDb {
         }
         if rec.max_mana > 0 {
             writeln!(f, "Mana: {}/{}", rec.mana, rec.max_mana)?;
+        }
+        if rec.max_movement > 0 {
+            writeln!(f, "Move: {}/{}", rec.movement, rec.max_movement)?;
         }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
@@ -680,6 +690,32 @@ pub fn load_xnames(data_dir: &str) -> Vec<String> {
             .filter(|l| !l.is_empty())
             .collect())
         .unwrap_or_default()
+}
+
+/// Load `lib/etc/badsites` (one host substring per line).  Missing
+/// file → empty list.
+pub fn load_badsites(data_dir: &str) -> Vec<String> {
+    let path = format!("{}/etc/badsites", data_dir);
+    fs::read_to_string(path)
+        .map(|s| s.lines()
+            .map(|l| l.trim().to_lowercase())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect())
+        .unwrap_or_default()
+}
+
+/// Save the badsites list, one entry per line.
+pub fn save_badsites(data_dir: &str, entries: &[String]) -> Result<()> {
+    let dir = format!("{}/etc", data_dir);
+    std::fs::create_dir_all(&dir).ok();
+    let path = format!("{}/etc/badsites", data_dir);
+    let mut s = String::new();
+    for e in entries {
+        s.push_str(e);
+        s.push('\n');
+    }
+    fs::write(&path, s)
+        .with_context(|| format!("writing {path}"))
 }
 
 // ---------------------------------------------------------------------------

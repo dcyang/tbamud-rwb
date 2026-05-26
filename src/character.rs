@@ -60,6 +60,7 @@ pub enum Skill {
     SenseLife,
     Dodge,
     Parry,
+    Rescue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +114,7 @@ impl Skill {
             "senselife" | "sense-life"        => Some(Skill::SenseLife),
             "dodge"                           => Some(Skill::Dodge),
             "parry"                           => Some(Skill::Parry),
+            "rescue"                          => Some(Skill::Rescue),
             _ => None,
         }
     }
@@ -155,6 +157,7 @@ impl Skill {
             Skill::SenseLife    => "sense life",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
+            Skill::Rescue       => "rescue",
         }
     }
 
@@ -162,7 +165,7 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry => SkillKind::Physical,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
@@ -182,7 +185,7 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry => 0,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
@@ -253,6 +256,7 @@ impl Skill {
             Skill::SenseLife    => &[Class::Cleric, Class::MagicUser],
             Skill::Dodge        => &[Class::Warrior, Class::Thief],
             Skill::Parry        => &[Class::Warrior],
+            Skill::Rescue       => &[Class::Warrior, Class::Cleric],
         }
     }
 
@@ -298,6 +302,7 @@ impl Skill {
             Skill::SenseLife    => "sense-life",
             Skill::Dodge        => "dodge",
             Skill::Parry        => "parry",
+            Skill::Rescue       => "rescue",
         }
     }
 
@@ -321,7 +326,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
     Skill::CharmPerson, Skill::LocateObject, Skill::Refresh, Skill::Summon,
     Skill::SenseLife,
-    Skill::Dodge, Skill::Parry,
+    Skill::Dodge, Skill::Parry, Skill::Rescue,
 ];
 
 // ---------------------------------------------------------------------------
@@ -383,6 +388,8 @@ pub struct Character {
     pub max_hp:       i32,
     pub mana:         i32,
     pub max_mana:     i32,
+    pub movement:     i32,
+    pub max_movement: i32,
     /// Unspent practice points. Gained on level-up, spent in `practice`.
     pub practices:    i32,
     /// Ability scores — rolled at creation (3d6 each), then persisted.
@@ -445,6 +452,9 @@ pub struct Character {
     /// Personal toggle for the auction channel (same semantics as
     /// gossip_off).  Not persisted.
     pub auction_off:  bool,
+    /// Personal toggle for the wiznet (immortal-only) channel.  Not
+    /// persisted.  Only meaningful when `level >= LVL_IMMORT`.
+    pub wiznet_off:   bool,
     /// When true, suppress the multi-line room description on every
     /// look/move and only show the room name + exits + contents.
     /// Transient (not persisted).
@@ -483,6 +493,9 @@ pub struct Character {
     /// Frozen: dispatch_command refuses every verb except quit/look/score.
     /// Set by `freeze` immortal command.  Persisted.
     pub frozen:       bool,
+    /// AFK status. `None` = present. `Some(msg)` = away with the given
+    /// reason; tells to this character auto-reply with `msg`. Transient.
+    pub afk_msg:      Option<String>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

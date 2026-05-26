@@ -59,6 +59,10 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Load optional xnames ban list ---------------------------------------
     let xnames = Arc::new(load_xnames(&config.dir));
 
+    // --- Load optional badsites (host ban list) ------------------------------
+    let badsites = Arc::new(Mutex::new(crate::players::load_badsites(&config.dir)));
+    let _ = crate::interpreter::BAD_SITES.set(Arc::clone(&badsites));
+
     // --- Load world (zones + rooms + obj/mob protos + run resets) -----------
     let world: Arc<Mutex<World>> = Arc::new(Mutex::new(
         db::load_world(&config.dir).context("Failed to load world")?,

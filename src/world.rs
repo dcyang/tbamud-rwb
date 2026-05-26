@@ -625,6 +625,40 @@ impl World {
     /// Materialize a fresh instance of the given object prototype, parked
     /// in limbo (`NOWHERE`).  Returns the instance id, or None if the vnum
     /// has no prototype.  Used by login to restore persisted inventories.
+    /// Spawn a mob instance from its prototype into the given room.  HP
+    /// is rolled from the proto's dice.  Returns the new instance id, or
+    /// None when the prototype is unknown or the room doesn't exist.
+    pub fn spawn_mob(&mut self, vnum: MobVnum, room: RoomVnum) -> Option<u32> {
+        let (hp_dice, hp_size, hp_add) = {
+            let p = self.mob_protos.get(&vnum)?;
+            (p.hp_dice, p.hp_size, p.hp_add)
+        };
+        if !self.rooms.contains_key(&room) { return None; }
+        // Roll HP using the same dice helper as db::reset_zone.
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut hp: i32 = hp_add;
+        if hp_dice > 0 && hp_size > 0 {
+            for _ in 0..hp_dice {
+                hp += rng.gen_range(1..=hp_size);
+            }
+        }
+        let hp = hp.max(1);
+        let id = self.mob_instances.last().map(|m| m.id + 1).unwrap_or(1);
+        self.rooms.get_mut(&room)?.mobs.push(id);
+        self.mob_instances.push(MobInstance {
+            id, vnum, in_room: room,
+            inventory: Vec::new(),
+            hp, max_hp: hp,
+            fighting: None,
+            remembers: Vec::new(),
+            triggers: Vec::new(),
+            affects: Vec::new(),
+            charmer: None,
+        });
+        Some(id)
+    }
+
     pub fn spawn_obj(&mut self, vnum: ObjVnum) -> Option<u32> {
         let proto_timer = self.obj_protos.get(&vnum)?.timer;
         let id = self.obj_instances.last().map(|o| o.id + 1).unwrap_or(1);

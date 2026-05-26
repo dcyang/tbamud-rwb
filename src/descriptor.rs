@@ -80,6 +80,20 @@ pub async fn handle_connection(
     let host = peer.ip().to_string();
     info!(id, host = %host, "Connection accepted");
 
+    // --- Site ban check ------------------------------------------------------
+    if let Some(bs) = crate::interpreter::BAD_SITES.get() {
+        let banned = {
+            let g = bs.lock().await;
+            let lowered = host.to_lowercase();
+            g.iter().any(|s| lowered.contains(s))
+        };
+        if banned {
+            let _ = stream.write_all(b"Sorry, this site is banned.\r\n").await;
+            info!(id, host = %host, "Refused banned site");
+            return Ok(());
+        }
+    }
+
     // --- Telnet negotiation handshake ----------------------------------------
     // Send WILL SUPPRESS-GA, DO NAWS, DO TTYPE.
     // Mirrors init_descriptor() → ProtocolNegotiate() in comm.c.
@@ -211,6 +225,11 @@ pub async fn handle_connection(
                 let default_mana = Character::init_mana_for_class(cls, casting_stat, session.level.max(1));
                 let max_mana   = p_ref.map(|p| p.max_mana).filter(|m| *m > 0).unwrap_or(default_mana);
                 let mana       = p_ref.map(|p| p.mana).filter(|m| *m > 0).unwrap_or(max_mana);
+                // Movement points: flat 100 default for mortals.  Immortals
+                // get a big pool so they never feel travel-limited.
+                let default_max_mv = if session.level >= 34 { 9999 } else { 100 };
+                let max_movement = p_ref.map(|p| p.max_movement).filter(|v| *v > 0).unwrap_or(default_max_mv);
+                let movement     = p_ref.map(|p| p.movement).filter(|v| *v > 0).unwrap_or(max_movement);
                 let practices  = p_ref.map(|p| p.practices).unwrap_or(0);
                 let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
                 let gold      = p_ref.map(|p| p.gold).unwrap_or(0);
@@ -232,6 +251,8 @@ pub async fn handle_connection(
                     max_hp,
                     mana,
                     max_mana,
+                    movement,
+                    max_movement,
                     practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
@@ -268,6 +289,7 @@ pub async fn handle_connection(
                     grouped:          false,
                     gossip_off:       false,
                     auction_off:      false,
+                    wiznet_off:       false,
                     brief:            false,
                     compact:          false,
                     last_tell_from:   None,
@@ -280,6 +302,7 @@ pub async fn handle_connection(
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
                     muted:            p_ref.map(|p| p.muted).unwrap_or(false),
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
+                    afk_msg:          None,
                     last_activity:    std::time::Instant::now(),
                 };
 
@@ -385,6 +408,13 @@ async fn run_game_session(
             &format!("{} has entered the world.\r\n", my_name),
         );
     }
+
+    // Wiznet broadcast (drops the cl lock first — broadcast_wiznet
+    // re-acquires chars internally).
+    crate::interpreter::broadcast_wiznet(
+        &format!("{my_name} has connected."),
+        &chars,
+    ).await;
 
     // Send the welcome + initial room view via the channel so it goes through
     // the same writer task as everything else.
@@ -498,6 +528,8 @@ async fn run_game_session(
             rec.max_hp    = me.max_hp;
             rec.mana      = me.mana;
             rec.max_mana  = me.max_mana;
+            rec.movement     = me.movement;
+            rec.max_movement = me.max_movement;
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;
@@ -601,6 +633,14 @@ async fn run_game_session(
             &format!("{} {}.\r\n", my_name, verb),
         );
     }
+
+    crate::interpreter::broadcast_wiznet(
+        &format!(
+            "{my_name} has {}.",
+            if quit { "quit" } else { "disconnected" },
+        ),
+        &chars,
+    ).await;
 
     drop(tx);
     let _ = writer.await;

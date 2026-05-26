@@ -53,6 +53,10 @@ pub static FORCE_CMD_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<ForceCmdMsg
 pub static WIZLOCK_LEVEL: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
 
+/// Shared mutable site-ban list, populated from `lib/etc/badsites` at
+/// boot and mutated at runtime by the `ban`/`unban` commands.
+pub static BAD_SITES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
+
 // ---------------------------------------------------------------------------
 // Command table
 // ---------------------------------------------------------------------------
@@ -67,7 +71,7 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell",
-    "kick", "bash", "backstab",
+    "kick", "bash", "backstab", "rescue",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -81,10 +85,13 @@ const COMMANDS: &[&str] = &[
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
-    "finger", "assist", "worship",
+    "finger", "assist", "worship", "afk",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "mute", "freeze",
+    "ban", "unban", "bans",
+    "wiznet",
+    "load", "restore", "echo", "gecho",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -210,6 +217,7 @@ pub async fn dispatch_command(
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -279,6 +287,7 @@ pub async fn dispatch_command(
         Some("finger")    => do_finger(rest, chars, players).await,
         Some("assist")    => do_assist(rest, me, world, chars).await,
         Some("worship")   => do_worship(rest, me),
+        Some("afk")       => do_afk(rest, me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -296,6 +305,14 @@ pub async fn dispatch_command(
         Some("vis")       => do_vis(me),
         Some("mute")      => do_mute(rest, me, chars).await,
         Some("freeze")    => do_freeze(rest, me, chars).await,
+        Some("ban")       => do_ban(rest, me, players).await,
+        Some("unban")     => do_unban(rest, me, players).await,
+        Some("bans")      => do_bans(me).await,
+        Some("wiznet")    => do_wiznet(rest, me, chars).await,
+        Some("load")      => do_load(rest, me, world, chars).await,
+        Some("restore")   => do_restore(rest, me, chars).await,
+        Some("echo")      => do_echo(rest, me, chars).await,
+        Some("gecho")     => do_gecho(rest, me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -750,12 +767,18 @@ async fn do_tell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
         return CmdOutput::text("\r\nNo one by that name is online.\r\n");
     };
     let _ = p.send.send(format!("{} tells you, '{msg}'\r\n", me.name));
-    // Record who tell'd them so `reply` works.
-    {
+    // Record who tell'd them so `reply` works; also grab the AFK msg
+    // for an auto-reply (if any).
+    let afk_reply = {
         let mut tc = p.character.lock().await;
         tc.last_tell_from = Some(me.name.clone());
+        tc.afk_msg.clone()
+    };
+    let mut out = format!("\r\nYou tell {}, '{msg}'\r\n", p.name);
+    if let Some(reason) = afk_reply {
+        out.push_str(&format!("[AFK] {} is away: {reason}\r\n", p.name));
     }
-    CmdOutput::text(format!("\r\nYou tell {}, '{msg}'\r\n", p.name))
+    CmdOutput::text(out)
 }
 
 /// `reply <msg>` — send a tell back to the last person who tell'd us.
@@ -1114,6 +1137,28 @@ async fn do_order(
 /// a non-player target.  Refuses if the assister is already in combat.
 /// `worship <name>` — set the deity displayed on score.  `worship -`
 /// or empty clears.  60-char cap, control-stripped.
+/// `afk [msg]` — toggle away-from-keyboard state with an optional
+/// reason.  Empty arg toggles; `afk -` clears.  When AFK, others
+/// tell'ing you get a one-shot auto-reply containing the message.
+fn do_afk(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg == "-" {
+        me.afk_msg = None;
+        return CmdOutput::text("\r\nYou are no longer AFK.\r\n".to_string());
+    }
+    if arg.is_empty() {
+        if me.afk_msg.is_some() {
+            me.afk_msg = None;
+            return CmdOutput::text("\r\nYou are no longer AFK.\r\n".to_string());
+        }
+        me.afk_msg = Some("AFK".to_string());
+        return CmdOutput::text("\r\nYou are now AFK.\r\n".to_string());
+    }
+    let sanitized: String = arg.chars().filter(|c| !c.is_control()).take(80).collect();
+    me.afk_msg = Some(sanitized.clone());
+    CmdOutput::text(format!("\r\nYou are now AFK: {sanitized}\r\n"))
+}
+
 fn do_worship(arg: &str, me: &mut Character) -> CmdOutput {
     let arg = arg.trim();
     if arg.is_empty() || arg == "-" {
@@ -1516,6 +1561,8 @@ pub fn render_prompt(me: &Character) -> String {
             'H' => out.push_str(&me.max_hp.to_string()),
             'm' => out.push_str(&me.mana.to_string()),
             'M' => out.push_str(&me.max_mana.to_string()),
+            'v' => out.push_str(&me.movement.to_string()),
+            'V' => out.push_str(&me.max_movement.to_string()),
             'g' => out.push_str(&me.gold.to_string()),
             'x' => out.push_str(&me.exp.to_string()),
             '%' => out.push('%'),
@@ -2465,6 +2512,289 @@ async fn do_olist(
     CmdOutput::text(s)
 }
 
+/// `load mob <vnum>` / `load obj <vnum>` — immortal builder command
+/// to spawn a mob into the caller's current room (mob path) or to
+/// spawn an object into the caller's inventory (obj path).
+async fn do_load(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let mut parts = arg.split_whitespace();
+    let kind = parts.next().unwrap_or("");
+    let vnum_s = parts.next().unwrap_or("");
+    let Ok(vnum) = vnum_s.parse::<i32>() else {
+        return CmdOutput::text(
+            "\r\nUsage: load <mob|obj> <vnum>\r\n".to_string()
+        );
+    };
+    match kind {
+        "mob" | "m" => {
+            let (id_opt, short) = {
+                let mut w = world.lock().await;
+                let id = w.spawn_mob(vnum, me.current_room);
+                let s = w.mob_protos.get(&vnum)
+                    .map(|p| p.short_descr.clone())
+                    .unwrap_or_else(|| "something".to_string());
+                (id, s)
+            };
+            if id_opt.is_none() {
+                return CmdOutput::text(format!(
+                    "\r\nNo mob prototype with vnum {vnum}.\r\n"
+                ));
+            }
+            chars.lock().await.broadcast_room(
+                me.current_room, Some(me.id),
+                &format!("{} appears in a puff of smoke.\r\n", short),
+            );
+            CmdOutput::text(format!("\r\nYou create {short}.\r\n"))
+        }
+        "obj" | "o" => {
+            let (id_opt, short) = {
+                let mut w = world.lock().await;
+                let id = w.spawn_obj(vnum);
+                let s = w.obj_protos.get(&vnum)
+                    .map(|p| p.short_description.clone())
+                    .unwrap_or_else(|| "something".to_string());
+                (id, s)
+            };
+            let Some(_iid) = id_opt else {
+                return CmdOutput::text(format!(
+                    "\r\nNo object prototype with vnum {vnum}.\r\n"
+                ));
+            };
+            // We can't reach the caller's Character.inventory from here
+            // (we only have &Character).  Drop the obj at the caller's
+            // feet — they can `get` it.  Set in_room.
+            {
+                let mut w = world.lock().await;
+                if let Some(o) = w.obj_instances.last_mut() {
+                    o.in_room = me.current_room;
+                }
+            }
+            chars.lock().await.broadcast_room(
+                me.current_room, Some(me.id),
+                &format!("{} appears in a puff of smoke.\r\n", short),
+            );
+            CmdOutput::text(format!(
+                "\r\nYou create {short} (dropped at your feet).\r\n"
+            ))
+        }
+        _ => CmdOutput::text(
+            "\r\nUsage: load <mob|obj> <vnum>\r\n".to_string()
+        ),
+    }
+}
+
+/// `restore <player>` — heal target to full HP and mana.
+async fn do_restore(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let name = arg.trim();
+    if name.is_empty() {
+        return CmdOutput::text(
+            "\r\nUsage: restore <player>\r\n".to_string()
+        );
+    }
+    let target = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|h| h.name.eq_ignore_ascii_case(name)).cloned();
+        h
+    };
+    let Some(ph) = target else {
+        return CmdOutput::text(format!(
+            "\r\nNo player named '{name}' is online.\r\n"
+        ));
+    };
+    {
+        let mut c = ph.character.lock().await;
+        c.hp = c.max_hp;
+        c.mana = c.max_mana;
+    }
+    let _ = ph.send.send(format!(
+        "\r\n{} has restored you.\r\n", me.name
+    ));
+    CmdOutput::text(format!(
+        "\r\nYou restore {} to full health.\r\n", ph.name
+    ))
+}
+
+/// `echo <text>` — broadcast a plain message to every player in the
+/// caller's current room (including the caller).  No name prefix.
+async fn do_echo(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nUsage: echo <text>\r\n".to_string());
+    }
+    chars.lock().await.broadcast_room(
+        me.current_room, None,
+        &format!("{msg}\r\n"),
+    );
+    CmdOutput::text(String::new())
+}
+
+/// `gecho <text>` — broadcast to every online player on the MUD.
+async fn do_gecho(
+    arg: &str,
+    me: &Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nUsage: gecho <text>\r\n".to_string());
+    }
+    let line = format!("\r\n{msg}\r\n");
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        let _ = ph.send.send(line.clone());
+    }
+    CmdOutput::text(String::new())
+}
+
+/// Broadcast a wiznet line to every online immortal whose `wiznet_off`
+/// is false.  `msg` should be the bare body — this helper wraps it in
+/// the magenta `[wiznet] ...` envelope and CRLF.  Used by `do_wiznet`
+/// and the login/logout hooks.
+pub async fn broadcast_wiznet(msg: &str, chars: &SharedChars) {
+    let line = format!("\r\n@m[wiznet] {msg}@n\r\n");
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        let (lvl, off) = {
+            let c = ph.character.lock().await;
+            (c.level, c.wiznet_off)
+        };
+        if lvl < LVL_IMMORT || off { continue; }
+        let _ = ph.send.send(line.clone());
+    }
+}
+
+/// `wiznet [msg]` — immortal-only broadcast channel.  Empty arg
+/// toggles the sender's personal `wiznet_off` state.  No SOUNDPROOF
+/// gate (this is a privileged channel that ignores room flags).
+async fn do_wiznet(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.wiznet_off = !me.wiznet_off;
+        return CmdOutput::text(format!(
+            "\r\nWiznet channel: {}.\r\n",
+            if me.wiznet_off { "off" } else { "on" },
+        ));
+    }
+    if me.wiznet_off {
+        return CmdOutput::text(
+            "\r\nYou have the wiznet channel turned off.\r\n".to_string()
+        );
+    }
+    let body = format!("{}: {msg}", me.name);
+    broadcast_wiznet(&body, chars).await;
+    CmdOutput::text(format!("\r\n@m[wiznet] You: {msg}@n\r\n"))
+}
+
+async fn do_ban(
+    arg: &str,
+    me: &Character,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let site = arg.trim().to_lowercase();
+    if site.is_empty() {
+        return CmdOutput::text("\r\nUsage: ban <site>\r\n".to_string());
+    }
+    let Some(bs) = BAD_SITES.get() else {
+        return CmdOutput::text("\r\nBan list unavailable.\r\n".to_string());
+    };
+    let snapshot = {
+        let mut g = bs.lock().await;
+        if g.iter().any(|s| s == &site) {
+            return CmdOutput::text(format!(
+                "\r\n'{site}' is already banned.\r\n"
+            ));
+        }
+        g.push(site.clone());
+        g.clone()
+    };
+    let data_dir = { players.lock().await.data_dir().to_string() };
+    if let Err(e) = crate::players::save_badsites(&data_dir, &snapshot) {
+        return CmdOutput::text(format!(
+            "\r\nBanned '{site}' in memory but failed to persist: {e}\r\n"
+        ));
+    }
+    tracing::info!(banner = %me.name, site = %site, "Site banned");
+    CmdOutput::text(format!("\r\n'{site}' is now banned.\r\n"))
+}
+
+async fn do_unban(
+    arg: &str,
+    me: &Character,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let site = arg.trim().to_lowercase();
+    if site.is_empty() {
+        return CmdOutput::text("\r\nUsage: unban <site>\r\n".to_string());
+    }
+    let Some(bs) = BAD_SITES.get() else {
+        return CmdOutput::text("\r\nBan list unavailable.\r\n".to_string());
+    };
+    let snapshot_opt = {
+        let mut g = bs.lock().await;
+        let before = g.len();
+        g.retain(|s| s != &site);
+        if g.len() == before { None } else { Some(g.clone()) }
+    };
+    let Some(snapshot) = snapshot_opt else {
+        return CmdOutput::text(format!(
+            "\r\n'{site}' is not in the ban list.\r\n"
+        ));
+    };
+    let data_dir = { players.lock().await.data_dir().to_string() };
+    if let Err(e) = crate::players::save_badsites(&data_dir, &snapshot) {
+        return CmdOutput::text(format!(
+            "\r\nUnbanned '{site}' in memory but failed to persist: {e}\r\n"
+        ));
+    }
+    tracing::info!(banner = %me.name, site = %site, "Site unbanned");
+    CmdOutput::text(format!("\r\n'{site}' has been unbanned.\r\n"))
+}
+
+async fn do_bans(me: &Character) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Some(bs) = BAD_SITES.get() else {
+        return CmdOutput::text("\r\nBan list unavailable.\r\n".to_string());
+    };
+    let entries: Vec<String> = { bs.lock().await.clone() };
+    if entries.is_empty() {
+        return CmdOutput::text("\r\nNo sites are banned.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nBanned sites:\r\n");
+    for (i, e) in entries.iter().enumerate() {
+        s.push_str(&format!("  {:>3}. {}\r\n", i + 1, e));
+    }
+    CmdOutput::text(s)
+}
+
 fn do_wizlock(arg: &str, me: &Character) -> CmdOutput {
     use std::sync::atomic::Ordering;
     if me.level < LVL_IMMORT { return immort_huh(); }
@@ -2757,14 +3087,14 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
 
     // Snapshot titles + classes outside the registry lock to avoid
     // serializing on contended Character mutexes.
-    let extras: Vec<(u32, String, crate::players::Class, i32)> = {
+    let extras: Vec<(u32, String, crate::players::Class, i32, bool)> = {
         let cl = chars.lock().await;
         let handles: Vec<_> = cl.iter().cloned().collect();
         drop(cl);
         let mut out = Vec::new();
         for ph in handles {
             let c = ph.character.lock().await;
-            out.push((ph.id, c.title.clone(), c.class, c.invis_level));
+            out.push((ph.id, c.title.clone(), c.class, c.invis_level, c.afk_msg.is_some()));
         }
         out
     };
@@ -2773,9 +3103,9 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     let mut s = String::from("\r\nPlayers online:\r\n");
     let mut count = 0;
     for p in cl.iter() {
-        let (_, title, class, invis_lvl) = extras.iter().find(|(id, _, _, _)| *id == p.id)
+        let (_, title, class, invis_lvl, afk) = extras.iter().find(|(id, _, _, _, _)| *id == p.id)
             .cloned()
-            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined, 0));
+            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined, 0, false));
         // Hide immortal-invis players from anyone below their threshold.
         if p.id != me.id && invis_lvl > me.level { continue; }
         if let Some(sub) = &name_substr {
@@ -2788,9 +3118,10 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
             if p.level < lo || p.level > hi { continue; }
         }
         let marker = if p.id == me.id { " (you)" } else { "" };
+        let afk_tag = if afk { " [AFK]" } else { "" };
         let title_str = if title.is_empty() { String::new() } else { format!(" {title}") };
-        s.push_str(&format!("  [{:>2} {:>3}] {}{}{}\r\n",
-            p.level, class.as_str(), p.name, title_str, marker));
+        s.push_str(&format!("  [{:>2} {:>3}] {}{}{}{}\r\n",
+            p.level, class.as_str(), p.name, title_str, afk_tag, marker));
         count += 1;
     }
     s.push_str(&format!("\r\n{count} player(s) shown.\r\n"));
@@ -2820,9 +3151,10 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     let god_line = if me.god.is_empty() { String::new() }
                    else { format!("God:   {}\r\n", me.god) };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{god_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{god_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
+        me.movement, me.max_movement,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
     );
@@ -3553,6 +3885,107 @@ async fn do_kill(
 // ---------------------------------------------------------------------------
 
 use crate::character::Skill;
+
+/// `rescue <player>` — pull a mob's aggression off an ally and onto
+/// yourself.  Requires the ally to be in the same room and engaged
+/// with a mob; on success: I become the mob's new target, the ally
+/// stops fighting, and I start fighting the mob.  Chance scales with
+/// learned%; on a roll fail nothing happens (mana stays free since
+/// physical skill).
+async fn do_rescue(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    if !Skill::Rescue.is_class_allowed(me.class) {
+        return CmdOutput::text(
+            "\r\nYou do not know how to rescue anyone.\r\n".to_string()
+        );
+    }
+    let learned = *me.skills.get(&Skill::Rescue).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou have never practised rescue.\r\n".to_string()
+        );
+    }
+    let name = arg.trim();
+    if name.is_empty() {
+        return CmdOutput::text("\r\nWhom do you want to rescue?\r\n".to_string());
+    }
+    // Find the target ally — must be a different player in the same
+    // room who is currently fighting a mob.
+    let (ally, mob_target) = {
+        let cl = chars.lock().await;
+        let ph = cl.iter()
+            .find(|p| p.id != me.id
+                && p.current_room == me.current_room
+                && p.name.eq_ignore_ascii_case(name))
+            .cloned();
+        let Some(ph) = ph else {
+            return CmdOutput::text(
+                "\r\nThey aren't here.\r\n".to_string()
+            );
+        };
+        let fighting = ph.character.lock().await.fighting;
+        (ph, fighting)
+    };
+    let Some(mob_t) = mob_target.filter(|t| !t.is_player) else {
+        return CmdOutput::text(format!(
+            "\r\n{} doesn't need rescuing.\r\n", ally.name
+        ));
+    };
+    // Skill roll.  Chance = (40 + learned/2).min(90).
+    let chance = (40 + learned / 2).min(90);
+    let roll = rand::thread_rng().gen_range(1..=100);
+    if roll > chance {
+        let _ = ally.send.send(format!(
+            "\r\n{} tried to rescue you, but failed.\r\n", me.name
+        ));
+        return CmdOutput::text(format!(
+            "\r\nYou fail to rescue {}.\r\n", ally.name
+        ));
+    }
+    // Swap targeting under one world lock.
+    {
+        let mut w = world.lock().await;
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_t.id) {
+            m.fighting = Some(crate::character::Target {
+                id: me.id, is_player: true,
+            });
+        } else {
+            return CmdOutput::text(
+                "\r\nThe enemy is no longer here.\r\n".to_string()
+            );
+        }
+    }
+    // Ally stops fighting; I take over.
+    ally.character.lock().await.fighting = None;
+    me.fighting = Some(mob_t);
+    // Skill bump on success.
+    let bump = learn_attempt(me, Skill::Rescue, 5);
+    let _ = ally.send.send(format!(
+        "\r\n{} comes to your rescue!\r\n", me.name
+    ));
+    // Room broadcast to others (excluding rescuer and ally).
+    {
+        let cl = chars.lock().await;
+        let line = format!("{} rescues {}!\r\n", me.name, ally.name);
+        for ph in cl.iter() {
+            if ph.id == me.id || ph.id == ally.id { continue; }
+            if ph.current_room != me.current_room { continue; }
+            let _ = ph.send.send(line.clone());
+        }
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou successfully rescue {}!\r\n", ally.name
+    ));
+    if let Some(b) = bump {
+        out.text.push_str(&b);
+    }
+    out
+}
 
 async fn do_skill(
     arg: &str,
@@ -7048,6 +7481,8 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.max_hp    = me.max_hp;
             r.mana      = me.mana;
             r.max_mana  = me.max_mana;
+            r.movement     = me.movement;
+            r.max_movement = me.max_movement;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
@@ -7212,6 +7647,16 @@ async fn do_move(
     drop(w);
     if closed {
         return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
+    }
+    // Movement-point gate.  Mortals pay 1 movement per step; immortals
+    // are exempt.  Refuse with a "too exhausted" message at 0.
+    if me.level < LVL_IMMORT {
+        if me.movement <= 0 {
+            return CmdOutput::text(
+                "\r\nYou are too exhausted.\r\n".to_string()
+            );
+        }
+        me.movement -= 1;
     }
     // ROOM_GODROOM: mortals can't enter.
     if (target_flags & crate::world::ROOM_GODROOM) != 0 && me.level < LVL_IMMORT {
