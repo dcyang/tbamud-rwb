@@ -78,6 +78,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn idle-kick tick ---------------------------------------------
     db::spawn_idle_kick_tick(Arc::clone(&world), Arc::clone(&chars));
 
+    // --- Spawn game-clock tick --------------------------------------------
+    db::spawn_time_tick();
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

@@ -406,6 +406,13 @@ pub struct Character {
     /// Personal toggle: if true, this character will neither send nor
     /// receive `gossip` channel traffic.  Not persisted across sessions.
     pub gossip_off:   bool,
+    /// When true, suppress the multi-line room description on every
+    /// look/move and only show the room name + exits + contents.
+    /// Transient (not persisted).
+    pub brief:        bool,
+    /// When true, the dispatcher emits a single-line prompt ("> ")
+    /// rather than the default "\r\n> " between responses.  Transient.
+    pub compact:      bool,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.

@@ -651,6 +651,70 @@ pub fn spawn_decay_tick(world: std::sync::Arc<tokio::sync::Mutex<World>>) {
     });
 }
 
+/// Global game-clock state.  35 days/month, 17 months/year matches the
+/// stock CircleMUD calendar.  Hours advance every TICK_GAME_HOUR_SECS
+/// of real time (one game hour ≈ 75 real seconds).
+pub static GAME_HOUR:  std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub static GAME_DAY:   std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub static GAME_MONTH: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+pub static GAME_YEAR:  std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+pub const HOURS_PER_DAY:    i32 = 24;
+pub const DAYS_PER_MONTH:   i32 = 35;
+pub const MONTHS_PER_YEAR:  i32 = 17;
+
+/// Names of the 17 game months.  Mirrors `month_name[]` in constants.c
+/// (only the first letters of each name are stock — we use full strings).
+pub const MONTH_NAMES: [&str; 17] = [
+    "Month of Winter",       "Month of the Winter Wolf",
+    "Month of the Frost Giant", "Month of the Old Forces",
+    "Month of the Grand Struggle", "Month of the Spring",
+    "Month of Nature",       "Month of Futility",
+    "Month of the Dragon",   "Month of the Sun",
+    "Month of the Heat",     "Month of the Battle",
+    "Month of the Dark Shades", "Month of the Shadows",
+    "Month of the Long Shadows", "Month of the Ancient Darkness",
+    "Month of the Great Evil",
+];
+
+/// Periodic tick that advances the game clock by one hour every
+/// `HOUR_REAL_SECS` real seconds.  Wraps day/month/year overflow.
+pub fn spawn_time_tick() {
+    const HOUR_REAL_SECS: u64 = 75;
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(HOUR_REAL_SECS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;        // skip immediate fire
+        loop {
+            interval.tick().await;
+            let h = GAME_HOUR.load(Ordering::Relaxed) + 1;
+            if h >= HOURS_PER_DAY {
+                GAME_HOUR.store(0, Ordering::Relaxed);
+                let d = GAME_DAY.load(Ordering::Relaxed) + 1;
+                if d >= DAYS_PER_MONTH {
+                    GAME_DAY.store(0, Ordering::Relaxed);
+                    let m = GAME_MONTH.load(Ordering::Relaxed) + 1;
+                    if m >= MONTHS_PER_YEAR {
+                        GAME_MONTH.store(0, Ordering::Relaxed);
+                        GAME_YEAR.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        GAME_MONTH.store(m, Ordering::Relaxed);
+                    }
+                } else {
+                    GAME_DAY.store(d, Ordering::Relaxed);
+                }
+            } else {
+                GAME_HOUR.store(h, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
 /// Background task that disconnects mortals who have been idle longer
 /// than `IDLE_LIMIT_SECS` since their last command.  Immortals are
 /// exempt.  Disconnect is performed by posting a "quit" command

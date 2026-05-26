@@ -77,6 +77,7 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "title", "gossip", "chat",
+    "brief", "compact", "time", "weather",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
@@ -193,6 +194,10 @@ pub async fn dispatch_command(
         Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("title")     => do_title(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
+        Some("brief")     => do_brief(me),
+        Some("compact")   => do_compact(me),
+        Some("time")      => do_time(),
+        Some("weather")   => do_weather(),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -776,6 +781,72 @@ async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     }
     let _ = delivered;
     CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
+}
+
+fn do_time() -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
+    let d = crate::db::GAME_DAY.load(Ordering::Relaxed);
+    let m = crate::db::GAME_MONTH.load(Ordering::Relaxed);
+    let y = crate::db::GAME_YEAR.load(Ordering::Relaxed);
+
+    // 12-hour clock with am/pm.
+    let (hour12, suffix) = match h {
+        0     => (12, "am"),
+        1..=11=> (h, "am"),
+        12    => (12, "pm"),
+        _     => (h - 12, "pm"),
+    };
+    let month_name = crate::db::MONTH_NAMES
+        .get(m as usize).copied().unwrap_or("Unknown");
+    let period = match h {
+        5..=8   => "early morning",
+        9..=11  => "morning",
+        12      => "noon",
+        13..=17 => "afternoon",
+        18..=20 => "evening",
+        21..=23 => "night",
+        _       => "deep night",
+    };
+    CmdOutput::text(format!(
+        "\r\nIt is {hour12}{suffix}, {period}.\r\nIt is the {}{} day of the {month_name}, year {y}.\r\n",
+        d + 1,
+        match (d + 1) % 10 { 1 if d + 1 != 11 => "st", 2 if d + 1 != 12 => "nd", 3 if d + 1 != 13 => "rd", _ => "th" },
+    ))
+}
+
+fn do_weather() -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
+    let m = crate::db::GAME_MONTH.load(Ordering::Relaxed);
+    // Pseudo-randomly varied by hour + month — same time of same day
+    // always shows the same weather (stable within a tick).
+    let seed = (h.wrapping_mul(7) + m.wrapping_mul(31)) & 0xff;
+    let desc = match seed % 5 {
+        0 => "The sky is cloudless and bright.",
+        1 => "Wispy clouds drift through a clear sky.",
+        2 => "Grey clouds blanket the sky.",
+        3 => "Cold rain falls in sheets.",
+        _ => "A fierce storm rages overhead, lightning crackling in the distance.",
+    };
+    let lit = if (6..20).contains(&h) { "It is daytime." } else { "It is night." };
+    CmdOutput::text(format!("\r\n{lit}\r\n{desc}\r\n"))
+}
+
+fn do_brief(me: &mut Character) -> CmdOutput {
+    me.brief = !me.brief;
+    CmdOutput::text(format!(
+        "\r\nBrief mode: {}.\r\n",
+        if me.brief { "on" } else { "off" },
+    ))
+}
+
+fn do_compact(me: &mut Character) -> CmdOutput {
+    me.compact = !me.compact;
+    CmdOutput::text(format!(
+        "\r\nCompact prompt: {}.\r\n",
+        if me.compact { "on" } else { "off" },
+    ))
 }
 
 /// `gossip <msg>` — global chat channel.  Empty arg toggles the
@@ -6738,6 +6809,28 @@ pub async fn render_room(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> String {
+    // Snapshot viewer flags first: level (for EX_HIDDEN), brief (skips
+    // the description block).  Locks the registry briefly and the
+    // viewer's Character once each — no contention since dispatch is
+    // serial per player.
+    let (viewer_level, viewer_brief): (i32, bool) = match viewer_id {
+        Some(id) => {
+            let ph_opt = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|p| p.id == id).cloned();
+                h
+            };
+            match ph_opt {
+                Some(ph) => {
+                    let c = ph.character.lock().await;
+                    (ph.level, c.brief)
+                }
+                None => (0, false),
+            }
+        }
+        None => (0, false),
+    };
+
     let w = world.lock().await;
     let Some(r) = w.rooms.get(&vnum) else {
         return "\r\nYou are nowhere.\r\n".to_string();
@@ -6747,21 +6840,15 @@ pub async fn render_room(
     s.push_str("\r\n");
     s.push_str(&r.name);
     s.push_str("\r\n");
-    for line in r.description.split('\n') {
-        s.push_str(line);
-        s.push_str("\r\n");
+    if !viewer_brief {
+        for line in r.description.split('\n') {
+            s.push_str(line);
+            s.push_str("\r\n");
+        }
     }
 
-    // Exits — EX_HIDDEN ones are suppressed for mortals.  Viewer's level
-    // comes from the cached PlayerHandle level (registry).
-    let viewer_level: i32 = match viewer_id {
-        Some(id) => {
-            let cl = chars.lock().await;
-            let lvl = cl.iter().find(|p| p.id == id).map(|p| p.level).unwrap_or(0);
-            lvl
-        }
-        None => 0,
-    };
+    // Exits — EX_HIDDEN ones are suppressed for mortals (viewer_level
+    // was already snapshotted above).
     let exits: Vec<&str> = Direction::ALL.iter()
         .filter(|d| r.exits[**d as usize].as_ref()
             .map(|e| e.to_room != crate::world::NOWHERE

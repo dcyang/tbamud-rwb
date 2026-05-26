@@ -266,6 +266,8 @@ pub async fn handle_connection(
                     following:        None,
                     grouped:          false,
                     gossip_off:       false,
+                    brief:            false,
+                    compact:          false,
                     last_activity:    std::time::Instant::now(),
                 };
 
@@ -452,7 +454,12 @@ async fn run_game_session(
                 quit = true;
                 break 'outer;
             }
-            let _ = tx.send("\r\n> ".to_string());
+            // Compact prompt shaves the leading CRLF.
+            let prompt = {
+                let c = character.lock().await;
+                if c.compact { "> ".to_string() } else { "\r\n> ".to_string() }
+            };
+            let _ = tx.send(prompt);
         }
     }
 
