@@ -129,6 +129,10 @@ pub struct PlayerRecord {
     pub autoexit:      bool,
     pub autoloot:      bool,
     pub autoassist:    bool,
+    /// Persisted as `AuTl: 0` when the user opted out; we keep
+    /// "default = true" implicit so the saved value 0 means off
+    /// and absence means on (the default).
+    pub autotitle_off: bool,
     pub practices:     i32,
     pub room:          i32,
     pub gold:          i64,
@@ -348,6 +352,7 @@ impl PlayerDb {
                 "AuEx" => rec.autoexit  = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuLt" => rec.autoloot  = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuAs" => rec.autoassist = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuTl" => rec.autotitle_off = val.parse::<i32>().unwrap_or(0) != 0,
                 "Prac" => rec.practices = val.parse().unwrap_or(0),
                 "Room" => rec.room = val.parse().unwrap_or(0),
                 "Gold" => rec.gold = val.parse().unwrap_or(0),
@@ -460,6 +465,7 @@ impl PlayerDb {
         if rec.autoexit   { writeln!(f, "AuEx: 1")?; }
         if rec.autoloot   { writeln!(f, "AuLt: 1")?; }
         if rec.autoassist { writeln!(f, "AuAs: 1")?; }
+        if rec.autotitle_off { writeln!(f, "AuTl: 1")?; }
         if rec.practices != 0 {
             writeln!(f, "Prac: {}", rec.practices)?;
         }

@@ -64,6 +64,11 @@ pub enum Skill {
     LightningBolt,
     Fireball,
     ShockingGrasp,
+    Invisibility,
+    Stoneskin,
+    Disarm,
+    CureSerious,
+    Heal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +126,11 @@ impl Skill {
             "lightningbolt" | "lightning"     => Some(Skill::LightningBolt),
             "fireball"                        => Some(Skill::Fireball),
             "shockinggrasp" | "shockgrasp" | "shock" => Some(Skill::ShockingGrasp),
+            "invisibility" | "invis"          => Some(Skill::Invisibility),
+            "stoneskin"                       => Some(Skill::Stoneskin),
+            "disarm"                          => Some(Skill::Disarm),
+            "cureserious" | "cureseriouswounds" => Some(Skill::CureSerious),
+            "heal"                            => Some(Skill::Heal),
             _ => None,
         }
     }
@@ -167,6 +177,11 @@ impl Skill {
             Skill::LightningBolt => "lightning bolt",
             Skill::Fireball      => "fireball",
             Skill::ShockingGrasp => "shocking grasp",
+            Skill::Invisibility  => "invisibility",
+            Skill::Stoneskin     => "stoneskin",
+            Skill::Disarm        => "disarm",
+            Skill::CureSerious   => "cure serious",
+            Skill::Heal          => "heal",
         }
     }
 
@@ -174,7 +189,7 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry | Skill::Rescue => SkillKind::Physical,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
@@ -186,6 +201,8 @@ impl Skill {
                 | Skill::Earthquake   | Skill::CharmPerson | Skill::LocateObject
                 | Skill::Refresh      | Skill::Summon       | Skill::SenseLife
                 | Skill::LightningBolt | Skill::Fireball | Skill::ShockingGrasp
+                | Skill::Invisibility  | Skill::Stoneskin
+                | Skill::CureSerious   | Skill::Heal
                                       => SkillKind::Spell,
         }
     }
@@ -195,7 +212,7 @@ impl Skill {
         match self {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
-                | Skill::Dodge | Skill::Parry | Skill::Rescue => 0,
+                | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
@@ -225,6 +242,10 @@ impl Skill {
             Skill::LightningBolt => 20,
             Skill::Fireball      => 30,
             Skill::ShockingGrasp => 8,
+            Skill::Invisibility  => 12,
+            Skill::Stoneskin     => 30,
+            Skill::CureSerious   => 16,
+            Skill::Heal          => 35,
         }
     }
 
@@ -273,6 +294,11 @@ impl Skill {
             Skill::LightningBolt => &[Class::MagicUser],
             Skill::Fireball      => &[Class::MagicUser],
             Skill::ShockingGrasp => &[Class::MagicUser],
+            Skill::Invisibility  => &[Class::MagicUser],
+            Skill::Stoneskin     => &[Class::MagicUser],
+            Skill::Disarm        => &[Class::Warrior, Class::Thief],
+            Skill::CureSerious   => &[Class::Cleric],
+            Skill::Heal          => &[Class::Cleric],
         }
     }
 
@@ -322,6 +348,11 @@ impl Skill {
             Skill::LightningBolt => "lightning-bolt",
             Skill::Fireball      => "fireball",
             Skill::ShockingGrasp => "shocking-grasp",
+            Skill::Invisibility  => "invisibility",
+            Skill::Stoneskin     => "stoneskin",
+            Skill::Disarm        => "disarm",
+            Skill::CureSerious   => "cure-serious",
+            Skill::Heal          => "heal",
         }
     }
 
@@ -347,6 +378,8 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::SenseLife,
     Skill::Dodge, Skill::Parry, Skill::Rescue,
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
+    Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
+    Skill::CureSerious, Skill::Heal,
 ];
 
 // ---------------------------------------------------------------------------
@@ -593,6 +626,21 @@ pub struct Character {
     pub autoloot:     bool,
     /// Auto-attack any mob that is fighting the leader you follow.
     pub autoassist:   bool,
+    /// When true (default), the level-up path auto-updates `title`.
+    /// Setting it false freezes the title at whatever the user typed,
+    /// even on level transitions.
+    pub autotitle:    bool,
+    /// Last N dispatched commands (transient).  Recorded at the top of
+    /// `dispatch_command`; viewed via `history`.
+    pub history:      std::collections::VecDeque<String>,
+    /// Player ids currently snooping this character — every line their
+    /// writer task drains is also cloned (prefixed) to each snooper's
+    /// mpsc.  Transient; cleared on logout.  Multiple snoopers are
+    /// allowed.
+    pub snooped_by:   Vec<u32>,
+    /// Target this character is snooping, if any.  Used by
+    /// `do_unsnoop` to clean up the reverse pointer.
+    pub snooping:     Option<u32>,
     /// Timestamp of the last command this player dispatched.  Refreshed
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.
@@ -966,7 +1014,7 @@ impl Character {
         }
         // Re-apply the auto-title at the new level (only when the user
         // was on an auto-title; custom titles are preserved).
-        if gained > 0 && title_is_auto {
+        if gained > 0 && title_is_auto && self.autotitle {
             self.title = Self::default_title_for(self.class, self.level).to_string();
         }
         gained

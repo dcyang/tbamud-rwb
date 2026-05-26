@@ -71,11 +71,11 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell",
-    "kick", "bash", "backstab", "rescue",
+    "kick", "bash", "backstab", "rescue", "disarm",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist",
+    "autoexit", "autoloot", "autoassist", "autotitle", "history",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -95,7 +95,7 @@ const COMMANDS: &[&str] = &[
     "invis", "vis", "mute", "freeze",
     "ban", "unban", "bans",
     "wiznet",
-    "load", "restore", "echo", "gecho", "slay",
+    "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
     // Single-letter aliases not handled by prefix
     "exits", "quit", "hit",
 ];
@@ -142,6 +142,9 @@ pub async fn dispatch_command(
         return CmdOutput::text(String::new());
     }
     me.last_activity = std::time::Instant::now();
+    // Record the raw command in the rolling history (cap 20).
+    if me.history.len() >= 20 { me.history.pop_front(); }
+    me.history.push_back(raw.to_string());
 
     // Frozen players can do almost nothing.  Allow quit/look/score so
     // they can sign off cleanly and read their state.  Everything else
@@ -222,6 +225,7 @@ pub async fn dispatch_command(
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
+        Some("disarm")    => do_disarm(rest, me, world, chars).await,
         Some("sleep")     => do_position(me, chars, crate::character::Position::Sleeping).await,
         Some("rest")      => do_position(me, chars, crate::character::Position::Resting).await,
         Some("sit")       => do_position(me, chars, crate::character::Position::Sitting).await,
@@ -234,6 +238,8 @@ pub async fn dispatch_command(
         Some("autoexit")   => do_toggle_auto(me, AutoFlag::Exit),
         Some("autoloot")   => do_toggle_auto(me, AutoFlag::Loot),
         Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
+        Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
+        Some("history")    => do_history(me),
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -330,6 +336,8 @@ pub async fn dispatch_command(
         Some("echo")      => do_echo(rest, me, chars).await,
         Some("gecho")     => do_gecho(rest, me, chars).await,
         Some("slay")      => do_slay(rest, me, world, chars).await,
+        Some("snoop")     => do_snoop(rest, me, chars).await,
+        Some("unsnoop")   => do_unsnoop(me, chars).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2758,6 +2766,92 @@ async fn do_slay(
     CmdOutput::text(format!("\r\nYou slay {mob_short}.\r\n"))
 }
 
+/// `snoop <player>` — silently tee an online player's output to your
+/// own client.  Lines are prefixed `%name%` on the snooper's side.
+/// Refuses to snoop another immortal of equal or higher level.  Each
+/// snoop is one-way; do_snoop overwrites any previous target.
+async fn do_snoop(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let target_name = arg.trim();
+    if target_name.is_empty() {
+        return CmdOutput::text(
+            "\r\nUsage: snoop <player>  (use `unsnoop` to stop)\r\n".to_string()
+        );
+    }
+    if target_name.eq_ignore_ascii_case(&me.name) {
+        return CmdOutput::text("\r\nThat's a strange thing to ask.\r\n".to_string());
+    }
+    let target = {
+        let cl = chars.lock().await;
+        let h = cl.iter()
+            .find(|p| p.name.eq_ignore_ascii_case(target_name))
+            .cloned();
+        h
+    };
+    let Some(tph) = target else {
+        return CmdOutput::text(format!(
+            "\r\nNo player named '{target_name}' is online.\r\n"
+        ));
+    };
+    // Refuse snooping someone at or above your immortal level (anti-
+    // peer-spying among the gods).
+    {
+        let c = tph.character.lock().await;
+        if c.level >= me.level {
+            return CmdOutput::text(
+                "\r\nYou can't snoop someone at or above your own level.\r\n".to_string()
+            );
+        }
+    }
+    // Detach any previous target.
+    if let Some(prev_tid) = me.snooping {
+        let pph = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == prev_tid).cloned();
+            h
+        };
+        if let Some(pph) = pph {
+            pph.character.lock().await.snooped_by.retain(|&i| i != me.id);
+        }
+    }
+    me.snooping = Some(tph.id);
+    {
+        let mut c = tph.character.lock().await;
+        if !c.snooped_by.contains(&me.id) {
+            c.snooped_by.push(me.id);
+        }
+    }
+    CmdOutput::text(format!(
+        "\r\nYou are now snooping {}.\r\n", tph.name,
+    ))
+}
+
+/// `unsnoop` — stop snooping whoever you're snooping.
+async fn do_unsnoop(
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let Some(tid) = me.snooping.take() else {
+        return CmdOutput::text("\r\nYou aren't snooping anyone.\r\n".to_string());
+    };
+    let target_name = {
+        let cl = chars.lock().await;
+        let target = cl.iter().find(|p| p.id == tid).cloned();
+        if let Some(tph) = target {
+            tph.character.lock().await.snooped_by.retain(|&i| i != me.id);
+            tph.name.clone()
+        } else { String::from("them") }
+    };
+    CmdOutput::text(format!(
+        "\r\nYou stop snooping {target_name}.\r\n"
+    ))
+}
+
 /// Broadcast a wiznet line to every online immortal whose `wiznet_off`
 /// is false.  `msg` should be the bare body — this helper wraps it in
 /// the magenta `[wiznet] ...` envelope and CRLF.  Used by `do_wiznet`
@@ -4167,7 +4261,21 @@ fn do_color(arg: &str, me: &mut Character) -> CmdOutput {
     }
 }
 
-enum AutoFlag { Exit, Loot, Assist }
+/// `history` — show the last 20 dispatched commands (most recent
+/// last).  Includes the `history` invocation itself, since recording
+/// happens before dispatch.
+fn do_history(me: &Character) -> CmdOutput {
+    if me.history.is_empty() {
+        return CmdOutput::text("\r\nNo history yet.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nCommand history:\r\n");
+    for (i, cmd) in me.history.iter().enumerate() {
+        s.push_str(&format!("  {:>3}. {}\r\n", i + 1, cmd));
+    }
+    CmdOutput::text(s)
+}
+
+enum AutoFlag { Exit, Loot, Assist, Title }
 
 /// Flip a single auto-* preference.  Reports the new state.
 fn do_toggle_auto(me: &mut Character, which: AutoFlag) -> CmdOutput {
@@ -4175,6 +4283,7 @@ fn do_toggle_auto(me: &mut Character, which: AutoFlag) -> CmdOutput {
         AutoFlag::Exit   => { me.autoexit   = !me.autoexit;   ("Autoexit",   me.autoexit) }
         AutoFlag::Loot   => { me.autoloot   = !me.autoloot;   ("Autoloot",   me.autoloot) }
         AutoFlag::Assist => { me.autoassist = !me.autoassist; ("Autoassist", me.autoassist) }
+        AutoFlag::Title  => { me.autotitle  = !me.autotitle;  ("Autotitle",  me.autotitle) }
     };
     CmdOutput::text(format!(
         "\r\n{label} is now {}.\r\n",
@@ -4300,6 +4409,167 @@ async fn do_rescue(
     if let Some(b) = bump {
         out.text.push_str(&b);
     }
+    out
+}
+
+/// `disarm <target>` — knock the target's weapon onto the room floor.
+/// PvP target: pulls from `equipment[WEAR_WIELD]`.  Mob target: pulls
+/// the first `ITEM_WEAPON` from the mob's inventory.  Chance =
+/// `(30 + learned/2).min(80)`; on miss broadcasts a fumble.
+async fn do_disarm(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::{Skill, WEAR_WIELD};
+    use crate::world::ITEM_WEAPON;
+    if !Skill::Disarm.is_class_allowed(me.class) {
+        return CmdOutput::text(
+            "\r\nYou do not know how to disarm anyone.\r\n".to_string()
+        );
+    }
+    let learned = *me.skills.get(&Skill::Disarm).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou have never practised disarm.\r\n".to_string()
+        );
+    }
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nDisarm whom?\r\n".to_string());
+    }
+    me.reveal();
+    let chance = (30 + learned / 2).min(80);
+    let succeeds = rand::thread_rng().gen_range(1..=100) <= chance;
+
+    // PvP path first: look up an online player by name in our room.
+    let pvp_target = {
+        let cl = chars.lock().await;
+        let h = cl.iter()
+            .find(|p| p.id != me.id
+                && p.current_room == me.current_room
+                && p.name.eq_ignore_ascii_case(&key))
+            .cloned();
+        h
+    };
+    if let Some(ph) = pvp_target {
+        if !succeeds {
+            let _ = ph.send.send(format!(
+                "\r\n{} tries to disarm you, but fails.\r\n", me.name
+            ));
+            return CmdOutput::text(format!(
+                "\r\nYou fail to disarm {}.\r\n", ph.name
+            ));
+        }
+        let dropped = {
+            let mut c = ph.character.lock().await;
+            c.equipment[WEAR_WIELD].take()
+        };
+        let Some(iid) = dropped else {
+            return CmdOutput::text(format!(
+                "\r\n{} isn't wielding anything.\r\n", ph.name
+            ));
+        };
+        // Move iid to room floor.
+        let label = {
+            let mut w = world.lock().await;
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.in_room = me.current_room;
+            }
+            if let Some(r) = w.rooms.get_mut(&me.current_room) {
+                r.objects.push(iid);
+            }
+            w.obj_instances.iter()
+                .find(|o| o.id == iid)
+                .and_then(|o| w.obj_protos.get(&o.vnum))
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "their weapon".to_string())
+        };
+        let _ = learn_attempt(me, Skill::Disarm, 5);
+        let _ = ph.send.send(format!(
+            "\r\n{} disarms you!  {label} falls to the ground.\r\n", me.name
+        ));
+        let cl = chars.lock().await;
+        let line = format!("{} disarms {} — {label} falls to the ground.\r\n",
+            me.name, ph.name);
+        for hp in cl.iter() {
+            if hp.id == me.id || hp.id == ph.id { continue; }
+            if hp.current_room != me.current_room { continue; }
+            let _ = hp.send.send(line.clone());
+        }
+        return CmdOutput::text(format!(
+            "\r\nYou disarm {}!  {label} clatters to the floor.\r\n", ph.name
+        ));
+    }
+
+    // Mob path: keyword match in current room.
+    let (mob_id, weapon_iid, weapon_label, mob_short) = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+        };
+        let mob_hit = r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+                Some((mid, m.inventory.clone(), p.short_descr.clone()))
+            } else { None }
+        });
+        let Some((mid, inv, short)) = mob_hit else {
+            return CmdOutput::text("\r\nNo such target here.\r\n".to_string());
+        };
+        // Find first weapon in inventory.
+        let mut weapon: Option<(u32, String)> = None;
+        for iid in inv {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if let Some(p) = w.obj_protos.get(&o.vnum) {
+                    if p.item_type == ITEM_WEAPON {
+                        weapon = Some((iid, p.short_description.clone()));
+                        break;
+                    }
+                }
+            }
+        }
+        let Some((wid, wlbl)) = weapon else {
+            return CmdOutput::text(format!(
+                "\r\n{short} isn't carrying a weapon.\r\n"
+            ));
+        };
+        (mid, wid, wlbl, short)
+    };
+    if !succeeds {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} tries to disarm {mob_short}, but fails.\r\n", me.name));
+        return CmdOutput::text(format!(
+            "\r\nYou fail to disarm {mob_short}.\r\n"
+        ));
+    }
+    {
+        let mut w = world.lock().await;
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.inventory.retain(|&i| i != weapon_iid);
+        }
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == weapon_iid) {
+            o.in_room = me.current_room;
+        }
+        if let Some(r) = w.rooms.get_mut(&me.current_room) {
+            r.objects.push(weapon_iid);
+        }
+    }
+    let bump = learn_attempt(me, Skill::Disarm, 5);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} disarms {mob_short} — {weapon_label} falls to the ground.\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou disarm {mob_short}!  {weapon_label} clatters to the floor.\r\n"
+    ));
+    if let Some(b) = bump { out.text.push_str(&b); }
     out
 }
 
@@ -4594,6 +4864,10 @@ async fn do_cast(
         crate::character::Skill::LightningBolt => cast_lightning_bolt(target, me, world, chars, learned).await,
         crate::character::Skill::Fireball      => cast_fireball(me, world, chars, learned).await,
         crate::character::Skill::ShockingGrasp => cast_shocking_grasp(target, me, world, chars, learned).await,
+        crate::character::Skill::Invisibility  => cast_buff(target, me, chars, learned, crate::character::Skill::Invisibility).await,
+        crate::character::Skill::Stoneskin     => cast_buff(target, me, chars, learned, crate::character::Skill::Stoneskin).await,
+        crate::character::Skill::CureSerious   => cast_heal_spell(target, me, chars, learned, crate::character::Skill::CureSerious).await,
+        crate::character::Skill::Heal          => cast_heal_spell(target, me, chars, learned, crate::character::Skill::Heal).await,
         crate::character::Skill::CureLight    => cast_cure_light(target, me, chars, learned).await,
         crate::character::Skill::Bless        => cast_bless(target, me, chars, learned).await,
         crate::character::Skill::BurningHands => cast_burning_hands(me, world, chars, learned).await,
@@ -5950,6 +6224,79 @@ async fn cast_cure_critic(
     ))
 }
 
+/// Shared shape for the mid/heavy Cleric heal ladder (cure serious
+/// wounds, heal).  Caller picks the skill; the handler picks dice and
+/// flavor per skill.  Mirrors `cast_cure_critic`'s target resolution.
+async fn cast_heal_spell(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+    skill:   crate::character::Skill,
+) -> CmdOutput {
+    use rand::Rng;
+    me.mana -= skill.mana_cost();
+    let hit_chance = (90 + learned as i32 / 5).min(99);
+    if rand::thread_rng().gen_range(0..100) >= hit_chance {
+        return CmdOutput::text("\r\nThe healing prayer fizzles.\r\n");
+    }
+    let (heal, self_room, target_room, self_self, peer_msg) = match skill {
+        crate::character::Skill::CureSerious => (
+            crate::db::dice(4, 10) + me.level + (me.wis - 10).max(0) / 2,
+            "{} chants softly, bathed in warm light.",
+            "{} chants softly, bathed in warm light around {tgt}.",
+            "Serious wounds knit closed across your body. ({}/{} HP)",
+            "{} chants softly — your serious wounds knit closed. ({}/{} HP)",
+        ),
+        crate::character::Skill::Heal => (
+            crate::db::dice(20, 10) + me.level * 2,
+            "{} is enveloped by a brilliant golden aura.",
+            "{} is enveloped by a brilliant golden aura that flows into {tgt}.",
+            "A brilliant golden aura mends every wound. ({}/{} HP)",
+            "{} envelops you in a golden aura — every wound mends. ({}/{} HP)",
+        ),
+        _ => return CmdOutput::text("\r\nUnsupported healing spell.\r\n"),
+    };
+    // Self?
+    if target_kw.is_empty() {
+        me.hp = (me.hp + heal).min(me.max_hp);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &self_room.replace("{}", &me.name));
+        return CmdOutput::text(format!(
+            "\r\n{}\r\n", self_self.replacen("{}", &me.hp.to_string(), 1)
+                                    .replacen("{}", &me.max_hp.to_string(), 1),
+        ));
+    }
+    // Another player in room.
+    let target_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = target_handle else {
+        return CmdOutput::text(format!("\r\nNo one named '{target_kw}' is here.\r\n"));
+    };
+    let (new_hp, max) = {
+        let mut c = ph.character.lock().await;
+        c.hp = (c.hp + heal).min(c.max_hp);
+        (c.hp, c.max_hp)
+    };
+    let line = peer_msg.replacen("{}", &me.name, 1)
+        .replacen("{}", &new_hp.to_string(), 1)
+        .replacen("{}", &max.to_string(), 1);
+    let _ = ph.send.send(format!("\r\n{}\r\n", line));
+    let cl = chars.lock().await;
+    let room_line = target_room.replacen("{}", &me.name, 1)
+        .replace("{tgt}", &ph.name);
+    cl.broadcast_room(me.current_room, Some(me.id), &format!("{}\r\n", room_line));
+    CmdOutput::text(format!(
+        "\r\nYour healing magic restores {} ({} HP).\r\n", ph.name, heal,
+    ))
+}
+
 /// Shared shape for self/target-player buff spells (Strength, Armor).
 /// Picks per-skill duration + (to_dam, to_ac) modifiers and refresh-
 /// stacks via Character::apply_affect.
@@ -5979,6 +6326,18 @@ async fn cast_buff(
             0, 0,
             "Time seems to slow around you as you move with sudden speed.\r\n",
             "{} moves with sudden speed.\r\n",
+        ),
+        crate::character::Skill::Invisibility => (
+            24 + learned as i32 / 4,
+            0, 0,
+            "You vanish.\r\n",
+            "{} slowly fades from view.\r\n",
+        ),
+        crate::character::Skill::Stoneskin => (
+            4 + learned as i32 / 10,
+            0, 30,
+            "Your skin hardens to the texture of granite.\r\n",
+            "{}'s skin takes on the texture of stone.\r\n",
         ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
@@ -8206,6 +8565,64 @@ fn item_type_name(t: i32) -> &'static str {
     }
 }
 
+/// Persist `me`'s state to disk via the PlayerDb.  Returns Ok(()) on
+/// success, or an error chain.  Used by `do_save`, the auto-save on
+/// disconnect, and `spawn_save_all_tick`.
+pub async fn save_character_to_db(
+    me: &Character,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> anyhow::Result<()> {
+    let pl = players.lock().await;
+    let mut r = pl.load_player(&me.name)?;
+    r.hp        = me.hp;
+    r.max_hp    = me.max_hp;
+    r.mana      = me.mana;
+    r.max_mana  = me.max_mana;
+    r.movement     = me.movement;
+    r.max_movement = me.max_movement;
+    r.position     = me.position.save_key().to_string();
+    r.wimpy        = me.wimpy;
+    r.color_off    = me.color_off;
+    r.autoexit     = me.autoexit;
+    r.autoloot     = me.autoloot;
+    r.autoassist   = me.autoassist;
+    r.autotitle_off = !me.autotitle;
+    r.practices = me.practices;
+    r.room      = me.current_room;
+    r.gold      = me.gold;
+    r.exp       = me.exp;
+    r.level     = me.level;
+    r.str_      = me.str_;
+    r.int_   = me.int_;
+    r.wis    = me.wis;
+    r.dex    = me.dex;
+    r.con    = me.con;
+    r.cha    = me.cha;
+    r.skills.clear();
+    for (skill, pct) in &me.skills {
+        r.skills.insert(skill.save_key().to_string(), *pct);
+    }
+    r.active_quest    = me.active_quest;
+    r.quest_progress  = me.quest_progress;
+    r.completed_quests = me.completed_quests.clone();
+    r.hunger          = me.hunger;
+    r.thirst          = me.thirst;
+    r.title           = me.title.clone();
+    r.bank_gold       = me.bank_gold;
+    r.prompt_format   = me.prompt_format.clone();
+    r.aliases         = me.aliases.clone();
+    r.last_login      = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(r.last_login);
+    r.god             = me.god.clone();
+    r.muted           = me.muted;
+    r.frozen          = me.frozen;
+    r.notes           = me.notes.clone();
+    r.pose            = me.pose.clone();
+    pl.save_player(&r)?;
+    Ok(())
+}
+
 async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
     let pl = players.lock().await;
     let rec = match pl.load_player(&me.name) {
@@ -8222,6 +8639,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.autoexit     = me.autoexit;
             r.autoloot     = me.autoloot;
             r.autoassist   = me.autoassist;
+            r.autotitle_off = !me.autotitle;
             r.practices = me.practices;
             r.room      = me.current_room;
             r.gold      = me.gold;
@@ -9957,14 +10375,17 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        let (hidden, pose, invis_lvl, position) = {
+        let (hidden, invisible_aff, pose, invis_lvl, position) = {
             let c = p.character.lock().await;
-            (c.hidden, c.pose.clone(), c.invis_level, c.position)
+            let invisible = c.affects.iter()
+                .any(|a| a.skill == crate::character::Skill::Invisibility);
+            (c.hidden, invisible, c.pose.clone(), c.invis_level, c.position)
         };
         // Immortal invis hides them from anyone below `invis_level`.
         if invis_lvl > viewer_level { continue; }
-        if !see_hidden && hidden { continue; }
-        let hidden_tag = if see_hidden && hidden { " (hidden)" } else { "" };
+        let invisible = hidden || invisible_aff;
+        if !see_hidden && invisible { continue; }
+        let hidden_tag = if see_hidden && invisible { " (invis)" } else { "" };
         let invis_tag  = if invis_lvl > 0 { format!(" [invis{}]", invis_lvl) } else { String::new() };
         if !pose.is_empty() {
             s.push_str(&format!("{} {pose}{hidden_tag}{invis_tag}\r\n", p.name));

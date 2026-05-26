@@ -262,6 +262,10 @@ pub async fn handle_connection(
                     autoexit:     p_ref.map(|p| p.autoexit).unwrap_or(false),
                     autoloot:     p_ref.map(|p| p.autoloot).unwrap_or(false),
                     autoassist:   p_ref.map(|p| p.autoassist).unwrap_or(false),
+                    autotitle:    !p_ref.map(|p| p.autotitle_off).unwrap_or(false),
+                    history:      std::collections::VecDeque::with_capacity(20),
+                    snooped_by:   Vec::new(),
+                    snooping:     None,
                     practices,
                     str_:         ab(p_ref.map(|p| p.str_).unwrap_or(0)),
                     int_:         ab(p_ref.map(|p| p.int_).unwrap_or(0)),
@@ -452,10 +456,29 @@ async fn run_game_session(
     // Writer task: drains the channel to the socket. Exits when the channel
     // closes (all senders dropped) or the socket errors.
     let writer_ch = Arc::clone(&character);
+    let writer_chars = Arc::clone(&chars);
+    let writer_name = my_name.clone();
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            // Check the user's color preference; strip codes if color_off.
-            let color_off = writer_ch.lock().await.color_off;
+            // Snapshot color preference + snooper id list under one lock.
+            let (color_off, snoopers): (bool, Vec<u32>) = {
+                let c = writer_ch.lock().await;
+                (c.color_off, c.snooped_by.clone())
+            };
+            // Fan out to snoopers BEFORE we strip color (so the
+            // snooper sees raw @-codes if they have color enabled).
+            if !snoopers.is_empty() {
+                let snoop_line = format!("%{writer_name}% {msg}");
+                let handles: Vec<crate::character::PlayerHandle> = {
+                    let cl = writer_chars.lock().await;
+                    cl.iter().cloned().collect()
+                };
+                for sid in &snoopers {
+                    if let Some(ph) = handles.iter().find(|p| p.id == *sid) {
+                        let _ = ph.send.send(snoop_line.clone());
+                    }
+                }
+            }
             let rendered = if color_off {
                 crate::color::strip(&msg)
             } else {
@@ -559,6 +582,7 @@ async fn run_game_session(
             rec.autoexit     = me.autoexit;
             rec.autoloot     = me.autoloot;
             rec.autoassist   = me.autoassist;
+            rec.autotitle_off = !me.autotitle;
             rec.practices = me.practices;
             rec.room      = me.current_room;
             rec.gold      = me.gold;
@@ -650,6 +674,36 @@ async fn run_game_session(
         if !to_remove.is_empty() {
             let mut w = world.lock().await;
             w.obj_instances.retain(|o| !to_remove.contains(&o.id));
+        }
+    }
+
+    // Snoop cleanup before deregistration: detach any snoopers, and if
+    // we were snooping someone, remove our id from their snooped_by.
+    {
+        let (snooping, snoopers) = {
+            let c = character.lock().await;
+            (c.snooping, c.snooped_by.clone())
+        };
+        if let Some(tid) = snooping {
+            let tph = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|p| p.id == tid).cloned();
+                h
+            };
+            if let Some(tph) = tph {
+                tph.character.lock().await.snooped_by.retain(|&i| i != my_id);
+            }
+        }
+        if !snoopers.is_empty() {
+            let cl = chars.lock().await;
+            let handles: Vec<crate::character::PlayerHandle> = cl.iter().cloned().collect();
+            drop(cl);
+            for sid in snoopers {
+                if let Some(sph) = handles.iter().find(|p| p.id == sid) {
+                    sph.character.lock().await.snooping = None;
+                    let _ = sph.send.send("\r\nYour snoop target has gone offline.\r\n".to_string());
+                }
+            }
         }
     }
 

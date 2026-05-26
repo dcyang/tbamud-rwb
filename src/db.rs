@@ -881,6 +881,49 @@ pub fn spawn_idle_kick_tick(
 /// per game-hour (~60s of real time).  `-1` is the never-hungry
 /// sentinel (immortals).  At 0 the player gets a one-shot warning; at
 /// -1 they take 1 HP damage per tick with a "starving/parched" line.
+/// Crash-safe save-all tick.  Every 5 minutes, walks online players
+/// and persists each one's full state via
+/// `interpreter::save_character_to_db`.  Mirrors what auto-save-on-
+/// disconnect already does, but doesn't wait for clean logout.
+pub fn spawn_save_all_tick(
+    chars: crate::character::SharedChars,
+    players: std::sync::Arc<tokio::sync::Mutex<crate::players::PlayerDb>>,
+) {
+    const TICK_SECONDS: u64 = 300;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let handles: Vec<crate::character::PlayerHandle> = {
+                let cl = chars.lock().await;
+                cl.iter().cloned().collect()
+            };
+            let mut saved = 0u32;
+            for ph in handles {
+                // Skip immortals (their state is more volatile and we
+                // already auto-save on disconnect).
+                let me = ph.character.lock().await;
+                if me.level >= 34 { continue; }
+                if let Err(e) = crate::interpreter::save_character_to_db(&me, &players).await {
+                    tracing::warn!(name = %me.name, error = %e,
+                        "Periodic save failed");
+                } else {
+                    saved += 1;
+                }
+            }
+            if saved > 0 {
+                tracing::info!(saved, "Periodic save-all complete");
+            }
+        }
+    });
+}
+
 pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
     const TICK_SECONDS: u64 = 60;
     tokio::spawn(async move {

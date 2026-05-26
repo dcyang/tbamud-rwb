@@ -99,6 +99,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn mob spec_proc tick (puff/fido/janitor) ---------------------
     db::spawn_mob_spec_tick(Arc::clone(&world), Arc::clone(&chars));
 
+    // --- Spawn crash-safe save-all tick -----------------------------------
+    db::spawn_save_all_tick(Arc::clone(&chars), Arc::clone(&players));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 
