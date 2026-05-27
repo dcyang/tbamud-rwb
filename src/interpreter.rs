@@ -93,7 +93,7 @@ const COMMANDS: &[&str] = &[
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
-    "at", "househere",
+    "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "mute", "freeze",
     "ban", "unban", "bans",
@@ -337,6 +337,7 @@ pub async fn dispatch_command(
         Some("force")     => do_force(rest, me, world, chars).await,
         Some("at")        => do_at(rest, me, world, chars, players).await,
         Some("househere") => do_househere(me, world).await,
+        Some("house")     => do_house(rest, me, world, players).await,
         Some("set")       => do_set(rest, me, chars).await,
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
@@ -533,6 +534,11 @@ async fn do_get(
 ) -> CmdOutput {
     if arg.is_empty() {
         return CmdOutput::text("\r\nGet what?\r\n");
+    }
+    if !house_can_touch(me, world).await {
+        return CmdOutput::text(
+            "\r\nA ward of ownership stays your hand.\r\n".to_string()
+        );
     }
 
     // `get all` / `get all.<key>` — mass pickup from the room floor.
@@ -783,6 +789,11 @@ async fn do_drop(
     if arg.is_empty() {
         return CmdOutput::text("\r\nDrop what?\r\n");
     }
+    if !house_can_touch(me, world).await {
+        return CmdOutput::text(
+            "\r\nThe house's ward refuses to accept your offering.\r\n".to_string()
+        );
+    }
     if arg.eq_ignore_ascii_case("all") || arg.to_ascii_lowercase().starts_with("all.") {
         let kw = arg.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
         return do_drop_all(me, world, chars, kw).await;
@@ -829,6 +840,20 @@ async fn do_drop(
     fire_obj_drop_triggers(iid, &me.name, me.current_room, world, chars).await;
 
     CmdOutput::text(format!("\r\nYou drop {}.\r\n", name))
+}
+
+/// Returns true if `me` is allowed to drop/pick items in the current
+/// room.  Non-house rooms always allow.  ROOM_HOUSE rooms only allow
+/// the owner (case-insensitive name match) and immortals.
+async fn house_can_touch(me: &Character, world: &Arc<Mutex<World>>) -> bool {
+    if me.level >= LVL_IMMORT { return true; }
+    let w = world.lock().await;
+    let Some(r) = w.rooms.get(&me.current_room) else { return true; };
+    if r.room_flags[0] & crate::world::ROOM_HOUSE == 0 { return true; }
+    match w.house_owners.get(&me.current_room) {
+        Some(o) => o.eq_ignore_ascii_case(&me.name),
+        None    => true, // unowned house — anyone can use
+    }
 }
 
 /// `get all` / `get all.<kw>` — pick up every matching object on the
@@ -2763,6 +2788,55 @@ async fn do_at(
         });
     }
     CmdOutput::text(format!("\r\nYou flicker to [{vnum}] and queue '{command}'.\r\n"))
+}
+
+/// `house [name|-]` — no-arg shows the current room's house status
+/// + owner.  Immortals only: `house <name>` assigns the owner;
+/// `house -` clears it.
+async fn do_house(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
+    let arg = arg.trim();
+    let is_house = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_HOUSE != 0)
+            .unwrap_or(false)
+    };
+    let data_dir = players.lock().await.data_dir().to_string();
+    if arg.is_empty() {
+        if !is_house {
+            return CmdOutput::text("\r\nThis room is not a house.\r\n".to_string());
+        }
+        let owner = {
+            let w = world.lock().await;
+            w.house_owners.get(&me.current_room).cloned()
+        };
+        return CmdOutput::text(match owner {
+            Some(n) => format!("\r\nThis house belongs to {n}.\r\n"),
+            None    => "\r\nThis house has no recorded owner.\r\n".to_string(),
+        });
+    }
+    if me.level < LVL_IMMORT {
+        return immort_huh();
+    }
+    if !is_house {
+        return CmdOutput::text(
+            "\r\nThis room isn't flagged as a house yet — use `househere` first.\r\n".to_string()
+        );
+    }
+    if arg == "-" {
+        crate::db::save_house_owner(&data_dir, me.current_room, "");
+        world.lock().await.house_owners.remove(&me.current_room);
+        return CmdOutput::text("\r\nHouse ownership cleared.\r\n".to_string());
+    }
+    let owner = arg.chars().filter(|c| !c.is_control()).take(30).collect::<String>();
+    crate::db::save_house_owner(&data_dir, me.current_room, &owner);
+    world.lock().await.house_owners.insert(me.current_room, owner.clone());
+    CmdOutput::text(format!("\r\nHouse owner set to {owner}.\r\n"))
 }
 
 /// `househere` (LVL_IMMORT+) — toggles `ROOM_HOUSE` on the current
@@ -6222,6 +6296,7 @@ async fn do_cast(
         crate::character::Skill::ColorSpray   => cast_color_spray(me, world, chars, learned).await,
         crate::character::Skill::AcidBlast    => cast_acid_blast(target, me, world, chars, learned).await,
         crate::character::Skill::ChillTouch   => cast_chill_touch(target, me, world, chars, learned).await,
+        crate::character::Skill::Brew         => cast_brew(target, me, world).await,
         crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
         crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         crate::character::Skill::Sleep        => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Sleep).await,
@@ -8324,6 +8399,10 @@ async fn cast_identify(
     s.push_str(&format!(
         "  condition: {} ({})\r\n", obj.condition, condition_label(obj.condition),
     ));
+    if let Some(sv) = obj.brewed_spell {
+        let label = spell_vnum_to_label(sv).unwrap_or("unknown");
+        s.push_str(&format!("  bound spell: {label} (vnum {sv})\r\n"));
+    }
     // Wear positions allowed.
     let mut slots: Vec<&str> = Vec::new();
     use crate::character::*;
@@ -9294,6 +9373,100 @@ async fn player_has_key(me: &Character, key_vnum: i32, world: &Arc<Mutex<World>>
 /// returning the spell's text output.  Used by drink/recite (and a
 /// natural extension point if we ever add wand/staff later).  Saves and
 /// restores `me.mana` so consumable casts don't drain it.
+/// Friendly label for a CircleMUD-ish spell vnum (the inverse of
+/// `skill_to_potion_vnum`).  Returns None for unknown vnums.
+fn spell_vnum_to_label(vnum: i32) -> Option<&'static str> {
+    match vnum {
+        3  => Some("bless"),
+        5  => Some("burning hands"),
+        16 => Some("cure light"),
+        19 => Some("detect invisibility"),
+        20 => Some("detect magic"),
+        27 => Some("harm"),
+        32 => Some("magic missile"),
+        36 => Some("sanctuary"),
+        42 => Some("word of recall"),
+        52 => Some("identify"),
+        _  => None,
+    }
+}
+
+/// Reverse mapping from `Skill` to the CircleMUD-ish spell vnum used
+/// by `apply_item_spell`.  Only spells in the consumable handler set
+/// are brewable.
+fn skill_to_potion_vnum(skill: crate::character::Skill) -> Option<i32> {
+    use crate::character::Skill;
+    match skill {
+        Skill::Bless        => Some(3),
+        Skill::BurningHands => Some(5),
+        Skill::CureLight    => Some(16),
+        Skill::DetectInvis  => Some(19),
+        Skill::DetectMagic  => Some(20),
+        Skill::Harm         => Some(27),
+        Skill::MagicMissile => Some(32),
+        Skill::Sanctuary    => Some(36),
+        Skill::WordOfRecall => Some(42),
+        Skill::Identify     => Some(52),
+        _ => None,
+    }
+}
+
+/// `cast brew <spell>` — converts the caster's spell knowledge into a
+/// portable potion (vnum 99005, generic glass vial).  The spell is
+/// stored per-instance via `ObjInstance.brewed_spell` so the potion
+/// applies it on `quaff` regardless of the proto's value slots.
+async fn cast_brew(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    let Some(skill) = crate::character::Skill::parse(target_kw) else {
+        return CmdOutput::text(format!(
+            "\r\nYou don't know the spell '{target_kw}'.\r\n"
+        ));
+    };
+    if skill == crate::character::Skill::Brew {
+        return CmdOutput::text("\r\nYou can't brew brewing itself.\r\n".to_string());
+    }
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text(format!(
+            "\r\nYour class can't cast {} — nothing to brew.\r\n", skill.name(),
+        ));
+    }
+    let Some(spell_vnum) = skill_to_potion_vnum(skill) else {
+        return CmdOutput::text(format!(
+            "\r\n{} can't be bottled — pick a simpler spell.\r\n", skill.name(),
+        ));
+    };
+    let learned = *me.skills.get(&skill).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(format!(
+            "\r\nYou've never practised {}.\r\n", skill.name(),
+        ));
+    }
+    me.mana -= crate::character::Skill::Brew.mana_cost();
+    // Spawn a brewed-potion instance and stamp the spell vnum on it.
+    let new_iid: Option<u32> = {
+        let mut w = world.lock().await;
+        let iid = w.spawn_obj(crate::db::BREWED_POTION_VNUM);
+        if let Some(iid) = iid {
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.brewed_spell = Some(spell_vnum);
+            }
+        }
+        iid
+    };
+    let Some(iid) = new_iid else {
+        return CmdOutput::text(
+            "\r\nYou fumble; the vial cracks.\r\n".to_string()
+        );
+    };
+    me.inventory.push(iid);
+    CmdOutput::text(format!(
+        "\r\nYou pour your mastery of {} into a glass vial.\r\n", skill.name(),
+    ))
+}
+
 async fn apply_item_spell(
     spell_vnum: i32,
     target_kw: &str,
@@ -9361,17 +9534,29 @@ async fn do_quaff(
         return CmdOutput::text("\r\nYou have nothing like that to quaff.\r\n".to_string());
     };
 
+    // Brewed-potion override: a per-instance spell vnum trumps proto values.
+    let brewed = {
+        let w = world.lock().await;
+        w.obj_instances.iter().find(|o| o.id == iid)
+            .and_then(|o| o.brewed_spell)
+    };
+
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id),
         &format!("{} quaffs {}.\r\n", me.name, short));
     drop(cl);
 
     let mut text = format!("\r\nYou quaff {}.\r\n", short);
-    // value[0] = level, value[1..3] = up to three spell vnums to cast on
-    // the drinker.
-    for slot in 1..4 {
-        let s = apply_item_spell(value[slot], "", me, world, chars).await;
+    if let Some(spell_vnum) = brewed {
+        let s = apply_item_spell(spell_vnum, "", me, world, chars).await;
         text.push_str(&s);
+    } else {
+        // value[0] = level, value[1..3] = up to three spell vnums to cast on
+        // the drinker.
+        for slot in 1..4 {
+            let s = apply_item_spell(value[slot], "", me, world, chars).await;
+            text.push_str(&s);
+        }
     }
     me.inventory.retain(|&i| i != iid);
     {
@@ -10151,19 +10336,19 @@ async fn do_examine(
     // Quick item-type sniffing: find a matching object and report its type.
     let key = arg.to_ascii_lowercase();
     let w = world.lock().await;
-    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>, i32)> = me.inventory.iter()
+    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>, i32, Option<i32>)> = me.inventory.iter()
         .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
         .find_map(|&iid| {
             let o = w.obj_instances.iter().find(|o| o.id == iid)?;
             let p = w.obj_protos.get(&o.vnum)?;
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
-                Some((p.item_type, p.value, p.affected.clone(), o.condition))
+                Some((p.item_type, p.value, p.affected.clone(), o.condition, o.brewed_spell))
             } else {
                 None
             }
         });
 
-    if let Some((ty, vals, affs, cond)) = proto_info {
+    if let Some((ty, vals, affs, cond, brewed)) = proto_info {
         let kind = item_type_name(ty);
         let extra = match ty {
             // ITEM_WEAPON: value[1] dice count, value[2] dice size, value[3] damage type
@@ -10177,6 +10362,13 @@ async fn do_examine(
         let mut out = base.text;
         out.push_str(&extra);
         out.push_str(&format!("It is in {} condition.\r\n", condition_label(cond)));
+        if let Some(spell_vnum) = brewed {
+            if let Some(label) = spell_vnum_to_label(spell_vnum) {
+                out.push_str(&format!("It glimmers with the bound spell: {label}.\r\n"));
+            } else {
+                out.push_str("It glimmers with a strange brewed magic.\r\n");
+            }
+        }
         if !affs.is_empty() {
             out.push_str("Affects:\r\n");
             for a in &affs {

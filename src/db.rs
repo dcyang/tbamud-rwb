@@ -426,14 +426,43 @@ pub fn load_world(data_dir: &str) -> Result<World> {
         .filter(|(_, r)| r.room_flags[0] & crate::world::ROOM_HOUSE != 0)
         .map(|(v, _)| *v).collect();
     let mut restored_total = 0usize;
-    for rv in house_rooms {
-        restored_total += load_house(data_dir, rv, &mut world);
+    for rv in &house_rooms {
+        restored_total += load_house(data_dir, *rv, &mut world);
+        if let Some(owner) = load_house_owner(data_dir, *rv) {
+            world.house_owners.insert(*rv, owner);
+        }
     }
-    if restored_total > 0 {
-        tracing::info!(items = restored_total, "Restored house contents");
+    if restored_total > 0 || !world.house_owners.is_empty() {
+        tracing::info!(
+            items = restored_total,
+            houses = world.house_owners.len(),
+            "Restored house contents",
+        );
     }
 
     Ok(world)
+}
+
+/// Read the owner name from `<data_dir>/house/<vnum>.owner`, if any.
+pub fn load_house_owner(data_dir: &str, room_vnum: i32) -> Option<String> {
+    let path = format!("{data_dir}/house/{room_vnum}.owner");
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Write the owner name to `<data_dir>/house/<vnum>.owner`.  Pass an
+/// empty string to clear (file is removed).
+pub fn save_house_owner(data_dir: &str, room_vnum: i32, owner: &str) {
+    let dir = format!("{data_dir}/house");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{dir}/{room_vnum}.owner");
+    if owner.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let _ = std::fs::write(&path, owner);
+    }
 }
 
 /// Persist the floor objects of a ROOM_HOUSE room to
@@ -455,6 +484,9 @@ pub fn save_house(data_dir: &str, room_vnum: i32, world: &crate::world::World) {
         // Skip corpses (transient).
         if o.corpse_of.is_some() { continue; }
         let mut line = format!("{} c={}", o.vnum, o.condition);
+        if let Some(s) = o.brewed_spell {
+            line.push_str(&format!(" b={s}"));
+        }
         for &cid in &o.contents {
             if let Some(c) = world.obj_instances.iter().find(|x| x.id == cid) {
                 line.push(' ');
@@ -483,11 +515,18 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
         if parts.is_empty() { continue; }
         let Ok(vnum) = parts[0].parse::<i32>() else { continue; };
         let mut condition = 100;
+        let mut brewed_spell: Option<i32> = None;
         let mut contents: Vec<i32> = Vec::new();
         for tok in &parts[1..] {
             if let Some(rest) = tok.strip_prefix("c=") {
                 if let Ok(n) = rest.parse::<i32>() {
                     condition = n.clamp(0, 100);
+                    continue;
+                }
+            }
+            if let Some(rest) = tok.strip_prefix("b=") {
+                if let Ok(n) = rest.parse::<i32>() {
+                    brewed_spell = Some(n);
                     continue;
                 }
             }
@@ -497,6 +536,7 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
         if let Some(o) = world.obj_instances.iter_mut().find(|o| o.id == iid) {
             o.in_room = room_vnum;
             o.condition = condition;
+            o.brewed_spell = brewed_spell;
         }
         if let Some(r) = world.rooms.get_mut(&room_vnum) {
             r.objects.push(iid);
@@ -519,6 +559,9 @@ pub const NEWBIE_WEAPON_VNUM:  crate::world::ObjVnum = 99001;
 pub const NEWBIE_ARMOR_VNUM:   crate::world::ObjVnum = 99002;
 pub const NEWBIE_LIGHT_VNUM:   crate::world::ObjVnum = 99003;
 pub const NEWBIE_BREAD_VNUM:   crate::world::ObjVnum = 99004;
+/// Synthetic proto used by `cast brew`.  The cast spawns an instance
+/// of this vnum and sets `obj.brewed_spell` per-instance.
+pub const BREWED_POTION_VNUM:  crate::world::ObjVnum = 99005;
 
 /// Insert four hardcoded synthetic prototypes so the first-login path
 /// can spawn a class-aware newbie kit without depending on world-file
@@ -586,6 +629,23 @@ fn inject_newbie_kit_protos(world: &mut crate::world::World) {
         wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
         affect_flags: [0;4],
         value: [5, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99005: generic brewed potion — each instance overrides which
+    // spell it carries via `ObjInstance.brewed_spell`.
+    world.obj_protos.insert(BREWED_POTION_VNUM, ObjProto {
+        vnum: BREWED_POTION_VNUM,
+        name: "potion vial brewed".to_string(),
+        short_description: "a brewed potion".to_string(),
+        description: "A small glass vial swirls with mystic vapor.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_POTION,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 0, 0, 0],
         weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
         extras: Vec::new(),
         affected: Vec::new(),
@@ -2052,6 +2112,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         timer: init_timer,
                         light_lit: false,
                         condition: 100,
+                        brewed_spell: None,
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -2067,6 +2128,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         timer: init_timer,
                         light_lit: false,
                         condition: 100,
+                        brewed_spell: None,
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -2104,6 +2166,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     timer: init_timer,
                     light_lit: false,
                     condition: 100,
+                    brewed_spell: None,
                 });
                 let equipped = if cmd.command == 'E' {
                     let pos = cmd.arg3 as usize;
@@ -2152,6 +2215,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     timer: init_timer,
                         light_lit: false,
                         condition: 100,
+                        brewed_spell: None,
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {

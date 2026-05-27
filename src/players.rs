@@ -580,6 +580,9 @@ pub struct SavedObj {
     /// Item condition (0..=100); default 100 for older save files that
     /// omit the `c=<n>` marker.
     pub condition: i32,
+    /// Player-brewed spell vnum stored on a potion (cp173).  None for
+    /// world items.  Serialized as `b=<vnum>` when set.
+    pub brewed_spell: Option<i32>,
     /// Vnums of objects this container holds.  Empty for non-containers
     /// and empty containers.  Format on disk: appended as space-separated
     /// integers after the slot field, e.g. "3105 inv c=85 100 200".
@@ -617,9 +620,10 @@ pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
                 Err(_) => continue,
             },
         };
-        // Optional `c=<N>` condition marker, anywhere in the trailing
-        // tokens.  Everything else is parsed as content vnums.
+        // Optional `c=<N>` condition + `b=<N>` brewed-spell markers,
+        // anywhere in the trailing tokens.  Everything else is content vnums.
         let mut condition = 100i32;
+        let mut brewed_spell: Option<i32> = None;
         let mut contents: Vec<i32> = Vec::new();
         for tok in &parts[2..] {
             if let Some(rest) = tok.strip_prefix("c=") {
@@ -628,11 +632,17 @@ pub fn load_objs(data_dir: &str, name: &str) -> Vec<SavedObj> {
                     continue;
                 }
             }
+            if let Some(rest) = tok.strip_prefix("b=") {
+                if let Ok(n) = rest.parse::<i32>() {
+                    brewed_spell = Some(n);
+                    continue;
+                }
+            }
             if let Ok(n) = tok.parse::<i32>() {
                 contents.push(n);
             }
         }
-        out.push(SavedObj { vnum, slot, condition, contents });
+        out.push(SavedObj { vnum, slot, condition, brewed_spell, contents });
     }
     out
 }
@@ -664,11 +674,15 @@ pub fn save_objs(data_dir: &str, name: &str, entries: &[SavedObj]) -> Result<()>
         let cond_str = if e.condition < 100 {
             format!(" c={}", e.condition)
         } else { String::new() };
+        let brew_str = match e.brewed_spell {
+            Some(n) => format!(" b={n}"),
+            None    => String::new(),
+        };
         if e.contents.is_empty() {
-            writeln!(f, "{} {slot_str}{cond_str}", e.vnum)?;
+            writeln!(f, "{} {slot_str}{cond_str}{brew_str}", e.vnum)?;
         } else {
             let inner: Vec<String> = e.contents.iter().map(|v| v.to_string()).collect();
-            writeln!(f, "{} {slot_str}{cond_str} {}", e.vnum, inner.join(" "))?;
+            writeln!(f, "{} {slot_str}{cond_str}{brew_str} {}", e.vnum, inner.join(" "))?;
         }
     }
     Ok(())

@@ -76,6 +76,7 @@ pub enum Skill {
     ColorSpray,
     AcidBlast,
     ChillTouch,
+    Brew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +144,7 @@ impl Skill {
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
+            "brew"                            => Some(Skill::Brew),
             _ => None,
         }
     }
@@ -199,6 +201,7 @@ impl Skill {
             Skill::ColorSpray    => "color spray",
             Skill::AcidBlast     => "acid blast",
             Skill::ChillTouch    => "chill touch",
+            Skill::Brew          => "brew",
         }
     }
 
@@ -223,6 +226,7 @@ impl Skill {
                 | Skill::CureSerious   | Skill::Heal
                 | Skill::Infravision   | Skill::ColorSpray
                 | Skill::AcidBlast     | Skill::ChillTouch
+                | Skill::Brew
                                       => SkillKind::Spell,
         }
     }
@@ -271,6 +275,7 @@ impl Skill {
             Skill::ColorSpray    => 18,
             Skill::AcidBlast     => 25,
             Skill::ChillTouch    => 10,
+            Skill::Brew          => 50,
         }
     }
 
@@ -329,6 +334,7 @@ impl Skill {
             Skill::ColorSpray    => &[Class::MagicUser],
             Skill::AcidBlast     => &[Class::MagicUser],
             Skill::ChillTouch    => &[Class::MagicUser],
+            Skill::Brew          => &[Class::Cleric, Class::MagicUser],
         }
     }
 
@@ -388,6 +394,7 @@ impl Skill {
             Skill::ColorSpray    => "color-spray",
             Skill::AcidBlast     => "acid-blast",
             Skill::ChillTouch    => "chill-touch",
+            Skill::Brew          => "brew",
         }
     }
 
@@ -415,7 +422,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
-    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch,
+    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew,
 ];
 
 // ---------------------------------------------------------------------------

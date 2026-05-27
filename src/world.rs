@@ -273,6 +273,10 @@ pub struct ObjInstance {
     /// at 0 are extracted by the combat path that landed the final
     /// hit (player or mob).
     pub condition: i32,
+    /// CircleMUD spell vnum stored on a player-brewed potion.  `do_quaff`
+    /// applies this single spell instead of the proto's value[1..3]
+    /// when set.  Cleared on consumption (the obj is extracted anyway).
+    pub brewed_spell: Option<i32>,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -587,6 +591,9 @@ pub struct World {
     pub triggers:      BTreeMap<TriggerVnum, Trigger>,
     pub help:          Vec<HelpEntry>,
     pub socials:       Vec<Social>,
+    /// In-memory cache of `<data_dir>/house/<vnum>.owner` files, keyed
+    /// by room vnum.  Populated at boot; updated by `do_house` writes.
+    pub house_owners:  std::collections::HashMap<RoomVnum, String>,
 }
 
 /// One entry from the help database (lib/text/help/help.hlp).  Keywords
@@ -744,6 +751,7 @@ impl World {
             timer: None,
             light_lit: false,
             condition: 100,
+            brewed_spell: None,
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -854,6 +862,7 @@ impl World {
             timer,
             light_lit: false,
             condition: 100,
+            brewed_spell: None,
         });
         Some(id)
     }

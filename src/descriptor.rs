@@ -347,9 +347,10 @@ pub async fn handle_connection(
                         let mut w = world.lock().await;
                         for e in entries {
                             if let Some(iid) = w.spawn_obj(e.vnum) {
-                                // Restore persisted condition.
+                                // Restore persisted condition + brewed-spell.
                                 if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
                                     o.condition = e.condition;
+                                    o.brewed_spell = e.brewed_spell;
                                 }
                                 // Spawn any container contents and link them.
                                 for &cvnum in &e.contents {
@@ -710,6 +711,7 @@ async fn run_game_session(
                     vnum: o.vnum,
                     slot,
                     condition: o.condition,
+                    brewed_spell: o.brewed_spell,
                     contents: content_vnums,
                 },
                 to_remove_local,
