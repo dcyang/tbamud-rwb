@@ -76,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
-    "hp", "mana", "mv", "gold", "repair",
+    "hp", "mana", "mv", "gold", "repair", "heal",
     "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
@@ -252,6 +252,7 @@ pub async fn dispatch_command(
         Some("mv")         => CmdOutput::text(format!("\r\nMove: {}/{}\r\n", me.movement, me.max_movement)),
         Some("gold")       => CmdOutput::text(format!("\r\nGold: {}  Bank: {}\r\n", me.gold, me.bank_gold)),
         Some("repair")     => do_repair(rest, me, world).await,
+        Some("heal")       => do_heal_service(me, world, chars).await,
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
@@ -3645,7 +3646,7 @@ async fn do_spec_assign(
     let name   = parts.next().unwrap_or("").to_ascii_lowercase();
     let Ok(vnum) = vnum_s.parse::<i32>() else {
         return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|none>\r\n".to_string()
         );
     };
     let spec: Option<crate::world::MobSpec> = match name.as_str() {
@@ -3655,9 +3656,10 @@ async fn do_spec_assign(
         "cityguard" => Some(crate::world::MobSpec::Cityguard),
         "snake"     => Some(crate::world::MobSpec::Snake),
         "magicuser" | "mu" => Some(crate::world::MobSpec::MagicUser),
+        "healer"    => Some(crate::world::MobSpec::Healer),
         "none" | "off" | "clear" => None,
         ""          => return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|none>\r\n".to_string()
         ),
         _ => return CmdOutput::text(format!("\r\nUnknown spec '{name}'.\r\n")),
     };
@@ -5285,6 +5287,59 @@ async fn do_repair(arg: &str, me: &mut Character, world: &Arc<Mutex<World>>) -> 
     ))
 }
 
+/// `heal` — at a Healer-spec'd mob's room, restores the player's HP
+/// (and mana, half-rate) for gold.  Cost: 1 gold per HP missing.
+async fn do_heal_service(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    // Find a Healer mob in the room.
+    let healer_short = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+        };
+        let mut hit: Option<String> = None;
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            if m.spec != Some(crate::world::MobSpec::Healer) { continue; }
+            hit = w.mob_protos.get(&m.vnum).map(|p| p.short_descr.clone());
+            break;
+        }
+        hit
+    };
+    let Some(short) = healer_short else {
+        return CmdOutput::text(
+            "\r\nThere is no healer here to tend to your wounds.\r\n".to_string()
+        );
+    };
+    let missing_hp   = (me.max_hp   - me.hp).max(0);
+    let missing_mana = (me.max_mana - me.mana).max(0);
+    let cost = (missing_hp + missing_mana / 2).max(0) as i64;
+    if cost == 0 {
+        return CmdOutput::text(format!(
+            "\r\n{short} smiles: you have no wounds to mend.\r\n"
+        ));
+    }
+    if me.gold < cost {
+        return CmdOutput::text(format!(
+            "\r\n{short} murmurs: you need {cost} gold to be made whole; you have {}.\r\n",
+            me.gold,
+        ));
+    }
+    me.gold -= cost;
+    me.hp = me.max_hp;
+    me.mana = me.max_mana;
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} channels restorative light over {}.\r\n", short, me.name));
+    CmdOutput::text(format!(
+        "\r\n{short} mends your wounds for {cost} gold.\r\nHP: {}/{}  Mana: {}/{}\r\n",
+        me.hp, me.max_hp, me.mana, me.max_mana,
+    ))
+}
+
 /// `clan [name]` — empty arg shows clan + online members.  Otherwise
 /// joins the named clan (any string, no validation).  `clan -` leaves.
 async fn do_clan(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
@@ -6297,6 +6352,8 @@ async fn do_cast(
         crate::character::Skill::AcidBlast    => cast_acid_blast(target, me, world, chars, learned).await,
         crate::character::Skill::ChillTouch   => cast_chill_touch(target, me, world, chars, learned).await,
         crate::character::Skill::Brew         => cast_brew(target, me, world).await,
+        crate::character::Skill::Scribe       => cast_scribe(target, me, world).await,
+        crate::character::Skill::Enchant      => cast_enchant(target, me, world).await,
         crate::character::Skill::DetectMagic  => cast_detect_magic(me, world).await,
         crate::character::Skill::Poison       => cast_poison(target, me, world, chars, learned).await,
         crate::character::Skill::Sleep        => cast_debuff(target, me, world, chars, learned, crate::character::Skill::Sleep).await,
@@ -8423,13 +8480,18 @@ async fn cast_identify(
     if !slots.is_empty() {
         s.push_str(&format!("  wearable:  {}\r\n", slots.join(", ")));
     }
-    // Affects (cp36 ObjAffect list).
-    if !p.affected.is_empty() {
+    // Affects (cp36 proto + cp177 per-instance enchantments).
+    if !p.affected.is_empty() || !obj.bonus_affects.is_empty() {
         s.push_str("  affects:\r\n");
         for a in &p.affected {
             let name = apply_name(a.location);
             let sign = if a.modifier >= 0 { "+" } else { "" };
             s.push_str(&format!("    {} by {sign}{}\r\n", name, a.modifier));
+        }
+        for a in &obj.bonus_affects {
+            let name = apply_name(a.location);
+            let sign = if a.modifier >= 0 { "+" } else { "" };
+            s.push_str(&format!("    {} by {sign}{} (enchant)\r\n", name, a.modifier));
         }
     }
     // Anti-class / anti-alignment hints (cp124/125).
@@ -9467,6 +9529,128 @@ async fn cast_brew(
     ))
 }
 
+/// `cast enchant <weapon>` — adds +1 hitroll and +1 damroll to a
+/// weapon in inventory.  Capped at +3 total bonus per stat.  Item
+/// must be ITEM_WEAPON and unwielded (so we don't have to retroactively
+/// patch `me.bonus_hitroll`/`damroll`).
+async fn cast_enchant(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    use crate::world::{APPLY_HITROLL, APPLY_DAMROLL, ITEM_WEAPON};
+    let kw = target_kw.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nEnchant what?\r\n".to_string());
+    }
+    // Find by keyword in inventory only (not equipped — see above).
+    let (iid, short) = {
+        let w = world.lock().await;
+        let mut hit: Option<(u32, String)> = None;
+        for &iid in &me.inventory {
+            let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+            if p.item_type != ITEM_WEAPON { continue; }
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
+                hit = Some((iid, p.short_description.clone()));
+                break;
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(
+                "\r\nYou have no such weapon to enchant (it must be in your inventory).\r\n".to_string(),
+            ),
+        }
+    };
+    // Cap check: sum hitroll + damroll bonus on this instance.
+    let already = {
+        let w = world.lock().await;
+        let o = w.obj_instances.iter().find(|o| o.id == iid);
+        let mut hr = 0; let mut dr = 0;
+        if let Some(o) = o {
+            for a in &o.bonus_affects {
+                if a.location == APPLY_HITROLL { hr += a.modifier; }
+                if a.location == APPLY_DAMROLL { dr += a.modifier; }
+            }
+        }
+        (hr, dr)
+    };
+    if already.0 >= 3 || already.1 >= 3 {
+        return CmdOutput::text(format!(
+            "\r\n{short} already crackles with as much enchantment as it can hold.\r\n"
+        ));
+    }
+    me.mana -= crate::character::Skill::Enchant.mana_cost();
+    {
+        let mut w = world.lock().await;
+        if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+            o.bonus_affects.push(crate::world::ObjAffect {
+                location: APPLY_HITROLL, modifier: 1,
+            });
+            o.bonus_affects.push(crate::world::ObjAffect {
+                location: APPLY_DAMROLL, modifier: 1,
+            });
+        }
+    }
+    CmdOutput::text(format!(
+        "\r\n{short} hums and accepts the enchantment (+1 hitroll, +1 damroll).\r\n"
+    ))
+}
+
+/// `cast scribe <spell>` — like `brew` but produces a single-use
+/// scroll (vnum 99006).  Reuses the `brewed_spell` per-instance
+/// override; `do_recite` checks for it before falling back to proto
+/// value slots.
+async fn cast_scribe(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    let Some(skill) = crate::character::Skill::parse(target_kw) else {
+        return CmdOutput::text(format!(
+            "\r\nYou don't know the spell '{target_kw}'.\r\n"
+        ));
+    };
+    if skill == crate::character::Skill::Scribe || skill == crate::character::Skill::Brew {
+        return CmdOutput::text("\r\nThat isn't a scribable spell.\r\n".to_string());
+    }
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text(format!(
+            "\r\nYour class can't cast {} — nothing to scribe.\r\n", skill.name(),
+        ));
+    }
+    let Some(spell_vnum) = skill_to_potion_vnum(skill) else {
+        return CmdOutput::text(format!(
+            "\r\n{} can't be inked onto a scroll.\r\n", skill.name(),
+        ));
+    };
+    let learned = *me.skills.get(&skill).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(format!(
+            "\r\nYou've never practised {}.\r\n", skill.name(),
+        ));
+    }
+    me.mana -= crate::character::Skill::Scribe.mana_cost();
+    let new_iid: Option<u32> = {
+        let mut w = world.lock().await;
+        let iid = w.spawn_obj(crate::db::SCRIBED_SCROLL_VNUM);
+        if let Some(iid) = iid {
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.brewed_spell = Some(spell_vnum);
+            }
+        }
+        iid
+    };
+    let Some(iid) = new_iid else {
+        return CmdOutput::text("\r\nYour quill snaps; the spell is wasted.\r\n".to_string());
+    };
+    me.inventory.push(iid);
+    CmdOutput::text(format!(
+        "\r\nYou ink the runes of {} onto fresh parchment.\r\n", skill.name(),
+    ))
+}
+
 async fn apply_item_spell(
     spell_vnum: i32,
     target_kw: &str,
@@ -9825,15 +10009,28 @@ async fn do_recite(
         return CmdOutput::text("\r\nYou have no such scroll.\r\n".to_string());
     };
 
+    // Brewed-scroll override (cp176): if `brewed_spell` is set on the
+    // instance, apply that spell instead of the proto's value[1..3].
+    let brewed = {
+        let w = world.lock().await;
+        w.obj_instances.iter().find(|o| o.id == iid)
+            .and_then(|o| o.brewed_spell)
+    };
+
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id),
         &format!("{} recites {}.\r\n", me.name, short));
     drop(cl);
 
     let mut text = format!("\r\nYou recite {} which dissolves.\r\n", short);
-    for slot in 1..4 {
-        let s = apply_item_spell(value[slot], target, me, world, chars).await;
+    if let Some(spell_vnum) = brewed {
+        let s = apply_item_spell(spell_vnum, target, me, world, chars).await;
         text.push_str(&s);
+    } else {
+        for slot in 1..4 {
+            let s = apply_item_spell(value[slot], target, me, world, chars).await;
+            text.push_str(&s);
+        }
     }
     me.inventory.retain(|&i| i != iid);
     {
@@ -10116,10 +10313,12 @@ fn apply_obj_affects(me: &mut Character, affects: &[crate::world::ObjAffect], di
 /// `apply_obj_affects` (which mutates `me`).
 async fn snapshot_obj_affects(iid: u32, world: &Arc<Mutex<World>>) -> Vec<crate::world::ObjAffect> {
     let w = world.lock().await;
-    w.obj_instances.iter().find(|o| o.id == iid)
-        .and_then(|o| w.obj_protos.get(&o.vnum))
+    let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { return Vec::new() };
+    let mut out: Vec<crate::world::ObjAffect> = w.obj_protos.get(&o.vnum)
         .map(|p| p.affected.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    out.extend(o.bonus_affects.iter().cloned());
+    out
 }
 
 /// Return Some(label) if the player is barred from wearing/wielding
@@ -10336,19 +10535,20 @@ async fn do_examine(
     // Quick item-type sniffing: find a matching object and report its type.
     let key = arg.to_ascii_lowercase();
     let w = world.lock().await;
-    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>, i32, Option<i32>)> = me.inventory.iter()
+    let proto_info: Option<(i32, [i32; 4], Vec<crate::world::ObjAffect>, i32, Option<i32>, Vec<crate::world::ObjAffect>)> = me.inventory.iter()
         .chain(me.equipment.iter().filter_map(|s| s.as_ref()))
         .find_map(|&iid| {
             let o = w.obj_instances.iter().find(|o| o.id == iid)?;
             let p = w.obj_protos.get(&o.vnum)?;
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
-                Some((p.item_type, p.value, p.affected.clone(), o.condition, o.brewed_spell))
+                Some((p.item_type, p.value, p.affected.clone(),
+                      o.condition, o.brewed_spell, o.bonus_affects.clone()))
             } else {
                 None
             }
         });
 
-    if let Some((ty, vals, affs, cond, brewed)) = proto_info {
+    if let Some((ty, vals, affs, cond, brewed, bonus)) = proto_info {
         let kind = item_type_name(ty);
         let extra = match ty {
             // ITEM_WEAPON: value[1] dice count, value[2] dice size, value[3] damage type
@@ -10369,12 +10569,17 @@ async fn do_examine(
                 out.push_str("It glimmers with a strange brewed magic.\r\n");
             }
         }
-        if !affs.is_empty() {
+        if !affs.is_empty() || !bonus.is_empty() {
             out.push_str("Affects:\r\n");
             for a in &affs {
                 let name = apply_name(a.location);
                 let sign = if a.modifier >= 0 { "+" } else { "" };
                 out.push_str(&format!("  {} by {sign}{}\r\n", name, a.modifier));
+            }
+            for a in &bonus {
+                let name = apply_name(a.location);
+                let sign = if a.modifier >= 0 { "+" } else { "" };
+                out.push_str(&format!("  {} by {sign}{} (enchant)\r\n", name, a.modifier));
             }
         }
         return CmdOutput::text(out);

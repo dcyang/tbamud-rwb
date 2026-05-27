@@ -487,6 +487,9 @@ pub fn save_house(data_dir: &str, room_vnum: i32, world: &crate::world::World) {
         if let Some(s) = o.brewed_spell {
             line.push_str(&format!(" b={s}"));
         }
+        for a in &o.bonus_affects {
+            line.push_str(&format!(" a={}:{}", a.location, a.modifier));
+        }
         for &cid in &o.contents {
             if let Some(c) = world.obj_instances.iter().find(|x| x.id == cid) {
                 line.push(' ');
@@ -516,6 +519,7 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
         let Ok(vnum) = parts[0].parse::<i32>() else { continue; };
         let mut condition = 100;
         let mut brewed_spell: Option<i32> = None;
+        let mut bonus_affects: Vec<crate::world::ObjAffect> = Vec::new();
         let mut contents: Vec<i32> = Vec::new();
         for tok in &parts[1..] {
             if let Some(rest) = tok.strip_prefix("c=") {
@@ -530,6 +534,15 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
                     continue;
                 }
             }
+            if let Some(rest) = tok.strip_prefix("a=") {
+                let mut ps = rest.split(':');
+                if let (Some(loc), Some(modi)) = (ps.next(), ps.next()) {
+                    if let (Ok(l), Ok(m)) = (loc.parse::<i32>(), modi.parse::<i32>()) {
+                        bonus_affects.push(crate::world::ObjAffect { location: l, modifier: m });
+                        continue;
+                    }
+                }
+            }
             if let Ok(n) = tok.parse::<i32>() { contents.push(n); }
         }
         let Some(iid) = world.spawn_obj(vnum) else { continue; };
@@ -537,6 +550,7 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
             o.in_room = room_vnum;
             o.condition = condition;
             o.brewed_spell = brewed_spell;
+            o.bonus_affects = bonus_affects;
         }
         if let Some(r) = world.rooms.get_mut(&room_vnum) {
             r.objects.push(iid);
@@ -562,6 +576,9 @@ pub const NEWBIE_BREAD_VNUM:   crate::world::ObjVnum = 99004;
 /// Synthetic proto used by `cast brew`.  The cast spawns an instance
 /// of this vnum and sets `obj.brewed_spell` per-instance.
 pub const BREWED_POTION_VNUM:  crate::world::ObjVnum = 99005;
+/// Synthetic proto used by `cast scribe`.  Each instance overrides
+/// the bound spell via `ObjInstance.brewed_spell`.
+pub const SCRIBED_SCROLL_VNUM: crate::world::ObjVnum = 99006;
 
 /// Insert four hardcoded synthetic prototypes so the first-login path
 /// can spawn a class-aware newbie kit without depending on world-file
@@ -642,6 +659,22 @@ fn inject_newbie_kit_protos(world: &mut crate::world::World) {
         description: "A small glass vial swirls with mystic vapor.".to_string(),
         action_description: String::new(),
         item_type: ITEM_POTION,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99006: generic scribed scroll — each instance overrides its spell.
+    world.obj_protos.insert(SCRIBED_SCROLL_VNUM, ObjProto {
+        vnum: SCRIBED_SCROLL_VNUM,
+        name: "scroll parchment scribed".to_string(),
+        short_description: "a scribed scroll".to_string(),
+        description: "A rolled parchment lies here, inked with mystic glyphs.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_SCROLL,
         extra_flags: [0;4],
         wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
         affect_flags: [0;4],
@@ -1516,6 +1549,10 @@ pub fn spawn_mob_spec_tick(
                         // MagicUser's combat-cast logic lives in
                         // combat.rs (resolve_mob_attack); no idle tick.
                     }
+                    crate::world::MobSpec::Healer => {
+                        // Healer service is invoked by the `heal`
+                        // player command (cp180); no idle tick.
+                    }
                     crate::world::MobSpec::Janitor => {
                         // Pick up the first non-corpse floor object whose
                         // weight ≤ 5 (CircleMUD's threshold) — but we don't
@@ -2113,6 +2150,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         light_lit: false,
                         condition: 100,
                         brewed_spell: None,
+                        bonus_affects: Vec::new(),
                     });
                     last_obj_id = Some(id);
                     last_cmd_ok = true;
@@ -2129,6 +2167,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         light_lit: false,
                         condition: 100,
                         brewed_spell: None,
+                        bonus_affects: Vec::new(),
                     });
                     last_obj_id = Some(id);
                     last_room_vnum = Some(cmd.arg3);
@@ -2167,6 +2206,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     light_lit: false,
                     condition: 100,
                     brewed_spell: None,
+                    bonus_affects: Vec::new(),
                 });
                 let equipped = if cmd.command == 'E' {
                     let pos = cmd.arg3 as usize;
@@ -2216,6 +2256,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         light_lit: false,
                         condition: 100,
                         brewed_spell: None,
+                        bonus_affects: Vec::new(),
                 });
                 if let Some(tid) = target_iid {
                     if let Some(t) = world.obj_instances.iter_mut().find(|o| o.id == tid) {

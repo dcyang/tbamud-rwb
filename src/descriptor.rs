@@ -347,10 +347,15 @@ pub async fn handle_connection(
                         let mut w = world.lock().await;
                         for e in entries {
                             if let Some(iid) = w.spawn_obj(e.vnum) {
-                                // Restore persisted condition + brewed-spell.
+                                // Restore persisted condition + brewed-spell + bonuses.
                                 if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
                                     o.condition = e.condition;
                                     o.brewed_spell = e.brewed_spell;
+                                    o.bonus_affects = e.bonus_affects.iter()
+                                        .map(|(l, m)| crate::world::ObjAffect {
+                                            location: *l, modifier: *m,
+                                        })
+                                        .collect();
                                 }
                                 // Spawn any container contents and link them.
                                 for &cvnum in &e.contents {
@@ -706,12 +711,15 @@ async fn run_game_session(
                     to_remove_local.push(cid);
                 }
             }
+            let bonus_affects: Vec<(i32, i32)> = o.bonus_affects.iter()
+                .map(|a| (a.location, a.modifier)).collect();
             Some((
                 crate::players::SavedObj {
                     vnum: o.vnum,
                     slot,
                     condition: o.condition,
                     brewed_spell: o.brewed_spell,
+                    bonus_affects,
                     contents: content_vnums,
                 },
                 to_remove_local,

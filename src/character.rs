@@ -77,6 +77,8 @@ pub enum Skill {
     AcidBlast,
     ChillTouch,
     Brew,
+    Scribe,
+    Enchant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +147,8 @@ impl Skill {
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
             "brew"                            => Some(Skill::Brew),
+            "scribe"                          => Some(Skill::Scribe),
+            "enchant" | "enchantweapon"       => Some(Skill::Enchant),
             _ => None,
         }
     }
@@ -202,6 +206,8 @@ impl Skill {
             Skill::AcidBlast     => "acid blast",
             Skill::ChillTouch    => "chill touch",
             Skill::Brew          => "brew",
+            Skill::Scribe        => "scribe",
+            Skill::Enchant       => "enchant weapon",
         }
     }
 
@@ -226,7 +232,8 @@ impl Skill {
                 | Skill::CureSerious   | Skill::Heal
                 | Skill::Infravision   | Skill::ColorSpray
                 | Skill::AcidBlast     | Skill::ChillTouch
-                | Skill::Brew
+                | Skill::Brew          | Skill::Scribe
+                | Skill::Enchant
                                       => SkillKind::Spell,
         }
     }
@@ -276,6 +283,8 @@ impl Skill {
             Skill::AcidBlast     => 25,
             Skill::ChillTouch    => 10,
             Skill::Brew          => 50,
+            Skill::Scribe        => 40,
+            Skill::Enchant       => 60,
         }
     }
 
@@ -335,6 +344,8 @@ impl Skill {
             Skill::AcidBlast     => &[Class::MagicUser],
             Skill::ChillTouch    => &[Class::MagicUser],
             Skill::Brew          => &[Class::Cleric, Class::MagicUser],
+            Skill::Scribe        => &[Class::Cleric, Class::MagicUser],
+            Skill::Enchant       => &[Class::MagicUser],
         }
     }
 
@@ -395,6 +406,8 @@ impl Skill {
             Skill::AcidBlast     => "acid-blast",
             Skill::ChillTouch    => "chill-touch",
             Skill::Brew          => "brew",
+            Skill::Scribe        => "scribe",
+            Skill::Enchant       => "enchant-weapon",
         }
     }
 
@@ -422,7 +435,8 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
-    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew,
+    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew, Skill::Scribe,
+    Skill::Enchant,
 ];
 
 // ---------------------------------------------------------------------------

@@ -277,6 +277,11 @@ pub struct ObjInstance {
     /// applies this single spell instead of the proto's value[1..3]
     /// when set.  Cleared on consumption (the obj is extracted anyway).
     pub brewed_spell: Option<i32>,
+    /// Per-instance stat affects (cp177) layered on top of the proto's
+    /// `affected` list.  Examples: `enchant weapon` pushes +1 hitroll
+    /// here.  Persisted alongside condition; capped at a small total
+    /// to prevent stacking.
+    pub bonus_affects: Vec<ObjAffect>,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -529,6 +534,8 @@ pub enum MobSpec {
     /// In combat, casts a tier-appropriate damage spell at higher
     /// cadence than the legacy keyword-matching `should_cast` heuristic.
     MagicUser,
+    /// Service mob: players in the room can `heal` for gold.
+    Healer,
 }
 
 impl MobSpec {
@@ -541,6 +548,7 @@ impl MobSpec {
             12 => Some(MobSpec::Janitor),
             13 => Some(MobSpec::Snake),
             18 => Some(MobSpec::Cityguard),
+            15 => Some(MobSpec::Healer),
             _  => None,
         }
     }
@@ -752,6 +760,7 @@ impl World {
             light_lit: false,
             condition: 100,
             brewed_spell: None,
+            bonus_affects: Vec::new(),
         });
         if let Some(r) = self.rooms.get_mut(&room) {
             r.objects.push(id);
@@ -863,6 +872,7 @@ impl World {
             light_lit: false,
             condition: 100,
             brewed_spell: None,
+            bonus_affects: Vec::new(),
         });
         Some(id)
     }
