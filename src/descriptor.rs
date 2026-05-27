@@ -331,6 +331,7 @@ pub async fn handle_connection(
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
                     afk_msg:          None,
                     last_activity:    std::time::Instant::now(),
+                    recall_cooldown_until: None,
                 };
 
                 // Settle any pending level-ups (e.g. character was offline

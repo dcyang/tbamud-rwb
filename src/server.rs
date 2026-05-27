@@ -108,6 +108,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn random ambient encounter tick ------------------------------
     db::spawn_random_encounter_tick(Arc::clone(&world));
 
+    // --- Spawn out-of-combat mob HP regen tick ---------------------------
+    db::spawn_mob_regen_tick(Arc::clone(&world));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 

@@ -1277,6 +1277,44 @@ pub fn spawn_random_encounter_tick(
     });
 }
 
+/// Out-of-combat mob HP regen.  Every TICK_SECONDS, walks every live
+/// mob; for any not currently fighting AND below max_hp, restores a
+/// chunk (~10% of max_hp, min 1).  Mobs with the Poison affect skip
+/// regen — the combat-tick Phase 0 DoT loop handles them.  Keeps
+/// partially-bloodied mobs from staying weak forever.
+pub fn spawn_mob_regen_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<crate::world::World>>,
+) {
+    const TICK_SECONDS: u64 = 30;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let mut w = world.lock().await;
+            let mut healed = 0usize;
+            for m in w.mob_instances.iter_mut() {
+                if m.fighting.is_some() { continue; }
+                if m.hp >= m.max_hp { continue; }
+                if m.affects.iter().any(|a|
+                    a.skill == crate::character::Skill::Poison
+                ) { continue; }
+                let gain = (m.max_hp / 10).max(1);
+                m.hp = (m.hp + gain).min(m.max_hp);
+                healed += 1;
+            }
+            if healed > 0 {
+                tracing::debug!(healed, "Mob regen tick");
+            }
+        }
+    });
+}
+
 pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
     const TICK_SECONDS: u64 = 60;
     tokio::spawn(async move {

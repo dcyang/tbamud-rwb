@@ -57,6 +57,23 @@ pub static WIZLOCK_LEVEL: std::sync::atomic::AtomicI32 =
 /// boot and mutated at runtime by the `ban`/`unban` commands.
 pub static BAD_SITES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
 
+/// Recent channel chatter, keyed by channel name ("gossip" / "info" /
+/// "shout" / "auction").  Each ring is capped at 20 entries.  Used
+/// by `do_chans`.
+pub static CHANNEL_HISTORY: OnceLock<Arc<Mutex<std::collections::HashMap<&'static str, std::collections::VecDeque<(String, String)>>>>> = OnceLock::new();
+
+/// Push a message into the named channel's history (creating the
+/// ring if needed).  Safe to call concurrently.
+pub async fn record_channel(channel: &'static str, sender: &str, msg: &str) {
+    let cell = CHANNEL_HISTORY.get_or_init(|| {
+        Arc::new(Mutex::new(std::collections::HashMap::new()))
+    });
+    let mut g = cell.lock().await;
+    let ring = g.entry(channel).or_insert_with(std::collections::VecDeque::new);
+    if ring.len() >= 20 { ring.pop_front(); }
+    ring.push_back((sender.to_string(), msg.to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Command table
 // ---------------------------------------------------------------------------
@@ -75,7 +92,7 @@ const COMMANDS: &[&str] = &[
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist", "autotitle", "history", "tells", "prefs", "worth",
+    "autoexit", "autoloot", "autoassist", "autotitle", "history", "tells", "chans", "prefs", "worth",
     "hp", "mana", "mv", "gold", "repair", "heal", "petlist", "petbuy", "petdismiss",
     "clan", "ctell", "clans", "map", "whois", "hint",
     "sneak", "hide", "steal",
@@ -247,6 +264,7 @@ pub async fn dispatch_command(
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
         Some("history")    => do_history(me),
         Some("tells")      => do_tells(me),
+        Some("chans") | Some("channels") => do_chans(rest).await,
         Some("prefs")      => do_prefs(rest, me),
         Some("worth")      => do_worth(me, world).await,
         Some("hp")         => CmdOutput::text(format!("\r\nHP:   {}/{}\r\n", me.hp, me.max_hp)),
@@ -371,7 +389,7 @@ pub async fn dispatch_command(
         Some("reload")    => do_reload(rest, me, chars, players).await,
         Some("spec_assign") | Some("specassign") => do_spec_assign(rest, me, world).await,
         Some("top")       => do_top(rest, me, chars).await,
-        Some("pkilllog") | Some("pkill_log") => do_pkill_log(me, players).await,
+        Some("pkilllog") | Some("pkill_log") => do_pkill_log(rest, me, players).await,
         Some("quit")      => CmdOutput::quit("Goodbye.\r\n"),
         Some("north") | Some("east") | Some("south") |
         Some("west")  | Some("up")   | Some("down")   => {
@@ -2188,6 +2206,47 @@ async fn do_group(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutp
         }
         return CmdOutput::text("\r\nGroup invitation declined.\r\n".to_string());
     }
+    // `group status` — HP/mana/movement table for every member.  Anyone
+    // in the group can run it (leader OR follower).  Same-room not
+    // required — a healer in a back room can still watch the front line.
+    if sub.eq_ignore_ascii_case("status") {
+        if !me.grouped && me.following.is_none() {
+            return CmdOutput::text(
+                "\r\nYou're not in any group.\r\n".to_string()
+            );
+        }
+        let leader_id = me.following.unwrap_or(me.id);
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        let mut rows: Vec<String> = Vec::new();
+        for ph in &handles {
+            let is_leader   = ph.id == leader_id;
+            let is_follower = {
+                let c = ph.character.lock().await;
+                c.following == Some(leader_id) && c.grouped
+            };
+            if !(is_leader || is_follower) { continue; }
+            let c = ph.character.lock().await;
+            let pos = c.position.room_verb();
+            rows.push(format!(
+                "  {:<14} lvl {:>2}  hp {:>4}/{:<4}  mn {:>4}/{:<4}  mv {:>4}/{:<4}  ({})\r\n",
+                c.name, c.level,
+                c.hp, c.max_hp,
+                c.mana, c.max_mana,
+                c.movement, c.max_movement,
+                pos.trim_start_matches("is "),
+            ));
+        }
+        let mut text = String::from("\r\nGroup status:\r\n");
+        if rows.is_empty() {
+            text.push_str("  (no online group members)\r\n");
+        } else {
+            text.extend(rows);
+        }
+        return CmdOutput::text(text);
+    }
     if arg.is_empty() {
         // List the group: me + all online followers of me with grouped=true.
         let cl = chars.lock().await;
@@ -2411,6 +2470,7 @@ async fn do_auction(
         if off { continue; }
         let _ = ph.send.send(formatted.clone());
     }
+    record_channel("auction", &me.name, msg).await;
     CmdOutput::text(format!("\r\n@YYou auction, '{msg}'@n\r\n"))
 }
 
@@ -2519,6 +2579,7 @@ async fn do_gossip(
         if off { continue; }
         let _ = ph.send.send(formatted.clone());
     }
+    record_channel("gossip", &me.name, msg).await;
     CmdOutput::text(format!("\r\n@cYou gossip, '{msg}'@n\r\n"))
 }
 
@@ -3516,7 +3577,11 @@ async fn do_status(
 
 /// `pkilllog` (LVL_IMMORT+) — dump the last 20 entries of
 /// `<data_dir>/log/pkill.log`.
-async fn do_pkill_log(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
+async fn do_pkill_log(
+    arg: &str,
+    me: &Character,
+    players: &Arc<Mutex<PlayerDb>>,
+) -> CmdOutput {
     if me.level < LVL_IMMORT { return immort_huh(); }
     let data_dir = players.lock().await.data_dir().to_string();
     let path = format!("{data_dir}/log/pkill.log");
@@ -3524,9 +3589,22 @@ async fn do_pkill_log(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutp
     if body.is_empty() {
         return CmdOutput::text("\r\nNo PvP kills recorded yet.\r\n".to_string());
     }
-    let lines: Vec<&str> = body.lines().collect();
+    let filter = arg.trim().to_ascii_lowercase();
+    let lines: Vec<&str> = body.lines()
+        .filter(|l| filter.is_empty() || l.to_ascii_lowercase().contains(&filter))
+        .collect();
+    if lines.is_empty() {
+        return CmdOutput::text(format!(
+            "\r\nNo PvP kills mention '{}'.\r\n", arg.trim()
+        ));
+    }
     let tail = lines.iter().rev().take(20).rev().copied().collect::<Vec<_>>();
-    let mut s = String::from("\r\n=== Last 20 PvP kills ===\r\n");
+    let header = if filter.is_empty() {
+        String::from("\r\n=== Last 20 PvP kills ===\r\n")
+    } else {
+        format!("\r\n=== Last 20 PvP kills mentioning '{}' ===\r\n", arg.trim())
+    };
+    let mut s = header;
     for l in tail {
         s.push_str(l);
         s.push_str("\r\n");
@@ -5131,6 +5209,7 @@ async fn do_info(
         if off { continue; }
         let _ = ph.send.send(formatted.clone());
     }
+    record_channel("info", &me.name, msg).await;
     CmdOutput::text(format!("\r\n@g[info] You ask: '{msg}'@n\r\n"))
 }
 
@@ -5183,6 +5262,7 @@ async fn do_shout(
         if off { continue; }
         let _ = ph.send.send(formatted.clone());
     }
+    record_channel("shout", &me.name, msg).await;
     CmdOutput::text(format!("\r\n@YYou shout, '{msg}'@n\r\n"))
 }
 
@@ -5868,6 +5948,48 @@ fn do_history(me: &Character) -> CmdOutput {
     let mut s = String::from("\r\nCommand history:\r\n");
     for (i, cmd) in me.history.iter().enumerate() {
         s.push_str(&format!("  {:>3}. {}\r\n", i + 1, cmd));
+    }
+    CmdOutput::text(s)
+}
+
+/// `chans [gossip|info|shout|auction]` — print the channel's last
+/// 20 lines.  No arg lists which channels have content.
+async fn do_chans(arg: &str) -> CmdOutput {
+    let cell = match CHANNEL_HISTORY.get() {
+        Some(c) => c,
+        None => return CmdOutput::text("\r\nNo channel chatter yet.\r\n".to_string()),
+    };
+    let g = cell.lock().await;
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        let mut keys: Vec<&&'static str> = g.keys().collect();
+        keys.sort();
+        if keys.is_empty() {
+            return CmdOutput::text("\r\nNo channel chatter yet.\r\n".to_string());
+        }
+        let mut s = String::from("\r\nChannels with recent chatter:\r\n");
+        for k in keys {
+            let count = g.get(*k).map(|v| v.len()).unwrap_or(0);
+            s.push_str(&format!("  {} ({})\r\n", k, count));
+        }
+        s.push_str("\r\nUse `chans <channel>` to view.\r\n");
+        return CmdOutput::text(s);
+    }
+    let canonical: &str = match key.as_str() {
+        "gossip"  => "gossip",
+        "info"    => "info",
+        "shout"   => "shout",
+        "auction" => "auction",
+        _ => return CmdOutput::text(format!(
+            "\r\nUnknown channel '{key}'. Try gossip, info, shout, auction.\r\n"
+        )),
+    };
+    let Some(ring) = g.get(canonical) else {
+        return CmdOutput::text(format!("\r\nNo recent {canonical} chatter.\r\n"));
+    };
+    let mut s = format!("\r\n=== Recent {canonical} ({} lines) ===\r\n", ring.len());
+    for (from, msg) in ring.iter() {
+        s.push_str(&format!("  {from}: {msg}\r\n"));
     }
     CmdOutput::text(s)
 }
@@ -8832,6 +8954,20 @@ async fn cast_word_of_recall(
     world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) -> CmdOutput {
+    // Cooldown gate (immortals bypass — they have goto anyway).
+    if me.level < 34 {
+        if let Some(until) = me.recall_cooldown_until {
+            let now = std::time::Instant::now();
+            if now < until {
+                let secs_left = (until - now).as_secs();
+                me.mana -= crate::character::Skill::WordOfRecall.mana_cost();
+                return CmdOutput::text(format!(
+                    "The holy magic has not yet recharged — {}s remain.\r\n",
+                    secs_left,
+                ));
+            }
+        }
+    }
     let from_room = me.current_room;
     // Mortal start = Temple of Midgaard.  Immortals get the immortal start.
     let target = {
@@ -8839,6 +8975,13 @@ async fn cast_word_of_recall(
         w.start_room(me.level >= 34)
     };
     me.mana -= crate::character::Skill::WordOfRecall.mana_cost();
+    if me.level < 34 {
+        const RECALL_COOLDOWN_SECS: u64 = 300;
+        me.recall_cooldown_until = Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(RECALL_COOLDOWN_SECS),
+        );
+    }
     me.fighting = None;
     me.hidden   = false;
     me.sneaking = false;

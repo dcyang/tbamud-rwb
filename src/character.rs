@@ -721,6 +721,12 @@ pub struct Character {
     /// at the top of `dispatch_command`.  Used by `spawn_idle_kick_tick`
     /// to disconnect long-idle mortals.  Not persisted.
     pub last_activity: std::time::Instant,
+
+    /// Earliest Instant at which this player may successfully cast Word
+    /// of Recall again.  Prevents recall spam-tele.  Not persisted —
+    /// reset on every fresh login (anti-grief is "you logged in fresh,
+    /// take a breath").  None = no active cooldown.
+    pub recall_cooldown_until: Option<std::time::Instant>,
 }
 
 impl Character {
