@@ -771,6 +771,8 @@ async fn resolve_player_attack(
         // Autoloot: if the attacker has autoloot set, drain the freshly
         // spawned corpse into their inventory.
         autoloot_after_kill(p.attacker_id, &target_name, target_room, world, chars).await;
+        // Achievement check (first-blood etc).
+        check_and_announce_achievements(p.attacker_id, chars).await;
         return;
     }
 
@@ -1361,6 +1363,28 @@ async fn clear_player_fighting(player_id: u32, chars: &SharedChars) {
 /// Autoloot: if the killer has `autoloot` set, drain the corpse just
 /// created in `room` (matching `mob_short`) into their inventory.
 /// The emptied corpse is left in the room to decay normally.
+/// Lock the named player's Character, run the achievement-check sweep
+/// and, if anything was newly earned, fire the award banner through
+/// their mpsc.  Cheap to call after any milestone event.
+pub async fn check_and_announce_achievements(
+    player_id: u32,
+    chars: &SharedChars,
+) {
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == player_id).cloned();
+        h
+    };
+    let Some(ph) = ph else { return; };
+    let banner = {
+        let mut c = ph.character.lock().await;
+        crate::interpreter::announce_achievements(&mut c)
+    };
+    if !banner.is_empty() {
+        let _ = ph.send.send(banner);
+    }
+}
+
 async fn autoloot_after_kill(
     killer_id: u32,
     mob_short: &str,
@@ -1494,7 +1518,15 @@ async fn player_death(
     let (old_room, start_room, max_hp, dropped, corpse_label, xp_lost) = {
         let mut c = ph.character.lock().await;
         let immortal = c.level >= 34;
-        let start = world.lock().await.start_room(immortal);
+        // Honor personal bind point if set AND the room still exists,
+        // else fall back to the canonical start room.
+        let start = {
+            let w = world.lock().await;
+            match c.home_room {
+                Some(v) if w.rooms.contains_key(&v) => v,
+                _ => w.start_room(immortal),
+            }
+        };
         let old = c.current_room;
         let dropped: Vec<u32> = std::mem::take(&mut c.inventory);
         let label = format!("corpse of {}", c.name);

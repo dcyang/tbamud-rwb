@@ -332,6 +332,9 @@ pub async fn handle_connection(
                     afk_msg:          None,
                     last_activity:    std::time::Instant::now(),
                     recall_cooldown_until: None,
+                    home_room:        p_ref.and_then(|p| p.home_room),
+                    achievements:     p_ref.map(|p| p.achievements.clone())
+                                           .unwrap_or_default(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline
@@ -656,6 +659,8 @@ async fn run_game_session(
             rec.pdeaths      = me.pdeaths;
             rec.practices = me.practices;
             rec.room      = me.current_room;
+            rec.home_room = me.home_room;
+            rec.achievements = me.achievements.clone();
             rec.gold      = me.gold;
             rec.exp       = me.exp;
             rec.level     = me.level;

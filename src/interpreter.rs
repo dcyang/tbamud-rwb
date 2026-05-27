@@ -108,7 +108,8 @@ const COMMANDS: &[&str] = &[
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
-    "finger", "assist", "worship", "afk",
+    "finger", "assist", "worship", "afk", "bind", "unbind",
+    "achievements", "achs",
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
@@ -163,9 +164,8 @@ pub async fn dispatch_command(
         return CmdOutput::text(String::new());
     }
     me.last_activity = std::time::Instant::now();
-    // Record the raw command in the rolling history (cap 20).
-    if me.history.len() >= 20 { me.history.pop_front(); }
-    me.history.push_back(raw.to_string());
+    // History recording deferred to after speech/history-bang expansion
+    // so the buffer shows the effective command, not the bang form.
 
     // Frozen players can do almost nothing.  Allow quit/look/score so
     // they can sign off cleanly and read their state.  Everything else
@@ -203,6 +203,61 @@ pub async fn dispatch_command(
         raw
     };
 
+    // Shell-style history expansion: `!!` → last entry, `!N` → entry N
+    // (1-based, matches `do_history` numbering), `!<prefix>` → most
+    // recent entry starting with <prefix>.  An unresolved bang returns
+    // an "event not found" notice without dispatching.  Bang expansion
+    // runs once — the result isn't fed back through itself.
+    let bang_expanded: String;
+    let mut bang_notice: Option<String> = None;
+    let raw: &str = if let Some(stripped) = raw.strip_prefix('!') {
+        if stripped.is_empty() {
+            bang_notice = Some("\r\nUsage: !! | !N | !<prefix>\r\n".to_string());
+            raw
+        } else if stripped == "!" {
+            match me.history.back().cloned() {
+                Some(s) => { bang_expanded = s; bang_expanded.as_str() }
+                None    => {
+                    bang_notice = Some("\r\nNo history yet.\r\n".to_string());
+                    raw
+                }
+            }
+        } else if let Ok(n) = stripped.parse::<usize>() {
+            if n == 0 || n > me.history.len() {
+                bang_notice = Some(format!(
+                    "\r\n!{n}: event not found (history has {} entries).\r\n",
+                    me.history.len(),
+                ));
+                raw
+            } else {
+                bang_expanded = me.history[n - 1].clone();
+                bang_expanded.as_str()
+            }
+        } else {
+            // Prefix match — rev-scan.
+            match me.history.iter().rev()
+                .find(|h| h.starts_with(stripped)).cloned()
+            {
+                Some(s) => { bang_expanded = s; bang_expanded.as_str() }
+                None    => {
+                    bang_notice = Some(format!(
+                        "\r\n!{stripped}: event not found.\r\n",
+                    ));
+                    raw
+                }
+            }
+        }
+    } else {
+        raw
+    };
+    if let Some(n) = bang_notice {
+        return CmdOutput::text(n);
+    }
+
+    // Record the (post speech/bang) command in the rolling history.
+    if me.history.len() >= 20 { me.history.pop_front(); }
+    me.history.push_back(raw.to_string());
+
     // Expand a per-player alias once.  `alias bs bash`, type `bs goblin`
     // → "bash goblin".  Recursion is prevented by only consulting the
     // map for the original first token.
@@ -230,7 +285,7 @@ pub async fn dispatch_command(
     }
 
     let canon = resolve_command(verb);
-    match canon {
+    let mut out = match canon {
         Some("look")      => do_look(rest, me, world, chars).await,
         Some("inventory") => do_inventory(me, world).await,
         Some("get")       => do_get(rest, me, world, chars).await,
@@ -354,6 +409,9 @@ pub async fn dispatch_command(
         Some("assist")    => do_assist(rest, me, world, chars).await,
         Some("worship")   => do_worship(rest, me),
         Some("afk")       => do_afk(rest, me),
+        Some("bind")      => do_bind(me, world).await,
+        Some("unbind")    => do_unbind(me),
+        Some("achievements") | Some("achs") => do_achievements(me),
         Some("goto")      => do_goto(rest, me, world, chars).await,
         Some("transfer")  => do_transfer(rest, me, world, chars).await,
         Some("purge")     => do_purge(me, world, chars).await,
@@ -415,7 +473,16 @@ pub async fn dispatch_command(
             }
             CmdOutput::text(format!("\r\nHuh?!? ({raw})\r\n"))
         }
+    };
+    // Opportunistic achievement check: cheap (small static catalog) and
+    // catches level-up/gold/skill-mastery milestones that aren't already
+    // hooked at a specific event site.  Banner is appended to whatever
+    // text the dispatched command was returning.
+    let banner = announce_achievements(me);
+    if !banner.is_empty() {
+        out.text.push_str(&banner);
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1637,6 +1704,80 @@ fn do_afk(arg: &str, me: &mut Character) -> CmdOutput {
     CmdOutput::text(format!("\r\nYou are now AFK: {sanitized}\r\n"))
 }
 
+/// `bind` — set the caller's personal bind point to the current room.
+/// Death-respawn and Word-of-Recall both honor this destination.
+/// Refuses on rooms that are TUNNEL/PRIVATE/GODROOM/DEATH/HOUSE — those
+/// would either lock the player out on respawn (size cap) or be
+/// downright lethal (DEATH).  Refuses the immortal void.
+async fn do_bind(me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    use crate::world::*;
+    let here = me.current_room;
+    let bad = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&here) else {
+            return CmdOutput::text(
+                "\r\nThis place is not a real room — you cannot bind here.\r\n".to_string()
+            );
+        };
+        let mask = ROOM_TUNNEL | ROOM_PRIVATE | ROOM_GODROOM | ROOM_DEATH | ROOM_HOUSE;
+        r.room_flags[0] & mask
+    };
+    if bad != 0 {
+        return CmdOutput::text(
+            "\r\nThe weave of the world refuses to anchor here.\r\n".to_string()
+        );
+    }
+    me.home_room = Some(here);
+    CmdOutput::text(format!(
+        "\r\nYou kneel and bind your spirit to this place. (Room {here})\r\n"
+    ))
+}
+
+/// `achievements` — list every entry of the catalog with a ✓/✗ marker
+/// next to the description.  Also runs an opportunistic check so any
+/// newly-earned ones get awarded on the spot.
+fn do_achievements(me: &mut Character) -> CmdOutput {
+    let new_awards = me.check_achievements();
+    let mut s = String::from("\r\nAchievements:\r\n");
+    for (key, desc, _pred) in crate::character::ACHIEVEMENTS {
+        let earned = me.achievements.iter().any(|e| e == *key);
+        s.push_str(&format!(
+            "  [{}] {desc}\r\n", if earned { "X" } else { " " },
+        ));
+    }
+    let earned_count = me.achievements.len();
+    let total = crate::character::ACHIEVEMENTS.len();
+    s.push_str(&format!("\r\n{earned_count}/{total} earned.\r\n"));
+    if !new_awards.is_empty() {
+        s.push_str("\r\n*** Newly unlocked: ***\r\n");
+        for d in new_awards { s.push_str(&format!("  {d}\r\n")); }
+    }
+    CmdOutput::text(s)
+}
+
+/// Run the achievement predicate sweep and return a CmdOutput-ready
+/// announcement banner (empty string if nothing was earned).  Caller
+/// usually appends this to whatever text they're returning so the
+/// player sees the award immediately.
+pub fn announce_achievements(me: &mut Character) -> String {
+    let awards = me.check_achievements();
+    if awards.is_empty() { return String::new(); }
+    let mut s = String::from("\r\n*** Achievement unlocked! ***\r\n");
+    for d in awards { s.push_str(&format!("  {d}\r\n")); }
+    s
+}
+
+/// `unbind` — clear the personal bind point.  Recall + respawn fall
+/// back to the canonical start room.
+fn do_unbind(me: &mut Character) -> CmdOutput {
+    if me.home_room.take().is_none() {
+        return CmdOutput::text("\r\nYou have no bind point to release.\r\n".to_string());
+    }
+    CmdOutput::text(
+        "\r\nThe binding releases — your spirit drifts free.\r\n".to_string(),
+    )
+}
+
 fn do_worship(arg: &str, me: &mut Character) -> CmdOutput {
     let arg = arg.trim();
     if arg.is_empty() || arg == "-" {
@@ -1658,20 +1799,47 @@ async fn do_assist(
         return CmdOutput::text("\r\nYou're already in a fight.\r\n".to_string());
     }
     let arg = arg.trim();
-    if arg.is_empty() {
-        return CmdOutput::text("\r\nAssist whom?\r\n".to_string());
-    }
-    // Find target player in same room.
-    let ph = {
-        let cl = chars.lock().await;
-        let h = cl.iter().find(|p|
-            p.id != me.id
-            && p.current_room == me.current_room
-            && p.name.eq_ignore_ascii_case(arg)).cloned();
-        h
-    };
-    let Some(ph) = ph else {
-        return CmdOutput::text("\r\nNo one here by that name.\r\n".to_string());
+    // No-arg (or "all"): pick the first same-room ally currently
+    // engaging a mob.  Lets a healer drop in without having to type the
+    // tank's name every pull.
+    let ph = if arg.is_empty() || arg.eq_ignore_ascii_case("all") {
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().filter(|p|
+                p.id != me.id
+                && p.current_room == me.current_room
+            ).cloned().collect()
+        };
+        let mut found = None;
+        for ph in handles {
+            let engaging = {
+                let c = ph.character.lock().await;
+                c.fighting.map(|t| !t.is_player).unwrap_or(false)
+            };
+            if engaging { found = Some(ph); break; }
+        }
+        match found {
+            Some(p) => p,
+            None    => return CmdOutput::text(
+                "\r\nNobody here is in a fight to join.\r\n".to_string()
+            ),
+        }
+    } else {
+        // Find named target player in same room.
+        let ph_opt = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p|
+                p.id != me.id
+                && p.current_room == me.current_room
+                && p.name.eq_ignore_ascii_case(arg)).cloned();
+            h
+        };
+        match ph_opt {
+            Some(p) => p,
+            None    => return CmdOutput::text(
+                "\r\nNo one here by that name.\r\n".to_string()
+            ),
+        }
     };
     let target_id = {
         let c = ph.character.lock().await;
@@ -4570,9 +4738,10 @@ async fn do_quest_complete(
         }
     }
 
+    let ach_banner = announce_achievements(me);
     CmdOutput::text(format!(
         "\r\n=== Quest Complete: {qname} ===\r\n{done_msg}\r\n\
-         Rewards: {gold} gold, {exp} exp{obj_text}\r\n{chain_msg}",
+         Rewards: {gold} gold, {exp} exp{obj_text}\r\n{chain_msg}{ach_banner}",
         obj_text = if obj_reward >= 0 { format!(", obj #{obj_reward}") } else { String::new() },
     ))
 }
@@ -6806,6 +6975,7 @@ async fn do_cast(
         crate::character::Skill::Refresh      => cast_refresh(target, me, chars).await,
         crate::character::Skill::Summon       => cast_summon(target, me, world, chars).await,
         crate::character::Skill::SenseLife    => cast_sense_life(me),
+        crate::character::Skill::Restoration  => cast_restoration(target, me, chars).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -8529,6 +8699,72 @@ async fn cast_heal_spell(
     ))
 }
 
+/// `restoration` — Cleric apex utility.  Fully heals HP/mana/movement
+/// and strips every "negative" affect (poison, sleep, blind, slow,
+/// charm) from a self or named same-room player.  Drains 80 mana.
+async fn cast_restoration(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::character::Skill;
+    me.mana -= Skill::Restoration.mana_cost();
+    let bad = [
+        Skill::Poison, Skill::Sleep, Skill::Blindness,
+        Skill::Slow,   Skill::CharmPerson,
+    ];
+    // Self path.
+    if target_kw.is_empty() {
+        me.hp       = me.max_hp;
+        me.mana     = me.max_mana;
+        me.movement = me.max_movement;
+        me.affects.retain(|a| !bad.contains(&a.skill));
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!(
+                "{} is wreathed in a blinding pillar of restorative light.\r\n",
+                me.name,
+            ));
+        return CmdOutput::text(
+            "\r\nA blinding pillar of light cleanses every wound, weariness, and curse.\r\n"
+                .to_string(),
+        );
+    }
+    // Same-room player target.
+    let target_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw)).cloned();
+        h
+    };
+    let Some(ph) = target_handle else {
+        return CmdOutput::text(format!(
+            "\r\nNo one named '{target_kw}' is here.\r\n"
+        ));
+    };
+    {
+        let mut c = ph.character.lock().await;
+        c.hp       = c.max_hp;
+        c.mana     = c.max_mana;
+        c.movement = c.max_movement;
+        c.affects.retain(|a| !bad.contains(&a.skill));
+    }
+    let _ = ph.send.send(format!(
+        "\r\n{} wreathes you in a blinding pillar of restorative light.\r\n",
+        me.name,
+    ));
+    let cl = chars.lock().await;
+    cl.broadcast_room(me.current_room, Some(me.id),
+        &format!(
+            "{} wreathes {} in a blinding pillar of restorative light.\r\n",
+            me.name, ph.name,
+        ));
+    CmdOutput::text(format!(
+        "\r\nYour restorative magic floods {}.\r\n", ph.name,
+    ))
+}
+
 /// Shared shape for self/target-player buff spells (Strength, Armor).
 /// Picks per-skill duration + (to_dam, to_ac) modifiers and refresh-
 /// stacks via Character::apply_affect.
@@ -8969,10 +9205,13 @@ async fn cast_word_of_recall(
         }
     }
     let from_room = me.current_room;
-    // Mortal start = Temple of Midgaard.  Immortals get the immortal start.
+    // Honor personal bind point (`bind` command); else canonical start.
     let target = {
         let w = world.lock().await;
-        w.start_room(me.level >= 34)
+        match me.home_room {
+            Some(v) if w.rooms.contains_key(&v) => v,
+            _ => w.start_room(me.level >= 34),
+        }
     };
     me.mana -= crate::character::Skill::WordOfRecall.mana_cost();
     if me.level < 34 {
@@ -11555,6 +11794,8 @@ pub async fn save_character_to_db(
     r.alignment    = me.alignment;
     r.practices = me.practices;
     r.room      = me.current_room;
+    r.home_room = me.home_room;
+    r.achievements = me.achievements.clone();
     r.gold      = me.gold;
     r.exp       = me.exp;
     r.level     = me.level;
@@ -11612,6 +11853,8 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.pdeaths      = me.pdeaths;
             r.practices = me.practices;
             r.room      = me.current_room;
+            r.home_room = me.home_room;
+            r.achievements = me.achievements.clone();
             r.gold      = me.gold;
             r.exp       = me.exp;
             r.level     = me.level;

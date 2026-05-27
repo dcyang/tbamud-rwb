@@ -79,6 +79,9 @@ pub enum Skill {
     Brew,
     Scribe,
     Enchant,
+    /// High-tier Cleric spell — full HP + mana + movement restore AND
+    /// strip every negative affect (poison/sleep/blind/slow/charm).
+    Restoration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +152,7 @@ impl Skill {
             "brew"                            => Some(Skill::Brew),
             "scribe"                          => Some(Skill::Scribe),
             "enchant" | "enchantweapon"       => Some(Skill::Enchant),
+            "restoration" | "restore"         => Some(Skill::Restoration),
             _ => None,
         }
     }
@@ -208,6 +212,7 @@ impl Skill {
             Skill::Brew          => "brew",
             Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant weapon",
+            Skill::Restoration   => "restoration",
         }
     }
 
@@ -233,7 +238,7 @@ impl Skill {
                 | Skill::Infravision   | Skill::ColorSpray
                 | Skill::AcidBlast     | Skill::ChillTouch
                 | Skill::Brew          | Skill::Scribe
-                | Skill::Enchant
+                | Skill::Enchant       | Skill::Restoration
                                       => SkillKind::Spell,
         }
     }
@@ -285,6 +290,7 @@ impl Skill {
             Skill::Brew          => 50,
             Skill::Scribe        => 40,
             Skill::Enchant       => 60,
+            Skill::Restoration   => 80,
         }
     }
 
@@ -346,6 +352,7 @@ impl Skill {
             Skill::Brew          => &[Class::Cleric, Class::MagicUser],
             Skill::Scribe        => &[Class::Cleric, Class::MagicUser],
             Skill::Enchant       => &[Class::MagicUser],
+            Skill::Restoration   => &[Class::Cleric],
         }
     }
 
@@ -408,6 +415,7 @@ impl Skill {
             Skill::Brew          => "brew",
             Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant-weapon",
+            Skill::Restoration   => "restoration",
         }
     }
 
@@ -437,6 +445,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
     Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew, Skill::Scribe,
     Skill::Enchant,
+    Skill::Restoration,
 ];
 
 // ---------------------------------------------------------------------------
@@ -727,6 +736,69 @@ pub struct Character {
     /// reset on every fresh login (anti-grief is "you logged in fresh,
     /// take a breath").  None = no active cooldown.
     pub recall_cooldown_until: Option<std::time::Instant>,
+
+    /// Personal bind point: respawn-on-death and recall destination
+    /// override.  `None` = use the mortal/immortal start room.  Set via
+    /// the `bind` command (anywhere), cleared via `unbind`.  Persisted
+    /// as `Home: <vnum>` (omitted when None).
+    pub home_room: Option<crate::world::RoomVnum>,
+
+    /// Earned achievement keys.  See `ACHIEVEMENTS` for the catalog.
+    /// Persisted as `Ach: <key>` lines (one per entry).
+    pub achievements: Vec<String>,
+}
+
+/// Static achievement catalog.  Each tuple is `(key, description, predicate)`
+/// — the predicate runs against a Character snapshot and returns true if
+/// the milestone has been reached.  Award is one-shot: once earned, the
+/// key is appended to `Character.achievements` and never re-checked.
+pub const ACHIEVEMENTS: &[(&str, &str, fn(&Character) -> bool)] = &[
+    ("first-blood", "First Blood — score your first kill",
+        |c| c.exp > 0),
+    ("hero",        "Hero — reach level 10",
+        |c| c.level >= 10),
+    ("master",      "Master — reach level 25",
+        |c| c.level >= 25),
+    ("legend",      "Legend — reach the mortal cap (level 33)",
+        |c| c.level >= 33),
+    ("magnate",     "Magnate — amass 10,000 gold (purse + bank)",
+        |c| c.gold + c.bank_gold >= 10_000),
+    ("croesus",     "Croesus — amass 100,000 gold (purse + bank)",
+        |c| c.gold + c.bank_gold >= 100_000),
+    ("quester",     "Quester — complete your first quest",
+        |c| !c.completed_quests.is_empty()),
+    ("crusader",    "Crusader — complete ten quests",
+        |c| c.completed_quests.len() >= 10),
+    ("mastered",    "Mastered — push a skill to 100%",
+        |c| c.skills.values().any(|p| *p >= 100)),
+    ("devoted",     "Devoted — pick a god to worship",
+        |c| !c.god.is_empty()),
+    ("clan-member", "Clan Member — join a clan",
+        |c| !c.clan.is_empty()),
+    ("slayer",      "Slayer — score your first PvP kill",
+        |c| c.pkills >= 1),
+    ("champion",    "Champion — ten PvP kills",
+        |c| c.pkills >= 10),
+    ("homesteader", "Homesteader — establish a personal bind point",
+        |c| c.home_room.is_some()),
+];
+
+impl Character {
+    /// Walk the achievement catalog; for any entry the caller doesn't
+    /// already have AND whose predicate now returns true, append the
+    /// key and return the descriptions.  Caller surfaces the lines via
+    /// CmdOutput so the player sees them.
+    pub fn check_achievements(&mut self) -> Vec<&'static str> {
+        let mut newly = Vec::new();
+        for (key, desc, pred) in ACHIEVEMENTS {
+            if self.achievements.iter().any(|e| e == *key) { continue; }
+            if pred(self) {
+                self.achievements.push((*key).to_string());
+                newly.push(*desc);
+            }
+        }
+        newly
+    }
 }
 
 impl Character {

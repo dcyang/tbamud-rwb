@@ -141,6 +141,12 @@ pub struct PlayerRecord {
     pub pdeaths:       i32,
     pub practices:     i32,
     pub room:          i32,
+    /// Personal bind point room vnum.  `None` = no override (use start
+    /// room on respawn/recall).  Persisted as `Home: <vnum>`.
+    pub home_room:     Option<i32>,
+    /// Earned achievement keys (see character::ACHIEVEMENTS).  Persisted
+    /// as one `Ach: <key>` line per entry.
+    pub achievements:  Vec<String>,
     pub gold:          i64,
     /// Gold on deposit at the bank.
     pub bank_gold:     i64,
@@ -416,6 +422,8 @@ impl PlayerDb {
                 "God"  => rec.god  = val.to_string(),
                 "Mute" => rec.muted  = val.parse::<i32>().unwrap_or(0) != 0,
                 "Frzn" => rec.frozen = val.parse::<i32>().unwrap_or(0) != 0,
+                "Home" => rec.home_room = val.parse::<i32>().ok(),
+                "Ach"  => rec.achievements.push(val.to_string()),
                 _ => {}
             }
         }
@@ -485,6 +493,12 @@ impl PlayerDb {
         }
         if rec.room != 0 {
             writeln!(f, "Room: {}", rec.room)?;
+        }
+        if let Some(home) = rec.home_room {
+            writeln!(f, "Home: {}", home)?;
+        }
+        for key in &rec.achievements {
+            writeln!(f, "Ach : {}", key)?;
         }
         if rec.gold != 0 {
             writeln!(f, "Gold: {}", rec.gold)?;
