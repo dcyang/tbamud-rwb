@@ -1553,6 +1553,40 @@ pub fn spawn_mob_spec_tick(
                         // Healer service is invoked by the `heal`
                         // player command (cp180); no idle tick.
                     }
+                    crate::world::MobSpec::PetShop => {
+                        // Pet shop is invoked by the `petlist`/`petbuy`
+                        // player commands; no idle tick behavior.
+                    }
+                    crate::world::MobSpec::Postmaster => {
+                        // 20% chance per tick to ping anyone in the
+                        // room who has mail waiting.
+                        let roll = {
+                            use rand::Rng;
+                            rand::thread_rng().gen_range(0..100)
+                        };
+                        if roll >= 20 { continue; }
+                        // Snapshot players in this room.
+                        let players: Vec<(u32, String)> = {
+                            let cl = chars.lock().await;
+                            cl.iter()
+                                .filter(|p| p.current_room == room)
+                                .map(|p| (p.id, p.name.clone()))
+                                .collect()
+                        };
+                        if players.is_empty() { continue; }
+                        let Some(players_arc) = crate::interpreter::PLAYERS_HANDLE.get() else { continue; };
+                        let data_dir = players_arc.lock().await.data_dir().to_string();
+                        for (_id, pname) in &players {
+                            let n = crate::mail::load_mailbox(&data_dir, pname).len();
+                            if n == 0 { continue; }
+                            chars.lock().await.broadcast_room(
+                                room, None,
+                                &format!(
+                                    "{short} says, 'You have {n} letter(s), {pname}!'\r\n"
+                                ),
+                            );
+                        }
+                    }
                     crate::world::MobSpec::Janitor => {
                         // Pick up the first non-corpse floor object whose
                         // weight ≤ 5 (CircleMUD's threshold) — but we don't

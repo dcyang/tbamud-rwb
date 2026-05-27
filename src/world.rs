@@ -536,6 +536,12 @@ pub enum MobSpec {
     MagicUser,
     /// Service mob: players in the room can `heal` for gold.
     Healer,
+    /// Service mob: pings same-room players who have mail waiting.
+    Postmaster,
+    /// Pet-shop keeper.  Other mobs in the same room are buyable; the
+    /// `petbuy <kw>` command spawns a charmed copy as the buyer's
+    /// follower.
+    PetShop,
 }
 
 impl MobSpec {
@@ -549,6 +555,8 @@ impl MobSpec {
             13 => Some(MobSpec::Snake),
             18 => Some(MobSpec::Cityguard),
             15 => Some(MobSpec::Healer),
+            16 => Some(MobSpec::Postmaster),
+            17 => Some(MobSpec::PetShop),
             _  => None,
         }
     }

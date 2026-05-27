@@ -76,7 +76,7 @@ const COMMANDS: &[&str] = &[
     "wimpy",
     "info", "newbie", "shout", "color",
     "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
-    "hp", "mana", "mv", "gold", "repair", "heal",
+    "hp", "mana", "mv", "gold", "repair", "heal", "petlist", "petbuy", "petdismiss",
     "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
@@ -245,7 +245,7 @@ pub async fn dispatch_command(
         Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
         Some("history")    => do_history(me),
-        Some("prefs")      => do_prefs(me),
+        Some("prefs")      => do_prefs(rest, me),
         Some("worth")      => do_worth(me, world).await,
         Some("hp")         => CmdOutput::text(format!("\r\nHP:   {}/{}\r\n", me.hp, me.max_hp)),
         Some("mana")       => CmdOutput::text(format!("\r\nMana: {}/{}\r\n", me.mana, me.max_mana)),
@@ -253,6 +253,9 @@ pub async fn dispatch_command(
         Some("gold")       => CmdOutput::text(format!("\r\nGold: {}  Bank: {}\r\n", me.gold, me.bank_gold)),
         Some("repair")     => do_repair(rest, me, world).await,
         Some("heal")       => do_heal_service(me, world, chars).await,
+        Some("petlist")    => do_petlist(me, world).await,
+        Some("petbuy")     => do_petbuy(rest, me, world, chars).await,
+        Some("petdismiss") => do_petdismiss(rest, me, world, chars).await,
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
@@ -3646,7 +3649,7 @@ async fn do_spec_assign(
     let name   = parts.next().unwrap_or("").to_ascii_lowercase();
     let Ok(vnum) = vnum_s.parse::<i32>() else {
         return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|postmaster|petshop|none>\r\n".to_string()
         );
     };
     let spec: Option<crate::world::MobSpec> = match name.as_str() {
@@ -3657,9 +3660,11 @@ async fn do_spec_assign(
         "snake"     => Some(crate::world::MobSpec::Snake),
         "magicuser" | "mu" => Some(crate::world::MobSpec::MagicUser),
         "healer"    => Some(crate::world::MobSpec::Healer),
+        "postmaster" | "post" => Some(crate::world::MobSpec::Postmaster),
+        "petshop"   | "pet"   => Some(crate::world::MobSpec::PetShop),
         "none" | "off" | "clear" => None,
         ""          => return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|postmaster|petshop|none>\r\n".to_string()
         ),
         _ => return CmdOutput::text(format!("\r\nUnknown spec '{name}'.\r\n")),
     };
@@ -4091,11 +4096,18 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     let mut class_filter: Option<crate::players::Class> = None;
     let mut level_range: Option<(i32, i32)> = None;
     let mut afk_only: bool = false;
+    let mut clan_filter: Option<String> = None;
     let toks: Vec<&str> = arg.split_whitespace().collect();
     let mut i = 0;
     while i < toks.len() {
         match toks[i] {
             "-afk" => { afk_only = true; i += 1; continue; }
+            "-clan" => {
+                if let Some(v) = toks.get(i + 1) {
+                    clan_filter = Some(v.to_string());
+                    i += 2; continue;
+                }
+            }
             "-c" => {
                 if let Some(v) = toks.get(i + 1) {
                     class_filter = match v.to_ascii_lowercase().as_str() {
@@ -4130,14 +4142,14 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
 
     // Snapshot titles + classes outside the registry lock to avoid
     // serializing on contended Character mutexes.
-    let extras: Vec<(u32, String, crate::players::Class, i32, bool)> = {
+    let extras: Vec<(u32, String, crate::players::Class, i32, bool, String)> = {
         let cl = chars.lock().await;
         let handles: Vec<_> = cl.iter().cloned().collect();
         drop(cl);
         let mut out = Vec::new();
         for ph in handles {
             let c = ph.character.lock().await;
-            out.push((ph.id, c.title.clone(), c.class, c.invis_level, c.afk_msg.is_some()));
+            out.push((ph.id, c.title.clone(), c.class, c.invis_level, c.afk_msg.is_some(), c.clan.clone()));
         }
         out
     };
@@ -4146,9 +4158,9 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     let mut s = String::from("\r\nPlayers online:\r\n");
     let mut count = 0;
     for p in cl.iter() {
-        let (_, title, class, invis_lvl, afk) = extras.iter().find(|(id, _, _, _, _)| *id == p.id)
+        let (_, title, class, invis_lvl, afk, clan) = extras.iter().find(|(id, _, _, _, _, _)| *id == p.id)
             .cloned()
-            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined, 0, false));
+            .unwrap_or((p.id, String::new(), crate::players::Class::Undefined, 0, false, String::new()));
         // Hide immortal-invis players from anyone below their threshold.
         if p.id != me.id && invis_lvl > me.level { continue; }
         if let Some(sub) = &name_substr {
@@ -4161,6 +4173,9 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
             if p.level < lo || p.level > hi { continue; }
         }
         if afk_only && !afk { continue; }
+        if let Some(cf) = &clan_filter {
+            if !clan.eq_ignore_ascii_case(cf) { continue; }
+        }
         let marker = if p.id == me.id { " (you)" } else { "" };
         let afk_tag = if afk { " [AFK]" } else { "" };
         let title_str = if title.is_empty() { String::new() } else { format!(" {title}") };
@@ -5340,6 +5355,181 @@ async fn do_heal_service(
     ))
 }
 
+/// Locate a PetShop-spec'd keeper in the caller's room.  Returns its
+/// short_descr if present.
+async fn find_pet_keeper(me: &Character, world: &Arc<Mutex<World>>) -> Option<String> {
+    let w = world.lock().await;
+    let r = w.rooms.get(&me.current_room)?;
+    for &mid in &r.mobs {
+        let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+        if m.spec == Some(crate::world::MobSpec::PetShop) {
+            return w.mob_protos.get(&m.vnum).map(|p| p.short_descr.clone());
+        }
+    }
+    None
+}
+
+/// `petlist` — at a pet-shop keeper, list buyable mobs in the same
+/// room (every non-keeper mob) with the price tag `level*100 + 100`.
+async fn do_petlist(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(_keeper) = find_pet_keeper(me, world).await else {
+        return CmdOutput::text(
+            "\r\nThere's no pet shop here.\r\n".to_string()
+        );
+    };
+    let rows: Vec<(String, i32, i64)> = {
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room).unwrap();
+        let mut out = Vec::new();
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            if m.spec == Some(crate::world::MobSpec::PetShop) { continue; }
+            let Some(p) = w.mob_protos.get(&m.vnum) else { continue; };
+            let price = (p.level as i64) * 100 + 100;
+            out.push((p.short_descr.clone(), p.level, price));
+        }
+        out
+    };
+    if rows.is_empty() {
+        return CmdOutput::text("\r\nThe pet shop's pens are empty.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nAvailable pets:\r\n");
+    for (name, lvl, price) in &rows {
+        s.push_str(&format!("  {:<30} lvl {:>2}  {} gold\r\n", name, lvl, price));
+    }
+    CmdOutput::text(s)
+}
+
+/// `petbuy <kw>` — at a pet-shop keeper, buy a charmed copy of a
+/// nearby mob.  Pays `level*100 + 100`, spawns a fresh instance in
+/// the caller's room with `spec` preserved, sets `charmer = me.id`,
+/// applies a long-duration CharmPerson affect, and sets `following`.
+async fn do_petbuy(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nBuy which pet?\r\n".to_string());
+    }
+    let Some(keeper_short) = find_pet_keeper(me, world).await else {
+        return CmdOutput::text(
+            "\r\nThere's no pet shop here.\r\n".to_string()
+        );
+    };
+    // Find the matching mob in the shop room.
+    let (vnum, short, price) = {
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room).unwrap();
+        let mut hit: Option<(i32, String, i64)> = None;
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            if m.spec == Some(crate::world::MobSpec::PetShop) { continue; }
+            let Some(p) = w.mob_protos.get(&m.vnum) else { continue; };
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&kw)) {
+                hit = Some((m.vnum, p.short_descr.clone(), (p.level as i64) * 100 + 100));
+                break;
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(format!(
+                "\r\n{keeper_short} shrugs: there's no '{kw}' for sale.\r\n"
+            )),
+        }
+    };
+    if me.gold < price {
+        return CmdOutput::text(format!(
+            "\r\n{keeper_short} eyes you: that pet costs {price} gold; you have {}.\r\n",
+            me.gold,
+        ));
+    }
+    me.gold -= price;
+    // Spawn a charmed copy in the caller's room.
+    let pet_id = {
+        let mut w = world.lock().await;
+        let id = w.spawn_mob(vnum, me.current_room);
+        if let Some(id) = id {
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == id) {
+                m.charmer = Some(me.id);
+                m.apply_affect(crate::character::Affect {
+                    skill:         crate::character::Skill::CharmPerson,
+                    duration:      48,
+                    to_hit:        0,
+                    to_dam:        0,
+                    dmg_reduction: 0,
+                    dot_damage:    0,
+                    to_ac:         0,
+                });
+            }
+        }
+        id
+    };
+    if pet_id.is_none() {
+        return CmdOutput::text(format!(
+            "\r\n{keeper_short}'s pen is jammed; the gold is refunded.\r\n",
+        ));
+    }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{keeper_short} hands {} a leash; {short} follows {} obediently.\r\n",
+            me.name, me.name));
+    CmdOutput::text(format!(
+        "\r\nYou buy {short} for {price} gold.  It pads after you.\r\n"
+    ))
+}
+
+/// `petdismiss <kw>` — release a charmed mob (`charmer == me.id`) in
+/// the caller's room.  The pet is extracted with a polite farewell.
+async fn do_petdismiss(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nDismiss which pet?\r\n".to_string());
+    }
+    let (mob_id, short) = {
+        let w = world.lock().await;
+        let r = match w.rooms.get(&me.current_room) {
+            Some(r) => r,
+            None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+        };
+        let mut hit: Option<(u32, String)> = None;
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            if m.charmer != Some(me.id) { continue; }
+            let Some(p) = w.mob_protos.get(&m.vnum) else { continue; };
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&kw)) {
+                hit = Some((mid, p.short_descr.clone()));
+                break;
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(
+                format!("\r\nNo charmed pet of yours called '{kw}' is here.\r\n")
+            ),
+        }
+    };
+    // Extract.
+    {
+        let mut w = world.lock().await;
+        if let Some(r) = w.rooms.get_mut(&me.current_room) {
+            r.mobs.retain(|&id| id != mob_id);
+        }
+        w.mob_instances.retain(|m| m.id != mob_id);
+    }
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{short} bows to {} and wanders off.\r\n", me.name));
+    CmdOutput::text(format!(
+        "\r\nYou dismiss {short}.  It bows and leaves.\r\n"
+    ))
+}
+
 /// `clan [name]` — empty arg shows clan + online members.  Otherwise
 /// joins the named clan (any string, no validation).  `clan -` leaves.
 async fn do_clan(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
@@ -5568,7 +5758,33 @@ async fn do_map(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 }
 
 /// `prefs` — single-screen overview of every persistent toggle.
-fn do_prefs(me: &Character) -> CmdOutput {
+fn do_prefs(arg: &str, me: &mut Character) -> CmdOutput {
+    // `prefs` (no arg) lists current state.  `prefs <key>` toggles the
+    // named pref and reports the new value.  Unknown keys fall through
+    // to the listing.
+    let key = arg.trim().to_ascii_lowercase();
+    if !key.is_empty() {
+        let (label, now_on) = match key.as_str() {
+            "color"      => { me.color_off = !me.color_off; ("color", !me.color_off) }
+            "autoexit"   => { me.autoexit  = !me.autoexit;  ("autoexit", me.autoexit) }
+            "autoloot"   => { me.autoloot  = !me.autoloot;  ("autoloot", me.autoloot) }
+            "autoassist" => { me.autoassist = !me.autoassist; ("autoassist", me.autoassist) }
+            "autotitle"  => { me.autotitle = !me.autotitle; ("autotitle", me.autotitle) }
+            "brief"      => { me.brief     = !me.brief;     ("brief", me.brief) }
+            "compact"    => { me.compact   = !me.compact;   ("compact", me.compact) }
+            "gossip"     => { me.gossip_off = !me.gossip_off; ("gossip", !me.gossip_off) }
+            "auction"    => { me.auction_off = !me.auction_off; ("auction", !me.auction_off) }
+            "info"       => { me.info_off  = !me.info_off;  ("info", !me.info_off) }
+            "shout"      => { me.shout_off = !me.shout_off; ("shout", !me.shout_off) }
+            _ => return CmdOutput::text(format!(
+                "\r\nUnknown preference '{key}'.  Type `prefs` to see the list.\r\n"
+            )),
+        };
+        return CmdOutput::text(format!(
+            "\r\n{label} is now {}.\r\n",
+            if now_on { "ON" } else { "OFF" },
+        ));
+    }
     fn flag(b: bool) -> &'static str { if b { "ON " } else { "off" } }
     let s = format!(
         "\r\nYour preferences:\r\n\

@@ -1070,20 +1070,48 @@ async fn resolve_mob_attack(
     // Decide whether this mob is a spellcaster and rolls a cast this round.
     // `MagicUser` spec mobs cast more often (50%) than legacy keyword
     // casters (30%).
-    let (cast_attempt, is_magic_user_spec) = {
+    let (cast_attempt, is_magic_user_spec, low_hp_self_heal) = {
         let w = world.lock().await;
         let proto_casts = w.mob_protos.get(&m.attacker_vnum)
             .map(|p| should_cast(p))
             .unwrap_or(false);
-        let spec_caster = w.mob_instances.iter()
-            .find(|x| x.id == m.attacker_id)
-            .and_then(|x| x.spec)
-            == Some(crate::world::MobSpec::MagicUser);
+        let mob_inst = w.mob_instances.iter().find(|x| x.id == m.attacker_id);
+        let spec_caster = mob_inst.and_then(|x| x.spec) == Some(crate::world::MobSpec::MagicUser);
         let casts = proto_casts || spec_caster;
         let chance = if spec_caster { 50 } else { 30 };
         let attempt = casts && rand::thread_rng().gen_range(0..100) < chance;
-        (attempt, spec_caster)
+        // MagicUser mobs at <1/3 HP self-heal instead of attacking.
+        let low_hp = spec_caster && mob_inst
+            .map(|x| x.hp > 0 && x.hp * 3 < x.max_hp)
+            .unwrap_or(false);
+        (attempt, spec_caster, low_hp && attempt)
     };
+
+    // If this is a self-heal cast, restore mob HP and bail out before the
+    // damage path.  Broadcasts an audible heal-self line.
+    if low_hp_self_heal {
+        use crate::db::dice;
+        let heal = dice(2, 8) + m.level;
+        let (mob_short, new_hp, max_hp) = {
+            let mut w = world.lock().await;
+            let short = w.mob_protos.get(&m.attacker_vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the caster".into());
+            let Some(mob) = w.mob_instances.iter_mut().find(|x| x.id == m.attacker_id) else {
+                return;
+            };
+            mob.hp = (mob.hp + heal).min(mob.max_hp);
+            (short, mob.hp, mob.max_hp)
+        };
+        let _ = ph.send.send(format!(
+            "\r\n{mob_short} chants and a warm glow knits its wounds.\r\n",
+        ));
+        let cl = chars.lock().await;
+        cl.broadcast_room(m.room, Some(m.target.id),
+            &format!("\r\n{mob_short} chants and a warm glow knits its wounds.\r\n"));
+        let _ = (new_hp, max_hp);
+        return;
+    }
 
     // Roll mob damage. Spell attacks (when cast_attempt) use a separate
     // dice pool that ignores mundane AC but is still reduced by
