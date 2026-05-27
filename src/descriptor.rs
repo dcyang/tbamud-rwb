@@ -264,6 +264,7 @@ pub async fn handle_connection(
                     autoassist:   p_ref.map(|p| p.autoassist).unwrap_or(false),
                     autotitle:    !p_ref.map(|p| p.autotitle_off).unwrap_or(false),
                     history:      std::collections::VecDeque::with_capacity(20),
+                    tell_history: std::collections::VecDeque::with_capacity(20),
                     alignment:    p_ref.map(|p| p.alignment).unwrap_or(0),
                     clan:         p_ref.map(|p| p.clan.clone()).unwrap_or_default(),
                     pkills:       p_ref.map(|p| p.pkills).unwrap_or(0),

@@ -690,6 +690,9 @@ pub struct Character {
     /// Last N dispatched commands (transient).  Recorded at the top of
     /// `dispatch_command`; viewed via `history`.
     pub history:      std::collections::VecDeque<String>,
+    /// Last N received tells (transient).  Recorded at the receiving
+    /// end of `do_tell`; viewed via `tells`.
+    pub tell_history: std::collections::VecDeque<(String, String)>,
     /// Moral alignment: -1000 (pure evil) → +1000 (pure good).  0 = neutral.
     /// Persisted; thresholds are >350 good, <-350 evil, else neutral.
     pub alignment:    i32,

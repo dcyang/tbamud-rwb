@@ -1225,6 +1225,58 @@ pub fn spawn_house_save_tick(
     });
 }
 
+/// Random ambient encounter spawner.  Every TICK_SECONDS the tick
+/// walks the world looking for an outdoor empty room (FIELD/FOREST/
+/// HILLS sector, zero mobs, no `ROOM_PEACEFUL`/`ROOM_NOMOB`/`ROOM_HOUSE`
+/// flags) and, with 30% chance, spawns a random low-level (≤5)
+/// mob_proto into it.  No-op if no eligible (room, proto) pair exists.
+pub fn spawn_random_encounter_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<crate::world::World>>,
+) {
+    const TICK_SECONDS: u64 = 300;
+    tokio::spawn(async move {
+        use rand::Rng;
+        use rand::seq::SliceRandom;
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if rand::thread_rng().gen_range(0..100) >= 30 { continue; }
+            let mut w = world.lock().await;
+            // Build eligible-room list.
+            use crate::world::*;
+            let elig_rooms: Vec<RoomVnum> = w.rooms.iter()
+                .filter(|(_, r)| {
+                    let bad = ROOM_PEACEFUL | ROOM_NOMOB | ROOM_HOUSE | ROOM_GODROOM;
+                    if r.room_flags[0] & bad != 0 { return false; }
+                    if !r.mobs.is_empty() { return false; }
+                    matches!(r.sector_type, SECT_FIELD | SECT_FOREST | SECT_HILLS)
+                })
+                .map(|(v, _)| *v)
+                .collect();
+            if elig_rooms.is_empty() { continue; }
+            // Eligible mob_proto vnums (level 1-5, has a name).
+            let elig_protos: Vec<MobVnum> = w.mob_protos.iter()
+                .filter(|(_, p)| p.level > 0 && p.level <= 5 && !p.short_descr.is_empty())
+                .map(|(v, _)| *v)
+                .collect();
+            if elig_protos.is_empty() { continue; }
+            let room  = *elig_rooms.choose(&mut rand::thread_rng()).unwrap();
+            let proto = *elig_protos.choose(&mut rand::thread_rng()).unwrap();
+            if w.spawn_mob(proto, room).is_some() {
+                tracing::debug!(
+                    room, proto, "Random encounter spawned",
+                );
+            }
+        }
+    });
+}
+
 pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
     const TICK_SECONDS: u64 = 60;
     tokio::spawn(async move {

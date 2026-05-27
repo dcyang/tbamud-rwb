@@ -71,13 +71,13 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell", "appraise", "value",
-    "kick", "bash", "backstab", "rescue", "disarm", "recover",
+    "kick", "bash", "backstab", "rescue", "disarm", "recover", "consider", "con",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist", "autotitle", "history", "prefs", "worth",
+    "autoexit", "autoloot", "autoassist", "autotitle", "history", "tells", "prefs", "worth",
     "hp", "mana", "mv", "gold", "repair", "heal", "petlist", "petbuy", "petdismiss",
-    "clan", "ctell", "clans", "map", "whois",
+    "clan", "ctell", "clans", "map", "whois", "hint",
     "sneak", "hide", "steal",
     "cast",
     "skills", "practice", "affects",
@@ -231,6 +231,7 @@ pub async fn dispatch_command(
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
         Some("recover")   => do_recover(me, world, chars).await,
+        Some("consider") | Some("con") => do_consider(rest, me, world).await,
         Some("sleep")     => do_position(me, chars, crate::character::Position::Sleeping).await,
         Some("rest")      => do_position(me, chars, crate::character::Position::Resting).await,
         Some("sit")       => do_position(me, chars, crate::character::Position::Sitting).await,
@@ -245,6 +246,7 @@ pub async fn dispatch_command(
         Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
         Some("history")    => do_history(me),
+        Some("tells")      => do_tells(me),
         Some("prefs")      => do_prefs(rest, me),
         Some("worth")      => do_worth(me, world).await,
         Some("hp")         => CmdOutput::text(format!("\r\nHP:   {}/{}\r\n", me.hp, me.max_hp)),
@@ -260,6 +262,7 @@ pub async fn dispatch_command(
         Some("clans")      => do_clans(me, chars).await,
         Some("ctell")      => do_ctell(rest, me, chars).await,
         Some("map")        => do_map(me, world).await,
+        Some("hint")       => do_hint(rest),
         Some("sneak")     => do_sneak(me),
         Some("hide")      => do_hide(me),
         Some("steal")     => do_steal(rest, me, world, chars).await,
@@ -1211,6 +1214,8 @@ async fn do_tell(
     let afk_reply = {
         let mut tc = p.character.lock().await;
         tc.last_tell_from = Some(me.name.clone());
+        if tc.tell_history.len() >= 20 { tc.tell_history.pop_front(); }
+        tc.tell_history.push_back((me.name.clone(), msg.to_string()));
         tc.afk_msg.clone()
     };
     let mut out = format!("\r\nYou tell {}, '{msg}'\r\n", p.name);
@@ -5696,6 +5701,43 @@ async fn do_ctell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     CmdOutput::text(format!("\r\n@m[{}] You ctell: '{msg}'@n\r\n", me.clan))
 }
 
+/// `hint [N]` — print one of N rotating beginner tips.  No arg picks
+/// a random tip; a numeric arg shows that index (1-based).
+fn do_hint(arg: &str) -> CmdOutput {
+    const TIPS: &[&str] = &[
+        "`score` shows your stats at a glance.  `prefs` lists every toggle.",
+        "`look n` peeks one room to the north.  `scan 2` peeks two hops in every direction.",
+        "`map` prints a 5x5 mini-map of nearby rooms.",
+        "`identify <item>` shows weight, value, affects and any enchantments — needs the spell.",
+        "`practice all` spends every practice point you have in one go.",
+        "Pets are charmed mobs that follow you.  `petlist` and `petbuy <kw>` at a pet shop.",
+        "Mail anyone offline with `tell <name> <msg>` — it'll be queued for them.",
+        "`consider <mob>` or `con` gauges a fight's difficulty.",
+        "`brew <spell>` bottles a known spell into a potion.  `quaff` to use.",
+        "`recover` after a death pulls every item out of your corpse in one shot.",
+        "Weapons and armor wear down — `repair <item>` at a smith.",
+        "`wimpy <hp>` auto-flees when your HP drops below the threshold.",
+        "`autoexit`, `autoloot`, `autoassist` are toggles in `prefs`.",
+        "Type `:smile` to emote and `'hello` to say.",
+        "`group invite <player>` then `group accept` — XP and gold split among groupmates in the room.",
+    ];
+    let arg = arg.trim();
+    if let Ok(n) = arg.parse::<usize>() {
+        if n == 0 || n > TIPS.len() {
+            return CmdOutput::text(format!(
+                "\r\nTip number must be 1..={}.\r\n", TIPS.len()
+            ));
+        }
+        return CmdOutput::text(format!(
+            "\r\nTip {}/{}: {}\r\n", n, TIPS.len(), TIPS[n - 1],
+        ));
+    }
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+    let pick = TIPS.choose(&mut rng).copied().unwrap_or(TIPS[0]);
+    CmdOutput::text(format!("\r\nTip: {pick}\r\n"))
+}
+
 /// `map` — 5x5 ASCII mini-map centered on the caller's current room.
 /// Walks the exits up to 2 hops in each cardinal direction; cells
 /// follow the standard "[#]" (room exists) / "[ ]" (unknown) /
@@ -5826,6 +5868,18 @@ fn do_history(me: &Character) -> CmdOutput {
     let mut s = String::from("\r\nCommand history:\r\n");
     for (i, cmd) in me.history.iter().enumerate() {
         s.push_str(&format!("  {:>3}. {}\r\n", i + 1, cmd));
+    }
+    CmdOutput::text(s)
+}
+
+/// `tells` — list the last 20 received tells (most recent last).
+fn do_tells(me: &Character) -> CmdOutput {
+    if me.tell_history.is_empty() {
+        return CmdOutput::text("\r\nNo tells received this session.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nRecent tells:\r\n");
+    for (from, msg) in me.tell_history.iter() {
+        s.push_str(&format!("  {from} tells you, '{msg}'\r\n"));
     }
     CmdOutput::text(s)
 }
@@ -6171,6 +6225,49 @@ async fn do_recover(
     };
     // Reuse the mass-take helper with no keyword filter.
     do_get_all_from(me, world, chars, None, "corpse").await
+}
+
+/// `consider <kw>` (alias `con`) — gauge the difficulty of fighting a
+/// mob in the caller's current room.  Returns a single-line verdict
+/// based on the level delta + the mob's current HP fraction.
+async fn do_consider(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nConsider whom?\r\n".to_string());
+    }
+    let w = world.lock().await;
+    let r = match w.rooms.get(&me.current_room) {
+        Some(r) => r,
+        None => return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string()),
+    };
+    let hit = r.mobs.iter().find_map(|&mid| {
+        let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+        let p = w.mob_protos.get(&m.vnum)?;
+        if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+            Some((p.short_descr.clone(), p.level, m.hp, m.max_hp))
+        } else { None }
+    });
+    let Some((short, mlevel, hp, max_hp)) = hit else {
+        return CmdOutput::text("\r\nNo such creature here.\r\n".to_string());
+    };
+    let delta = mlevel - me.level;
+    let verdict = match delta {
+        d if d <= -10 => "is a complete walkover for you.",
+        d if d <= -5  => "looks like easy prey.",
+        d if d <= -2  => "looks weaker than you.",
+        d if d <=  1  => "looks like a fair fight.",
+        d if d <=  4  => "looks tough but doable.",
+        d if d <=  9  => "would be a deadly challenge.",
+        _             => "would tear you apart on sight!",
+    };
+    let wound = if hp < max_hp / 4 {
+        " (It looks badly hurt.)"
+    } else if hp < max_hp / 2 {
+        " (It is wounded.)"
+    } else { "" };
+    CmdOutput::text(format!(
+        "\r\n{short} (lvl {mlevel}) {verdict}{wound}\r\n"
+    ))
 }
 
 async fn do_skill(
@@ -9754,64 +9851,78 @@ async fn cast_enchant(
     me: &mut Character,
     world: &Arc<Mutex<World>>,
 ) -> CmdOutput {
-    use crate::world::{APPLY_HITROLL, APPLY_DAMROLL, ITEM_WEAPON};
+    use crate::world::{APPLY_HITROLL, APPLY_DAMROLL, APPLY_AC, ITEM_WEAPON, ITEM_ARMOR};
     let kw = target_kw.trim().to_ascii_lowercase();
     if kw.is_empty() {
         return CmdOutput::text("\r\nEnchant what?\r\n".to_string());
     }
-    // Find by keyword in inventory only (not equipped — see above).
-    let (iid, short) = {
+    // Find by keyword in inventory only.  Accept WEAPON or ARMOR.
+    let (iid, short, item_type) = {
         let w = world.lock().await;
-        let mut hit: Option<(u32, String)> = None;
+        let mut hit: Option<(u32, String, i32)> = None;
         for &iid in &me.inventory {
             let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
             let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
-            if p.item_type != ITEM_WEAPON { continue; }
+            if p.item_type != ITEM_WEAPON && p.item_type != ITEM_ARMOR { continue; }
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
-                hit = Some((iid, p.short_description.clone()));
+                hit = Some((iid, p.short_description.clone(), p.item_type));
                 break;
             }
         }
         match hit {
             Some(h) => h,
             None => return CmdOutput::text(
-                "\r\nYou have no such weapon to enchant (it must be in your inventory).\r\n".to_string(),
+                "\r\nYou have no such weapon or armor to enchant (it must be in your inventory).\r\n".to_string(),
             ),
         }
     };
-    // Cap check: sum hitroll + damroll bonus on this instance.
-    let already = {
+    // Cap check per-type.
+    let too_strong = {
         let w = world.lock().await;
-        let o = w.obj_instances.iter().find(|o| o.id == iid);
-        let mut hr = 0; let mut dr = 0;
-        if let Some(o) = o {
-            for a in &o.bonus_affects {
-                if a.location == APPLY_HITROLL { hr += a.modifier; }
-                if a.location == APPLY_DAMROLL { dr += a.modifier; }
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { return CmdOutput::text("\r\nIt slips from your grasp.\r\n".to_string()); };
+        let mut hr = 0; let mut dr = 0; let mut ac = 0;
+        for a in &o.bonus_affects {
+            match a.location {
+                APPLY_HITROLL => hr += a.modifier,
+                APPLY_DAMROLL => dr += a.modifier,
+                APPLY_AC      => ac += a.modifier,
+                _ => {}
             }
         }
-        (hr, dr)
+        if item_type == ITEM_WEAPON { hr >= 3 || dr >= 3 } else { ac >= 3 }
     };
-    if already.0 >= 3 || already.1 >= 3 {
+    if too_strong {
         return CmdOutput::text(format!(
             "\r\n{short} already crackles with as much enchantment as it can hold.\r\n"
         ));
     }
     me.mana -= crate::character::Skill::Enchant.mana_cost();
-    {
+    let (msg, _): (String, ()) = {
         let mut w = world.lock().await;
         if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
-            o.bonus_affects.push(crate::world::ObjAffect {
-                location: APPLY_HITROLL, modifier: 1,
-            });
-            o.bonus_affects.push(crate::world::ObjAffect {
-                location: APPLY_DAMROLL, modifier: 1,
-            });
+            if item_type == ITEM_WEAPON {
+                o.bonus_affects.push(crate::world::ObjAffect {
+                    location: APPLY_HITROLL, modifier: 1,
+                });
+                o.bonus_affects.push(crate::world::ObjAffect {
+                    location: APPLY_DAMROLL, modifier: 1,
+                });
+                (format!(
+                    "\r\n{short} hums and accepts the enchantment (+1 hitroll, +1 damroll).\r\n"
+                ), ())
+            } else {
+                o.bonus_affects.push(crate::world::ObjAffect {
+                    location: APPLY_AC, modifier: 1,
+                });
+                (format!(
+                    "\r\n{short} hums and accepts the enchantment (+1 AC).\r\n"
+                ), ())
+            }
+        } else {
+            ("\r\nIt slips from your grasp.\r\n".to_string(), ())
         }
-    }
-    CmdOutput::text(format!(
-        "\r\n{short} hums and accepts the enchantment (+1 hitroll, +1 damroll).\r\n"
-    ))
+    };
+    CmdOutput::text(msg)
 }
 
 /// `cast scribe <spell>` — like `brew` but produces a single-use

@@ -105,6 +105,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn periodic house-save tick -----------------------------------
     db::spawn_house_save_tick(Arc::clone(&world), Arc::clone(&players));
 
+    // --- Spawn random ambient encounter tick ------------------------------
+    db::spawn_random_encounter_tick(Arc::clone(&world));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 
