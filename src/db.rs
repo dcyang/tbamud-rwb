@@ -1016,6 +1016,22 @@ pub const HOURS_PER_DAY:    i32 = 24;
 pub const DAYS_PER_MONTH:   i32 = 35;
 pub const MONTHS_PER_YEAR:  i32 = 17;
 
+/// Global weather state (cp212).  `WEATHER_PRESSURE` is barometric
+/// pressure in mmHg (~960..1040); `WEATHER_SKY` is the current sky:
+/// 0 = cloudless, 1 = cloudy, 2 = raining, 3 = lightning.  Mirrors the
+/// `weather_info` struct + `another_hour`/`weather_change` in weather.c.
+pub static WEATHER_PRESSURE: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(960);
+pub static WEATHER_CHANGE:   std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+pub static WEATHER_SKY:      std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(1);   // start cloudy
+
+pub const SKY_CLOUDLESS: i32 = 0;
+pub const SKY_CLOUDY:    i32 = 1;
+pub const SKY_RAINING:   i32 = 2;
+pub const SKY_LIGHTNING: i32 = 3;
+
 /// Stock CircleMUD sun states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SunState { Dark, Rise, Light, Set }
@@ -1092,6 +1108,86 @@ pub fn spawn_time_tick() {
                 }
             } else {
                 GAME_HOUR.store(h, Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Map the current barometric pressure to a sky state, with band edges
+/// chosen to give some hysteresis against flapping.  Lower pressure =
+/// worse weather.  (cp212)
+fn sky_for_pressure(pressure: i32) -> i32 {
+    if pressure >= 1010 { SKY_CLOUDLESS }
+    else if pressure >= 990 { SKY_CLOUDY }
+    else if pressure >= 970 { SKY_RAINING }
+    else { SKY_LIGHTNING }
+}
+
+/// Background weather simulation (cp212).  Every game-hour (75s) it walks
+/// the barometric pressure (seasonally biased, like `weather_change` in
+/// weather.c), recomputes the sky band, and — on an actual sky change —
+/// broadcasts an ambient line to every player standing in an outdoor room
+/// (sector other than INSIDE / CITY).
+pub fn spawn_weather_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<World>>,
+    chars: crate::character::SharedChars,
+) {
+    const HOUR_REAL_SECS: u64 = 75;
+    tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(HOUR_REAL_SECS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // --- Pressure random-walk, seasonally biased. ---
+            let month = GAME_MONTH.load(Ordering::Relaxed);
+            let mut pressure = WEATHER_PRESSURE.load(Ordering::Relaxed);
+            let diff = if (9..=16).contains(&month) {
+                if pressure > 985 { -2 } else { 2 }
+            } else if pressure > 1015 { -2 } else { 2 };
+            let mut change = WEATHER_CHANGE.load(Ordering::Relaxed);
+            change += dice(1, 4) * diff + dice(2, 6) - dice(2, 6);
+            change = change.clamp(-12, 12);
+            pressure = (pressure + change).clamp(960, 1040);
+            WEATHER_CHANGE.store(change, Ordering::Relaxed);
+            WEATHER_PRESSURE.store(pressure, Ordering::Relaxed);
+
+            let old_sky = WEATHER_SKY.load(Ordering::Relaxed);
+            let new_sky = sky_for_pressure(pressure);
+            if new_sky == old_sky { continue; }
+            WEATHER_SKY.store(new_sky, Ordering::Relaxed);
+
+            // Ambient message keyed off the direction of change.
+            let msg = match (old_sky, new_sky) {
+                (_, SKY_LIGHTNING) => "Lightning flashes and thunder rumbles overhead.\r\n",
+                (_, SKY_RAINING) if new_sky > old_sky => "It begins to rain.\r\n",
+                (SKY_LIGHTNING, SKY_RAINING) => "The lightning subsides, but the rain continues.\r\n",
+                (_, SKY_CLOUDY) if new_sky > old_sky => "The sky clouds over.\r\n",
+                (SKY_RAINING, SKY_CLOUDY) => "The rain stops, leaving a grey overcast.\r\n",
+                (_, SKY_CLOUDLESS) => "The clouds part and the sky clears.\r\n",
+                _ => "The weather shifts.\r\n",
+            };
+
+            // Broadcast to players standing outdoors.
+            let handles: Vec<crate::character::PlayerHandle> = {
+                let cl = chars.lock().await;
+                cl.iter().cloned().collect()
+            };
+            if handles.is_empty() { continue; }
+            let w = world.lock().await;
+            for ph in &handles {
+                let outdoor = w.rooms.get(&ph.current_room)
+                    .map(|r| r.sector_type != crate::world::SECT_INSIDE
+                          && r.sector_type != crate::world::SECT_CITY)
+                    .unwrap_or(false);
+                if outdoor {
+                    let _ = ph.send.send(format!("\r\n{msg}"));
+                }
             }
         }
     });

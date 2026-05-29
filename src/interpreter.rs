@@ -759,6 +759,15 @@ fn find_container(
     None
 }
 
+/// True if the container instance is currently closed (cp215).  Reads the
+/// CONT_CLOSED bit from the prototype's `value[1]`.
+fn container_closed(w: &World, iid: u32) -> bool {
+    w.obj_instances.iter().find(|o| o.id == iid)
+        .and_then(|o| w.obj_protos.get(&o.vnum))
+        .map(|p| p.value[1] & crate::world::CONT_CLOSED != 0)
+        .unwrap_or(false)
+}
+
 async fn do_get_from_container(
     obj_kw: &str,
     cont_kw: &str,
@@ -779,6 +788,9 @@ async fn do_get_from_container(
         Some(t) => t,
         None => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
     };
+    if container_closed(&w, container_iid) {
+        return CmdOutput::text(format!("\r\n{container_name} is closed.\r\n"));
+    }
 
     // Find a matching item inside.
     let (idx_in_container, child_iid, child_short) = {
@@ -861,6 +873,9 @@ async fn do_put(
 
     if container_iid == iid {
         return CmdOutput::text("\r\nYou can't put something inside itself.\r\n");
+    }
+    if container_closed(&w, container_iid) {
+        return CmdOutput::text(format!("\r\n{container_name} is closed.\r\n"));
     }
 
     me.inventory.remove(idx);
@@ -1030,6 +1045,9 @@ async fn do_get_all_from(
         Some(t) => t,
         None => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
     };
+    if container_closed(&w, container_iid) {
+        return CmdOutput::text(format!("\r\n{container_name} is closed.\r\n"));
+    }
     let candidates: Vec<u32> = w.obj_instances.iter()
         .find(|o| o.id == container_iid)
         .map(|o| o.contents.clone()).unwrap_or_default();
@@ -1247,6 +1265,9 @@ async fn do_put_all(
         Some(t) => t,
         None    => return CmdOutput::text(format!("\r\nYou see no {cont_kw} here.\r\n")),
     };
+    if container_closed(&w, container_iid) {
+        return CmdOutput::text(format!("\r\n{container_name} is closed.\r\n"));
+    }
     let candidates = me.inventory.clone();
     let mut moved: Vec<String> = Vec::new();
     for iid in candidates {
@@ -2719,19 +2740,20 @@ fn do_time() -> CmdOutput {
 fn do_weather() -> CmdOutput {
     use std::sync::atomic::Ordering;
     let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
-    let m = crate::db::GAME_MONTH.load(Ordering::Relaxed);
-    // Pseudo-randomly varied by hour + month — same time of same day
-    // always shows the same weather (stable within a tick).
-    let seed = (h.wrapping_mul(7) + m.wrapping_mul(31)) & 0xff;
-    let desc = match seed % 5 {
-        0 => "The sky is cloudless and bright.",
-        1 => "Wispy clouds drift through a clear sky.",
-        2 => "Grey clouds blanket the sky.",
-        3 => "Cold rain falls in sheets.",
-        _ => "A fierce storm rages overhead, lightning crackling in the distance.",
+    let sky = crate::db::WEATHER_SKY.load(Ordering::Relaxed);
+    let change = crate::db::WEATHER_CHANGE.load(Ordering::Relaxed);
+    // Live sky state, driven by the weather simulation (cp212).
+    let desc = match sky {
+        crate::db::SKY_CLOUDLESS => "The sky is cloudless and bright.",
+        crate::db::SKY_CLOUDY    => "Grey clouds blanket the sky.",
+        crate::db::SKY_RAINING   => "Cold rain falls in sheets.",
+        _                        => "A fierce storm rages overhead, lightning crackling in the distance.",
     };
+    let trend = if change > 0 { "The pressure is rising — the weather is clearing." }
+                else if change < 0 { "The pressure is dropping — the weather is worsening." }
+                else { "The pressure is steady." };
     let lit = if (6..20).contains(&h) { "It is daytime." } else { "It is night." };
-    CmdOutput::text(format!("\r\n{lit}\r\n{desc}\r\n"))
+    CmdOutput::text(format!("\r\n{lit}\r\n{desc}\r\n{trend}\r\n"))
 }
 
 /// `bank [balance | deposit N | withdraw N]` — manage gold on deposit.
@@ -7310,6 +7332,8 @@ async fn do_cast(
         crate::character::Skill::SenseLife    => cast_sense_life(me),
         crate::character::Skill::Restoration  => cast_restoration(target, me, chars).await,
         crate::character::Skill::Fly          => cast_buff(target, me, chars, learned, crate::character::Skill::Fly).await,
+        crate::character::Skill::WaterBreathing => cast_buff(target, me, chars, learned, crate::character::Skill::WaterBreathing).await,
+        crate::character::Skill::CallLightning => cast_call_lightning(target, me, world, chars, learned).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -7660,6 +7684,169 @@ async fn cast_lightning_bolt(
         (
             format!("\r\nYour lightning bolt fizzles around {mob_name}.\r\n"),
             format!("{}'s lightning bolt fizzles around {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(mob_corpse_contents).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+/// `call lightning` — Cleric attack spell that only works outdoors during
+/// rain or a thunderstorm (cp213, ties into the cp212 weather system).
+/// `dice(7, 8) + level + WIS-bonus`, hit chance `(65 + learned/2).min(95)`,
+/// save-for-half.  Mirrors the lightning-bolt template with a weather gate.
+async fn cast_call_lightning(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    use std::sync::atomic::Ordering;
+
+    // Weather gate: must be outdoors AND raining/storming.
+    {
+        let w = world.lock().await;
+        let outdoor = w.rooms.get(&me.current_room)
+            .map(|r| r.sector_type != crate::world::SECT_INSIDE
+                  && r.sector_type != crate::world::SECT_CITY)
+            .unwrap_or(false);
+        if !outdoor {
+            return CmdOutput::text(
+                "\r\nYou must be outdoors, under the open sky, to call the lightning.\r\n".to_string()
+            );
+        }
+    }
+    let sky = crate::db::WEATHER_SKY.load(Ordering::Relaxed);
+    if sky != crate::db::SKY_RAINING && sky != crate::db::SKY_LIGHTNING {
+        return CmdOutput::text(
+            "\r\nThe sky is calm — there is no storm to draw lightning from.\r\n".to_string()
+        );
+    }
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let hit_chance = (65 + learned as i32 / 2).min(95);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let base_dmg = crate::db::dice(7, 8) + me.level
+        + crate::character::str_damage_bonus(me.wis);
+    me.mana -= crate::character::Skill::CallLightning.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nA bolt of lightning lances down into {mob_name} for {dmg} damage (partial resist)!\r\n"),
+            format!("{} calls down a bolt of lightning upon {mob_name}.\r\n", me.name),
+        )
+    } else if hit {
+        (
+            format!("\r\nYou call down a searing bolt of lightning — it blasts {mob_name} for {dmg} damage!\r\n"),
+            format!("{} calls down a searing bolt of lightning upon {mob_name}!\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour lightning strikes the ground beside {mob_name}, missing.\r\n"),
+            format!("{}'s lightning strikes the ground, missing {mob_name}.\r\n", me.name),
         )
     };
     {
@@ -9147,6 +9334,12 @@ async fn cast_buff(
             "Your feet lift gently from the ground — you can fly!\r\n",
             "{} rises gently off the ground, hovering in the air.\r\n",
         ),
+        crate::character::Skill::WaterBreathing => (
+            12 + learned as i32 / 4,
+            0, 0,
+            "Your throat tingles — you can breathe water now.\r\n",
+            "{}'s throat shimmers with a watery sheen.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
 
@@ -10266,12 +10459,18 @@ async fn do_door(
     }
 
     let w = world.lock().await;
-    let Some((dir, info, key_vnum, keyword, _to)) =
-        find_door_target(&w, me.current_room, arg)
-    else {
-        return CmdOutput::text(format!("\r\nYou see no such door here.\r\n"));
-    };
+    let door = find_door_target(&w, me.current_room, arg);
+    // No matching door?  Try a container by the same keyword (cp215).
+    let container = if door.is_none() {
+        find_container(&w, me, arg)
+    } else { None };
     drop(w);
+    let Some((dir, info, key_vnum, keyword, _to)) = door else {
+        if let Some((iid, short)) = container {
+            return do_container_door(iid, short, me, world, chars, op).await;
+        }
+        return CmdOutput::text(format!("\r\nYou see no such door or container here.\r\n"));
+    };
     if (info & EX_ISDOOR) == 0 {
         return CmdOutput::text(format!("\r\nThat's not a door.\r\n"));
     }
@@ -10328,6 +10527,82 @@ async fn do_door(
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id), &broadcast);
     CmdOutput::text(format!("\r\nYou {verb} the {kw_short}.\r\n"))
+}
+
+/// Open/close/lock/unlock applied to an ITEM_CONTAINER (cp215).  Container
+/// state lives in the prototype's `value[1]` (CONT_* bits) — shared across
+/// instances, consistent with our drink-container/wand handling; `value[2]`
+/// is the key vnum.  Gates put/get on the open state are in `do_put` /
+/// `do_get_from_container`.
+async fn do_container_door(
+    iid: u32,
+    short: String,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    op: DoorOp,
+) -> CmdOutput {
+    use crate::world::{CONT_CLOSEABLE, CONT_CLOSED, CONT_LOCKED};
+    let verb = match op {
+        DoorOp::Open => "open", DoorOp::Close => "close",
+        DoorOp::Lock => "lock", DoorOp::Unlock => "unlock",
+    };
+    // Snapshot the container's flags + key vnum.
+    let (vnum, flags, key_vnum) = {
+        let w = world.lock().await;
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else {
+            return CmdOutput::text("\r\nIt's gone now.\r\n".to_string());
+        };
+        let Some(p) = w.obj_protos.get(&o.vnum) else {
+            return CmdOutput::text("\r\nIt's gone now.\r\n".to_string());
+        };
+        (o.vnum, p.value[1], p.value[2])
+    };
+    if (flags & CONT_CLOSEABLE) == 0 {
+        return CmdOutput::text(format!("\r\n{short} can't be {verb}ed.\r\n"));
+    }
+    let closed = (flags & CONT_CLOSED) != 0;
+    let locked = (flags & CONT_LOCKED) != 0;
+
+    let (set, clear) = match op {
+        DoorOp::Open => {
+            if !closed { return CmdOutput::text(format!("\r\n{short} is already open.\r\n")); }
+            if locked  { return CmdOutput::text(format!("\r\n{short} is locked.\r\n")); }
+            (0, CONT_CLOSED)
+        }
+        DoorOp::Close => {
+            if closed { return CmdOutput::text(format!("\r\n{short} is already closed.\r\n")); }
+            (CONT_CLOSED, 0)
+        }
+        DoorOp::Unlock => {
+            if !closed { return CmdOutput::text(format!("\r\n{short} isn't even closed.\r\n")); }
+            if !locked { return CmdOutput::text(format!("\r\n{short} is already unlocked.\r\n")); }
+            if !player_has_key(me, key_vnum, world).await {
+                return CmdOutput::text("\r\nYou don't have the key.\r\n".to_string());
+            }
+            (0, CONT_LOCKED)
+        }
+        DoorOp::Lock => {
+            if !closed { return CmdOutput::text(format!("\r\nYou'll need to close {short} first.\r\n")); }
+            if locked  { return CmdOutput::text(format!("\r\n{short} is already locked.\r\n")); }
+            if !player_has_key(me, key_vnum, world).await {
+                return CmdOutput::text("\r\nYou don't have the key.\r\n".to_string());
+            }
+            (CONT_LOCKED, 0)
+        }
+    };
+    {
+        let mut w = world.lock().await;
+        if let Some(p) = w.obj_protos.get_mut(&vnum) {
+            p.value[1] = (p.value[1] & !clear) | set;
+        }
+    }
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} {verb}s {short}.\r\n", me.name));
+    }
+    CmdOutput::text(format!("\r\nYou {verb} {short}.\r\n"))
 }
 
 /// `search` — peek for hidden exits in the current room.  Always
@@ -11538,6 +11813,9 @@ async fn do_wear(
     if arg.is_empty() {
         return CmdOutput::text("\r\nWear what?\r\n");
     }
+    if arg.eq_ignore_ascii_case("all") {
+        return do_wear_all(me, world, chars).await;
+    }
     let w = world.lock().await;
     let key = arg.to_ascii_lowercase();
 
@@ -11610,6 +11888,9 @@ async fn do_remove(
     if arg.is_empty() {
         return CmdOutput::text("\r\nRemove what?\r\n");
     }
+    if arg.eq_ignore_ascii_case("all") {
+        return do_remove_all(me, world, chars).await;
+    }
     let w = world.lock().await;
     let key = arg.to_ascii_lowercase();
 
@@ -11637,6 +11918,89 @@ async fn do_remove(
     apply_obj_affects(me, &affects, -1);
     fire_obj_remove_triggers(iid, &me.name, me.current_room, world, chars).await;
     CmdOutput::text(format!("\r\nYou stop using {short}.\r\n"))
+}
+
+/// `wear all` — wear every wearable item in inventory that fits a free
+/// slot (cp214).  Skips weapons (those are `wield`ed), anti-class items,
+/// already-occupied slots, and off-hand slots blocked by a 2H weapon.
+async fn do_wear_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let candidates = me.inventory.clone();
+    if candidates.is_empty() {
+        return CmdOutput::text("\r\nYou have nothing to wear.\r\n".to_string());
+    }
+    // Whether a two-handed weapon is currently wielded (blocks shield/hold).
+    let two_handed_wield = {
+        let w = world.lock().await;
+        me.equipment[crate::character::WEAR_WIELD]
+            .and_then(|iid| w.obj_instances.iter().find(|o| o.id == iid))
+            .and_then(|o| w.obj_protos.get(&o.vnum))
+            .map(|p| p.extra_flags[0] & crate::world::ITEM_2H_WEAPON != 0)
+            .unwrap_or(false)
+    };
+    let mut worn: Vec<String> = Vec::new();
+    for iid in candidates {
+        let (wear_flags, extra_flags, short) = {
+            let w = world.lock().await;
+            let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
+            (p.wear_flags[0], p.extra_flags[0], p.short_description.clone())
+        };
+        let Some(slot) = auto_wear_slot(wear_flags) else { continue; };
+        if me.equipment[slot].is_some() { continue; }
+        if anti_class_block(extra_flags, me.class, me.alignment).is_some() { continue; }
+        if two_handed_wield
+            && (slot == crate::character::WEAR_SHIELD
+                || slot == crate::character::WEAR_HOLD)
+        { continue; }
+
+        me.inventory.retain(|&i| i != iid);
+        me.equipment[slot] = Some(iid);
+        let affects = snapshot_obj_affects(iid, world).await;
+        apply_obj_affects(me, &affects, 1);
+        fire_obj_wear_triggers(iid, &me.name, me.current_room, world, chars).await;
+        worn.push(short);
+    }
+    if worn.is_empty() {
+        return CmdOutput::text("\r\nYou have nothing you can wear.\r\n".to_string());
+    }
+    let mut s = format!("\r\nYou wear {} item(s):\r\n", worn.len());
+    for n in &worn { s.push_str(&format!("  {n}\r\n")); }
+    CmdOutput::text(s)
+}
+
+/// `remove all` — take off every worn item back into inventory (cp214).
+async fn do_remove_all(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let mut removed: Vec<String> = Vec::new();
+    for slot in 0..NUM_WEARS {
+        let Some(iid) = me.equipment[slot] else { continue; };
+        let short = {
+            let w = world.lock().await;
+            w.obj_instances.iter().find(|o| o.id == iid)
+                .and_then(|o| w.obj_protos.get(&o.vnum))
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "something".to_string())
+        };
+        me.equipment[slot] = None;
+        me.inventory.push(iid);
+        let affects = snapshot_obj_affects(iid, world).await;
+        apply_obj_affects(me, &affects, -1);
+        fire_obj_remove_triggers(iid, &me.name, me.current_room, world, chars).await;
+        removed.push(short);
+    }
+    if removed.is_empty() {
+        return CmdOutput::text("\r\nYou aren't wearing anything.\r\n".to_string());
+    }
+    let mut s = format!("\r\nYou remove {} item(s):\r\n", removed.len());
+    for n in &removed { s.push_str(&format!("  {n}\r\n")); }
+    CmdOutput::text(s)
 }
 
 async fn do_examine(
@@ -12468,9 +12832,11 @@ async fn do_move(
     // Immortals bypass entirely (cp209).
     let flying = me.is_flying();
     if me.level < LVL_IMMORT {
-        if target_sector == crate::world::SECT_UNDERWATER && !flying {
+        if target_sector == crate::world::SECT_UNDERWATER
+            && !flying && !me.can_breathe_water()
+        {
             return CmdOutput::text(
-                "\r\nYou'd drown — you need to be flying to go there.\r\n".to_string()
+                "\r\nYou'd drown — you need to breathe water (or fly) to go there.\r\n".to_string()
             );
         }
         if target_sector == crate::world::SECT_WATER_NOSWIM && !flying && !has_boat {

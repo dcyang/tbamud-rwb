@@ -334,6 +334,13 @@ pub const ITEM_WEAPON:    i32 = 5;
 pub const ITEM_ARMOR:     i32 = 9;
 pub const ITEM_POTION:    i32 = 10;
 pub const ITEM_CONTAINER: i32 = 15;
+/// Container flag bits stored in an ITEM_CONTAINER's `value[1]`
+/// (`value[2]` holds the key vnum).  Mirror the CONT_* macros in
+/// structs.h.
+pub const CONT_CLOSEABLE: i32 = 1 << 0;
+pub const CONT_PICKPROOF: i32 = 1 << 1;
+pub const CONT_CLOSED:    i32 = 1 << 2;
+pub const CONT_LOCKED:    i32 = 1 << 3;
 pub const ITEM_DRINKCON:  i32 = 17;
 pub const ITEM_FOOD:      i32 = 19;
 pub const ITEM_FOUNTAIN:  i32 = 23;

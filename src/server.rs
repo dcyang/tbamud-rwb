@@ -96,6 +96,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn game-clock tick --------------------------------------------
     db::spawn_time_tick();
 
+    // --- Spawn weather simulation tick (cp212) ----------------------------
+    db::spawn_weather_tick(Arc::clone(&world), Arc::clone(&chars));
+
     // --- Spawn mob spec_proc tick (puff/fido/janitor) ---------------------
     db::spawn_mob_spec_tick(Arc::clone(&world), Arc::clone(&chars));
 

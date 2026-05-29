@@ -91,6 +91,12 @@ pub enum Skill {
     /// Buff spell — grants flight: cross deep-water/no-swim sectors and
     /// move at a flat low movement cost.
     Fly,
+    /// Buff spell — lets the bearer enter underwater sectors without
+    /// drowning.
+    WaterBreathing,
+    /// Cleric attack spell — calls down a lightning bolt; only works
+    /// outdoors during rain or a thunderstorm.
+    CallLightning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +164,8 @@ impl Skill {
             "berserk"                         => Some(Skill::Berserk),
             "taunt"                           => Some(Skill::Taunt),
             "fly" | "flight"                  => Some(Skill::Fly),
+            "waterbreathing" | "waterbreath" | "breathe" => Some(Skill::WaterBreathing),
+            "calllightning" | "calllightening" => Some(Skill::CallLightning),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
@@ -228,6 +236,8 @@ impl Skill {
             Skill::Berserk       => "berserk",
             Skill::Taunt         => "taunt",
             Skill::Fly           => "fly",
+            Skill::WaterBreathing => "water breathing",
+            Skill::CallLightning => "call lightning",
         }
     }
 
@@ -255,7 +265,8 @@ impl Skill {
                 | Skill::AcidBlast     | Skill::ChillTouch
                 | Skill::Brew          | Skill::Scribe
                 | Skill::Enchant       | Skill::Restoration
-                | Skill::Fly
+                | Skill::Fly           | Skill::WaterBreathing
+                | Skill::CallLightning
                                       => SkillKind::Spell,
         }
     }
@@ -310,6 +321,8 @@ impl Skill {
             Skill::Enchant       => 60,
             Skill::Restoration   => 80,
             Skill::Fly           => 10,
+            Skill::WaterBreathing => 8,
+            Skill::CallLightning => 15,
         }
     }
 
@@ -375,6 +388,8 @@ impl Skill {
             Skill::Berserk       => &[Class::Warrior],
             Skill::Taunt         => &[Class::Warrior],
             Skill::Fly           => &[Class::MagicUser, Class::Cleric],
+            Skill::WaterBreathing => &[Class::MagicUser, Class::Cleric],
+            Skill::CallLightning => &[Class::Cleric],
         }
     }
 
@@ -441,6 +456,8 @@ impl Skill {
             Skill::Berserk       => "berserk",
             Skill::Taunt         => "taunt",
             Skill::Fly           => "fly",
+            Skill::WaterBreathing => "water-breathing",
+            Skill::CallLightning => "call-lightning",
         }
     }
 
@@ -472,7 +489,8 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Enchant,
     Skill::Restoration,
     Skill::Berserk, Skill::Taunt,
-    Skill::Fly,
+    Skill::Fly, Skill::WaterBreathing,
+    Skill::CallLightning,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1079,6 +1097,12 @@ impl Character {
     /// / no-swim sectors and pay a flat low movement cost (cp209).
     pub fn is_flying(&self) -> bool {
         self.affects.iter().any(|a| a.skill == Skill::Fly)
+    }
+
+    /// True while a WaterBreathing affect is active.  Lets the bearer enter
+    /// underwater sectors without drowning (cp211).
+    pub fn can_breathe_water(&self) -> bool {
+        self.affects.iter().any(|a| a.skill == Skill::WaterBreathing)
     }
 
     /// Total damage reduction percent (0..=75) from active affects.
