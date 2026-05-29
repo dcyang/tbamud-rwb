@@ -85,10 +85,10 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "put", "give", "wield", "wear", "remove",
+    "get", "drop", "junk", "donate", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell", "appraise", "value",
-    "kick", "bash", "backstab", "rescue", "disarm", "recover", "consider", "con",
+    "kick", "bash", "backstab", "berserk", "taunt", "rescue", "disarm", "recover", "consider", "con",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
@@ -103,7 +103,7 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "fill", "empty", "recite", "use", "zap", "light", "extinguish",
-    "follow", "group", "gtell", "title", "gossip", "chat",
+    "follow", "group", "gtell", "split", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
@@ -113,7 +113,7 @@ const COMMANDS: &[&str] = &[
     "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
     "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
-    "invis", "vis", "mute", "freeze",
+    "invis", "vis", "nohassle", "mute", "freeze",
     "ban", "unban", "bans",
     "wiznet",
     "load", "restore", "echo", "gecho", "slay", "snoop", "unsnoop",
@@ -290,6 +290,8 @@ pub async fn dispatch_command(
         Some("inventory") => do_inventory(me, world).await,
         Some("get")       => do_get(rest, me, world, chars).await,
         Some("drop")      => do_drop(rest, me, world, chars).await,
+        Some("junk")      => do_junk(rest, me, world, chars).await,
+        Some("donate")    => do_donate(rest, me, world, chars).await,
         Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
         Some("tell")      => do_tell(rest, me, chars, players).await,
@@ -300,6 +302,8 @@ pub async fn dispatch_command(
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("berserk")   => do_berserk(me, chars).await,
+        Some("taunt")     => do_taunt(rest, me, world, chars).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
         Some("recover")   => do_recover(me, world, chars).await,
@@ -378,6 +382,7 @@ pub async fn dispatch_command(
         Some("follow")    => do_follow(rest, me, chars).await,
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
+        Some("split")     => do_split(rest, me, chars).await,
         Some("title")     => do_title(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
         Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
@@ -430,6 +435,7 @@ pub async fn dispatch_command(
         Some("zlist")     => do_zlist(me, world).await,
         Some("invis")     => do_invis(rest, me),
         Some("vis")       => do_vis(me),
+        Some("nohassle")  => do_nohassle(me),
         Some("mute")      => do_mute(rest, me, chars).await,
         Some("freeze")    => do_freeze(rest, me, chars).await,
         Some("ban")       => do_ban(rest, me, players).await,
@@ -1109,6 +1115,120 @@ async fn do_drop_all(
     chars.lock().await.broadcast_room(me.current_room, Some(me.id),
         &format!("{} drops several items.\r\n", me.name));
     CmdOutput::text(s)
+}
+
+/// `junk <item>` — permanently destroy an inventory item.  Supports
+/// `junk all` / `junk all.<kw>` for bulk cleanup.  (cp204)
+async fn do_junk(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nJunk what?\r\n".to_string());
+    }
+    let key = arg.to_ascii_lowercase();
+    let all = key == "all" || key.starts_with("all.");
+    let kw_filter: Option<String> = if all {
+        key.split_once('.').map(|(_, k)| k.to_string())
+    } else {
+        Some(key.clone())
+    };
+
+    let mut w = world.lock().await;
+    let candidates = me.inventory.clone();
+    let mut junked: Vec<String> = Vec::new();
+    for iid in candidates {
+        let (matches, short) = {
+            let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
+            let m = match &kw_filter {
+                Some(k) => obj_matches_keyword(&w, obj, k),
+                None    => true,
+            };
+            (m, obj_view(&w, obj).short)
+        };
+        if !matches { continue; }
+        me.inventory.retain(|&i| i != iid);
+        w.extract_obj(iid);
+        junked.push(short);
+        if !all { break; }   // single-item form stops at the first match
+    }
+    drop(w);
+
+    if junked.is_empty() {
+        return CmdOutput::text(format!("\r\nYou have nothing like '{arg}' to junk.\r\n"));
+    }
+    {
+        let cl = chars.lock().await;
+        let bmsg = if junked.len() == 1 {
+            format!("{} destroys {}.\r\n", me.name, junked[0])
+        } else {
+            format!("{} destroys several items.\r\n", me.name)
+        };
+        cl.broadcast_room(me.current_room, Some(me.id), &bmsg);
+    }
+    if junked.len() == 1 {
+        CmdOutput::text(format!("\r\nYou destroy {}. It is gone forever.\r\n", junked[0]))
+    } else {
+        let mut s = format!("\r\nYou destroy {} item(s):\r\n", junked.len());
+        for n in &junked { s.push_str(&format!("  {n}\r\n")); }
+        CmdOutput::text(s)
+    }
+}
+
+/// `donate <item>` — send an inventory item to the donation room (the
+/// mortal start room's floor) where any player can pick it up.  (cp204)
+async fn do_donate(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nDonate what?\r\n".to_string());
+    }
+    let key = arg.to_ascii_lowercase();
+    let mut w = world.lock().await;
+    let donation_room = w.start_room(false);
+    if donation_room == me.current_room {
+        return CmdOutput::text(
+            "\r\nYou're already standing in the donation room — just drop it.\r\n".to_string()
+        );
+    }
+    // Find first matching inventory item.
+    let (iid, short) = {
+        let mut found = None;
+        for &iid in &me.inventory {
+            if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if obj_matches_keyword(&w, obj, &key) {
+                    found = Some((iid, obj_view(&w, obj).short));
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(f) => f,
+            None => return CmdOutput::text(format!("\r\nYou do not have a {key}.\r\n")),
+        }
+    };
+    me.inventory.retain(|&i| i != iid);
+    if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+        o.in_room = donation_room;
+    }
+    if let Some(r) = w.rooms.get_mut(&donation_room) {
+        r.objects.push(iid);
+    }
+    drop(w);
+
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} donates {} to the gods.\r\n", me.name, short));
+        cl.broadcast_room(donation_room, None,
+            &format!("{} suddenly appears, sent by a generous soul.\r\n", short));
+    }
+    CmdOutput::text(format!("\r\nYou donate {} to the needy.\r\n", short))
 }
 
 /// `put all <container>` / `put all.<kw> <container>` — stuff every
@@ -2497,6 +2617,72 @@ async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
 }
 
+/// `split <amount>`: divide gold evenly among the group members present in
+/// the splitter's room (including the splitter). Any indivisible remainder
+/// stays with the splitter. Mirrors classic Diku `do_split`.
+async fn do_split(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text("\r\nSplit how much gold?\r\n".to_string());
+    }
+    let Ok(amount) = arg.parse::<i64>() else {
+        return CmdOutput::text("\r\nThat's not a valid amount.\r\n".to_string());
+    };
+    if amount <= 0 {
+        return CmdOutput::text("\r\nSplit some positive amount of gold.\r\n".to_string());
+    }
+    if amount > me.gold {
+        return CmdOutput::text("\r\nYou don't have that much gold.\r\n".to_string());
+    }
+
+    let leader_id = me.following.unwrap_or(me.id);
+    let here = me.current_room;
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    // Collect the other group members present in my room.
+    let mut recipients: Vec<crate::character::PlayerHandle> = Vec::new();
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let c = ph.character.lock().await;
+        let in_group = (c.id == leader_id && c.grouped)
+            || (c.following == Some(leader_id) && c.grouped);
+        if in_group && c.current_room == here {
+            recipients.push(ph.clone());
+        }
+    }
+    if recipients.is_empty() {
+        return CmdOutput::text(
+            "\r\nWith whom do you wish to share your gold?\r\n".to_string()
+        );
+    }
+
+    let num = recipients.len() as i64 + 1; // +1 for the splitter
+    let share = amount / num;
+    if share == 0 {
+        return CmdOutput::text(
+            "\r\nThere isn't enough gold to go around.\r\n".to_string()
+        );
+    }
+    let paid_out = share * recipients.len() as i64;
+    // Splitter keeps their own share plus any remainder.
+    me.gold -= paid_out;
+
+    for ph in &recipients {
+        let mut c = ph.character.lock().await;
+        c.gold += share;
+        let _ = ph.send.send(format!(
+            "\r\n{} splits {} coins; you receive {} of them.\r\n",
+            me.name, amount, share,
+        ));
+    }
+    CmdOutput::text(format!(
+        "\r\nYou split {} coins among {} members — {} each.\r\n",
+        amount, num, share,
+    ))
+}
+
 fn do_time() -> CmdOutput {
     use std::sync::atomic::Ordering;
     let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
@@ -3279,6 +3465,19 @@ fn do_vis(me: &mut Character) -> CmdOutput {
     if me.level < LVL_IMMORT { return immort_huh(); }
     me.invis_level = 0;
     CmdOutput::text("\r\nYou are now fully visible.\r\n".to_string())
+}
+
+/// `nohassle`: toggle immunity to aggressive / memory-grudge mobs (cp202).
+/// Immortal-only.  Defaults on for gods at login; this lets them turn it off
+/// to test aggression behaviour without dropping to a mortal character.
+fn do_nohassle(me: &mut Character) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    me.nohassle = !me.nohassle;
+    CmdOutput::text(format!(
+        "\r\nNohassle is now {}. Aggressive mobs {} you.\r\n",
+        if me.nohassle { "ON" } else { "OFF" },
+        if me.nohassle { "ignore" } else { "can now attack" },
+    ))
 }
 
 async fn do_zreset(
@@ -6559,6 +6758,133 @@ async fn do_consider(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> Cm
     CmdOutput::text(format!(
         "\r\n{short} (lvl {mlevel}) {verdict}{wound}\r\n"
     ))
+}
+
+/// `berserk` (Warrior): work yourself into a combat frenzy — a self-applied
+/// affect that boosts damage at the cost of defence for a short duration.
+/// No mana cost; no target.  (cp203)
+async fn do_berserk(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::Skill;
+    if !Skill::Berserk.is_class_allowed(me.class) {
+        return CmdOutput::text(
+            "\r\nOnly warriors can work themselves into a battle frenzy.\r\n".to_string()
+        );
+    }
+    let learned = *me.skills.get(&Skill::Berserk).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou don't know how to berserk. Try `practice berserk`.\r\n".to_string()
+        );
+    }
+    if me.affects.iter().any(|a| a.skill == Skill::Berserk) {
+        return CmdOutput::text("\r\nYou are already in a frenzy!\r\n".to_string());
+    }
+    // Stronger frenzy with practice: +damage scales up, the defensive
+    // penalty (negative to_ac) is fixed so it always costs something.
+    let to_dam = 2 + learned / 15;          // +2 .. +8
+    let to_ac  = -20;                       // worse AC while raging
+    let duration = 4 + learned / 25;        // 4 .. 8 ticks
+    me.apply_affect(crate::character::Affect {
+        skill: Skill::Berserk, duration,
+        to_hit: 0, to_dam, dmg_reduction: 0, dot_damage: 0, to_ac,
+    });
+    let bump = learn_attempt(me, Skill::Berserk, 5);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} works into a frothing battle frenzy!\r\n", me.name));
+    }
+    let mut text = format!(
+        "\r\nYou howl and throw yourself into a battle frenzy! \
+         (+{to_dam} damage, defence lowered for {duration} ticks)\r\n"
+    );
+    if let Some(b) = bump { text.push_str(&b); }
+    CmdOutput::text(text)
+}
+
+/// `taunt <mob>` (Warrior): provoke a mob into attacking you instead of
+/// its current target — a proactive tanking pull (vs `rescue`, which is
+/// reactive).  Chance = (40 + learned/2).min(90).  (cp205)
+async fn do_taunt(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::Skill;
+    if !Skill::Taunt.is_class_allowed(me.class) {
+        return CmdOutput::text(
+            "\r\nOnly warriors know how to draw an enemy's fury.\r\n".to_string()
+        );
+    }
+    let learned = *me.skills.get(&Skill::Taunt).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou have never practised taunt.\r\n".to_string()
+        );
+    }
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nTaunt whom?\r\n".to_string());
+    }
+    me.reveal();
+
+    // Resolve a mob in the room by keyword.
+    let (mob_id, mob_short) = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let hit = r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+                Some((mid, p.short_descr.clone()))
+            } else { None }
+        });
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text("\r\nNo such creature is here.\r\n".to_string()),
+        }
+    };
+
+    // Skill roll.
+    let chance = (40 + learned / 2).min(90);
+    let landed = rand::thread_rng().gen_range(1..=100) <= chance;
+    if !landed {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} tries to taunt {mob_short}, but it pays no heed.\r\n", me.name));
+        return CmdOutput::text(format!(
+            "\r\nYou try to taunt {mob_short}, but it ignores you.\r\n"
+        ));
+    }
+
+    // Whoever the mob was attacking gets its target stolen.  Set the mob to
+    // fight me, and engage it back if I'm free.
+    {
+        let mut w = world.lock().await;
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.fighting = Some(crate::character::Target { id: me.id, is_player: true });
+        } else {
+            return CmdOutput::text("\r\nIt's no longer here.\r\n".to_string());
+        }
+    }
+    if me.fighting.is_none() {
+        me.fighting = Some(crate::character::Target { id: mob_id, is_player: false });
+    }
+    let bump = learn_attempt(me, Skill::Taunt, 5);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} taunts {mob_short}, drawing its fury!\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou taunt {mob_short} — its rage turns squarely on you!\r\n"
+    ));
+    if let Some(b) = bump { out.text.push_str(&b); }
+    out
 }
 
 async fn do_skill(

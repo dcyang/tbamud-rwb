@@ -244,6 +244,9 @@ async fn aggro_tick(world: &Arc<Mutex<World>>, chars: &SharedChars) {
         let mut v = Vec::new();
         for p in cl.iter() {
             let c = p.character.lock().await;
+            // No-hassle characters (immortals by default) are invisible to
+            // aggressive and memory-grudge mobs (cp202).
+            if c.nohassle { continue; }
             v.push((p.id, c.current_room, c.hidden, AlignmentBand::of(c.alignment)));
         }
         v

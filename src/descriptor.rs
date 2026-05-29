@@ -326,6 +326,7 @@ pub async fn handle_connection(
                     pose:             p_ref.map(|p| p.pose.clone()).unwrap_or_default(),
                     pvp_ok:           false,
                     invis_level:      0,
+                    nohassle:         session.level >= 34,   // immortals ignored by aggro mobs (cp202)
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
                     muted:            p_ref.map(|p| p.muted).unwrap_or(false),
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),

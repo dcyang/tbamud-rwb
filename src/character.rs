@@ -82,6 +82,12 @@ pub enum Skill {
     /// High-tier Cleric spell — full HP + mana + movement restore AND
     /// strip every negative affect (poison/sleep/blind/slow/charm).
     Restoration,
+    /// Warrior physical skill — self-applied combat frenzy: boosts damage
+    /// at the cost of defense for a short duration.
+    Berserk,
+    /// Warrior physical skill — provoke a mob into attacking you instead
+    /// of its current target (a tanking pull).
+    Taunt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +152,8 @@ impl Skill {
             "heal"                            => Some(Skill::Heal),
             "infravision" | "infra"           => Some(Skill::Infravision),
             "stun"                            => Some(Skill::Stun),
+            "berserk"                         => Some(Skill::Berserk),
+            "taunt"                           => Some(Skill::Taunt),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
@@ -213,6 +221,8 @@ impl Skill {
             Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant weapon",
             Skill::Restoration   => "restoration",
+            Skill::Berserk       => "berserk",
+            Skill::Taunt         => "taunt",
         }
     }
 
@@ -221,6 +231,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
+                | Skill::Berserk | Skill::Taunt
                 | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
@@ -249,6 +260,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
+                | Skill::Berserk | Skill::Taunt
                 | Skill::Stun => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
@@ -353,6 +365,8 @@ impl Skill {
             Skill::Scribe        => &[Class::Cleric, Class::MagicUser],
             Skill::Enchant       => &[Class::MagicUser],
             Skill::Restoration   => &[Class::Cleric],
+            Skill::Berserk       => &[Class::Warrior],
+            Skill::Taunt         => &[Class::Warrior],
         }
     }
 
@@ -416,6 +430,8 @@ impl Skill {
             Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant-weapon",
             Skill::Restoration   => "restoration",
+            Skill::Berserk       => "berserk",
+            Skill::Taunt         => "taunt",
         }
     }
 
@@ -446,6 +462,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew, Skill::Scribe,
     Skill::Enchant,
     Skill::Restoration,
+    Skill::Berserk, Skill::Taunt,
 ];
 
 // ---------------------------------------------------------------------------
@@ -663,6 +680,9 @@ pub struct Character {
     /// hides this character from anyone whose own level is &lt; N.
     /// Transient (cleared on reboot).
     pub invis_level:  i32,
+    /// No-hassle mode: aggressive and memory-grudge mobs ignore this
+    /// character.  Defaults on for immortals at login.  Transient.
+    pub nohassle:     bool,
     /// Name of the deity this character worships (empty for none).
     /// Persisted.  Cosmetic only at the moment.
     pub god:          String,
