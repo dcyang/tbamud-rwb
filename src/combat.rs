@@ -560,7 +560,9 @@ async fn resolve_player_attack(
         let mob_ac = mob_inst
             .and_then(|m| w.mob_protos.get(&m.vnum))
             .map(|pr| pr.ac).unwrap_or(0)
-            + mob_inst.map(|m| m.bonus_ac).unwrap_or(0);
+            + mob_inst.map(|m| m.bonus_ac).unwrap_or(0)
+            // Affect-based AC shift (e.g. Faerie Fire lowers it). cp218
+            + mob_inst.map(|m| m.affects.iter().map(|a| a.to_ac).sum::<i32>()).unwrap_or(0);
         let weapon = p.weapon_iid.and_then(|iid|
             w.obj_instances.iter().find(|o| o.id == iid)
                 .and_then(|o| w.obj_protos.get(&o.vnum)));

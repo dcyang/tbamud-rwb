@@ -314,6 +314,7 @@ pub async fn handle_connection(
                     bonus_damroll:    0,
                     bonus_ac:         0,
                     following:        None,
+                    mount:            None,   // cp220
                     grouped:          false,
                     gossip_off:       false,
                     auction_off:      false,

@@ -97,6 +97,11 @@ pub enum Skill {
     /// Cleric attack spell — calls down a lightning bolt; only works
     /// outdoors during rain or a thunderstorm.
     CallLightning,
+    /// Thief physical skill — glance at a target's carried inventory.
+    Peek,
+    /// Debuff spell — outlines a mob in glowing light, lowering its AC so
+    /// it's easier to hit (the offensive counterpart to Armor).
+    FaerieFire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +171,8 @@ impl Skill {
             "fly" | "flight"                  => Some(Skill::Fly),
             "waterbreathing" | "waterbreath" | "breathe" => Some(Skill::WaterBreathing),
             "calllightning" | "calllightening" => Some(Skill::CallLightning),
+            "peek"                            => Some(Skill::Peek),
+            "faeriefire" | "faerie" | "fairyfire" => Some(Skill::FaerieFire),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
@@ -238,6 +245,8 @@ impl Skill {
             Skill::Fly           => "fly",
             Skill::WaterBreathing => "water breathing",
             Skill::CallLightning => "call lightning",
+            Skill::Peek          => "peek",
+            Skill::FaerieFire    => "faerie fire",
         }
     }
 
@@ -246,7 +255,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt
+                | Skill::Berserk | Skill::Taunt | Skill::Peek
                 | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
@@ -266,7 +275,7 @@ impl Skill {
                 | Skill::Brew          | Skill::Scribe
                 | Skill::Enchant       | Skill::Restoration
                 | Skill::Fly           | Skill::WaterBreathing
-                | Skill::CallLightning
+                | Skill::CallLightning | Skill::FaerieFire
                                       => SkillKind::Spell,
         }
     }
@@ -277,7 +286,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt
+                | Skill::Berserk | Skill::Taunt | Skill::Peek
                 | Skill::Stun => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
@@ -323,6 +332,7 @@ impl Skill {
             Skill::Fly           => 10,
             Skill::WaterBreathing => 8,
             Skill::CallLightning => 15,
+            Skill::FaerieFire    => 5,
         }
     }
 
@@ -390,6 +400,8 @@ impl Skill {
             Skill::Fly           => &[Class::MagicUser, Class::Cleric],
             Skill::WaterBreathing => &[Class::MagicUser, Class::Cleric],
             Skill::CallLightning => &[Class::Cleric],
+            Skill::Peek          => &[Class::Thief],
+            Skill::FaerieFire    => &[Class::MagicUser, Class::Cleric],
         }
     }
 
@@ -458,6 +470,8 @@ impl Skill {
             Skill::Fly           => "fly",
             Skill::WaterBreathing => "water-breathing",
             Skill::CallLightning => "call-lightning",
+            Skill::Peek          => "peek",
+            Skill::FaerieFire    => "faerie-fire",
         }
     }
 
@@ -491,6 +505,8 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Berserk, Skill::Taunt,
     Skill::Fly, Skill::WaterBreathing,
     Skill::CallLightning,
+    Skill::Peek,
+    Skill::FaerieFire,
 ];
 
 // ---------------------------------------------------------------------------
@@ -669,6 +685,11 @@ pub struct Character {
     /// or `None` if they aren't following anyone. Set by `follow`,
     /// cleared by `follow self` or by the leader logging off.
     pub following:    Option<u32>,
+    /// Mob instance id this character is currently riding (a charmed pet),
+    /// or `None`.  While mounted the rider's steps cost no movement (the
+    /// mount does the walking).  Transient; cleared by `dismount`, logout,
+    /// or lazily when the mount is gone.  (cp220)
+    pub mount:        Option<u32>,
     /// Whether this character is in a formal group with their leader (or,
     /// for a leader, with their followers). `group` toggles individual
     /// followers in/out; ungrouped followers tag along on movement but

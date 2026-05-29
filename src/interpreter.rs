@@ -88,7 +88,7 @@ const COMMANDS: &[&str] = &[
     "get", "drop", "junk", "donate", "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell", "appraise", "value",
-    "kick", "bash", "backstab", "berserk", "taunt", "rescue", "disarm", "recover", "consider", "con",
+    "kick", "bash", "backstab", "berserk", "taunt", "peek", "rescue", "disarm", "recover", "consider", "con",
     "sleep", "rest", "sit", "stand", "wake",
     "wimpy",
     "info", "newbie", "shout", "color",
@@ -103,7 +103,7 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "fill", "empty", "recite", "use", "zap", "light", "extinguish",
-    "follow", "group", "gtell", "split", "title", "gossip", "chat",
+    "follow", "mount", "dismount", "group", "gtell", "split", "report", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "mail", "spells", "recall",
@@ -304,6 +304,7 @@ pub async fn dispatch_command(
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
         Some("berserk")   => do_berserk(me, chars).await,
         Some("taunt")     => do_taunt(rest, me, world, chars).await,
+        Some("peek")      => do_peek(rest, me, world, chars).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
         Some("recover")   => do_recover(me, world, chars).await,
@@ -380,9 +381,12 @@ pub async fn dispatch_command(
         Some("light")     => do_light(rest, me, world, chars, true).await,
         Some("extinguish")=> do_light(rest, me, world, chars, false).await,
         Some("follow")    => do_follow(rest, me, chars).await,
+        Some("mount")     => do_mount(rest, me, world, chars).await,
+        Some("dismount")  => do_dismount(me, world, chars).await,
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("split")     => do_split(rest, me, chars).await,
+        Some("report")    => do_report(me, chars).await,
         Some("title")     => do_title(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
         Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
@@ -2637,6 +2641,35 @@ async fn do_gtell(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     }
     let _ = delivered;
     CmdOutput::text(format!("\r\nYou group-tell, '{msg}'\r\n"))
+}
+
+/// `report`: broadcast your HP/mana/movement to every online group member
+/// (same leader derivation as `gtell`).  Completes the group toolkit
+/// alongside `gtell` (cp34), `group status` (cp195), and `split` (cp201).
+async fn do_report(me: &Character, chars: &SharedChars) -> CmdOutput {
+    let line = format!(
+        "{} reports: {}/{}H {}/{}M {}/{}V.",
+        me.name, me.hp, me.max_hp, me.mana, me.max_mana, me.movement, me.max_movement,
+    );
+    if me.grouped || me.following.is_some() {
+        let leader_id = me.following.unwrap_or(me.id);
+        let formatted = format!("\r\n{line}\r\n");
+        let handles: Vec<crate::character::PlayerHandle> = {
+            let cl = chars.lock().await;
+            cl.iter().cloned().collect()
+        };
+        for ph in &handles {
+            if ph.id == me.id { continue; }
+            let c = ph.character.lock().await;
+            let in_group = (c.id == leader_id && c.grouped)
+                || (c.following == Some(leader_id) && c.grouped);
+            if in_group {
+                let _ = ph.send.send(formatted.clone());
+            }
+        }
+    }
+    CmdOutput::text(format!("\r\nYou report: {}/{}H {}/{}M {}/{}V.\r\n",
+        me.hp, me.max_hp, me.mana, me.max_mana, me.movement, me.max_movement))
 }
 
 /// `split <amount>`: divide gold evenly among the group members present in
@@ -6012,6 +6045,77 @@ async fn do_petdismiss(
     ))
 }
 
+/// `mount <pet>` (cp220): clamber onto a charmed pet in the room so it
+/// carries you — while mounted your steps cost no movement and the pet is
+/// dragged along (via the existing charm-follow drag in `do_move`).
+async fn do_mount(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.mount.is_some() {
+        return CmdOutput::text("\r\nYou're already mounted — dismount first.\r\n".to_string());
+    }
+    if me.position == crate::character::Position::Fighting {
+        return CmdOutput::text("\r\nYou can't climb onto a mount mid-fight.\r\n".to_string());
+    }
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nMount what?\r\n".to_string());
+    }
+    let (mob_id, short, fighting) = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let mut hit: Option<(u32, String, bool)> = None;
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            if m.charmer != Some(me.id) { continue; }
+            let Some(p) = w.mob_protos.get(&m.vnum) else { continue; };
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&kw)) {
+                hit = Some((mid, p.short_descr.clone(), m.fighting.is_some()));
+                break;
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(
+                format!("\r\nNo mount of yours called '{kw}' is here. (You can only ride a charmed pet.)\r\n")
+            ),
+        }
+    };
+    if fighting {
+        return CmdOutput::text(format!("\r\n{short} is too busy fighting to be ridden.\r\n"));
+    }
+    me.mount = Some(mob_id);
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} clambers onto {short}.\r\n", me.name));
+    CmdOutput::text(format!("\r\nYou clamber onto {short}.\r\n"))
+}
+
+/// `dismount` (cp220): get off your current mount.
+async fn do_dismount(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let Some(mid) = me.mount.take() else {
+        return CmdOutput::text("\r\nYou aren't riding anything.\r\n".to_string());
+    };
+    let short = {
+        let w = world.lock().await;
+        w.mob_instances.iter().find(|m| m.id == mid)
+            .and_then(|m| w.mob_protos.get(&m.vnum))
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "your mount".to_string())
+    };
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id),
+        &format!("{} dismounts {short}.\r\n", me.name));
+    CmdOutput::text(format!("\r\nYou dismount {short}.\r\n"))
+}
+
 /// `clan [name]` — empty arg shows clan + online members.  Otherwise
 /// joins the named clan (any string, no validation).  `clan -` leaves.
 async fn do_clan(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
@@ -6834,6 +6938,85 @@ async fn do_berserk(me: &mut Character, chars: &SharedChars) -> CmdOutput {
 /// `taunt <mob>` (Warrior): provoke a mob into attacking you instead of
 /// its current target — a proactive tanking pull (vs `rescue`, which is
 /// reactive).  Chance = (40 + learned/2).min(90).  (cp205)
+/// `peek <target>` (Thief): glance at a same-room player's or mob's
+/// carried inventory.  Rolls the Peek skill (chance = learned%); on a
+/// fumble the target is none the wiser.  (cp217)
+async fn do_peek(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::Skill;
+    if !Skill::Peek.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou lack the deft touch to peek at others.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&Skill::Peek).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text("\r\nYou have never practised peek.\r\n".to_string());
+    }
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nPeek at whom?\r\n".to_string());
+    }
+    me.reveal();
+
+    // Resolve a same-room player first, then a mob by keyword.
+    let player_target = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id != me.id
+            && p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(&key)).cloned();
+        h
+    };
+
+    // Collect the target's inventory iids + a display name.
+    let (target_name, inv): (String, Vec<u32>) = if let Some(ph) = &player_target {
+        let c = ph.character.lock().await;
+        (c.name.clone(), c.inventory.clone())
+    } else {
+        let w = world.lock().await;
+        let hit = w.rooms.get(&me.current_room).and_then(|r| {
+            r.mobs.iter().find_map(|&mid| {
+                let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+                let p = w.mob_protos.get(&m.vnum)?;
+                if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+                    Some((p.short_descr.clone(), m.inventory.clone()))
+                } else { None }
+            })
+        });
+        match hit {
+            Some(t) => t,
+            None => return CmdOutput::text("\r\nNo one like that is here.\r\n".to_string()),
+        }
+    };
+
+    // Skill roll.
+    if rand::thread_rng().gen_range(0..100) >= learned {
+        return CmdOutput::text(format!(
+            "\r\nYou try to peek at {target_name}'s belongings, but can't get a good look.\r\n"
+        ));
+    }
+    // Render the inventory.
+    let names: Vec<String> = {
+        let w = world.lock().await;
+        inv.iter().filter_map(|&iid| {
+            w.obj_instances.iter().find(|o| o.id == iid)
+                .map(|o| obj_view(&w, o).short)
+        }).collect()
+    };
+    let _ = learn_attempt(me, Skill::Peek, 5);
+    if names.is_empty() {
+        return CmdOutput::text(format!(
+            "\r\nYou sneak a peek — {target_name} is carrying nothing.\r\n"
+        ));
+    }
+    let mut out = format!("\r\nYou sneak a peek at what {target_name} is carrying:\r\n");
+    for n in &names { out.push_str(&format!("  {n}\r\n")); }
+    CmdOutput::text(out)
+}
+
 async fn do_taunt(
     arg: &str,
     me: &mut Character,
@@ -7334,6 +7517,7 @@ async fn do_cast(
         crate::character::Skill::Fly          => cast_buff(target, me, chars, learned, crate::character::Skill::Fly).await,
         crate::character::Skill::WaterBreathing => cast_buff(target, me, chars, learned, crate::character::Skill::WaterBreathing).await,
         crate::character::Skill::CallLightning => cast_call_lightning(target, me, world, chars, learned).await,
+        crate::character::Skill::FaerieFire   => cast_debuff(target, me, world, chars, learned, crate::character::Skill::FaerieFire).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -8968,13 +9152,22 @@ async fn cast_debuff(
             "{} looks at you with adoring eyes.\r\n",
             "{} now follows your every word.\r\n",
         ),
+        crate::character::Skill::FaerieFire => (
+            6 + learned as i32 / 10,
+            "{} is outlined in crackling violet flame.\r\n",
+            "{} is limned in faerie fire — easier to strike.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported debuff.\r\n"),
     };
+    // Faerie Fire lowers the target's AC (negative to_ac = worse defence).
+    let to_ac = if skill == crate::character::Skill::FaerieFire {
+        -(20 + learned as i32 / 5)
+    } else { 0 };
     let mob_name = {
         let mut w = world.lock().await;
         let aff = crate::character::Affect {
             skill, duration,
-            to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 0,
+            to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac,
         };
         let vnum = {
             let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mid) else {
@@ -10683,10 +10876,16 @@ async fn do_pick(
     }
 
     let w = world.lock().await;
-    let Some((dir, info, _key, keyword, _to)) = find_door_target(&w, me.current_room, arg) else {
-        return CmdOutput::text("\r\nYou see no such door here.\r\n".to_string());
-    };
+    let door = find_door_target(&w, me.current_room, arg);
+    // No matching door?  Try picking a container's lock (cp216).
+    let container = if door.is_none() { find_container(&w, me, arg) } else { None };
     drop(w);
+    let Some((dir, info, _key, keyword, _to)) = door else {
+        if let Some((iid, short)) = container {
+            return do_pick_container(iid, short, me, world, chars).await;
+        }
+        return CmdOutput::text("\r\nYou see no such door or container here.\r\n".to_string());
+    };
     if (info & EX_ISDOOR) == 0 {
         return CmdOutput::text("\r\nThat's not a door.\r\n".to_string());
     }
@@ -10721,6 +10920,61 @@ async fn do_pick(
             &format!("{} picks the lock on the {kw_short}.\r\n", me.name));
     }
     let mut out = "\r\nThe lock clicks open.\r\n".to_string();
+    if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    CmdOutput::text(out)
+}
+
+/// Pick the lock on an ITEM_CONTAINER (cp216).  Mirrors the door path:
+/// requires the container be closed + locked + not pickproof, rolls the
+/// PickLock skill, and clears CONT_LOCKED on the prototype's `value[1]`.
+async fn do_pick_container(
+    iid: u32,
+    short: String,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use crate::world::{CONT_CLOSED, CONT_LOCKED, CONT_PICKPROOF};
+    use rand::Rng;
+    let (vnum, flags) = {
+        let w = world.lock().await;
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else {
+            return CmdOutput::text("\r\nIt's gone now.\r\n".to_string());
+        };
+        let Some(p) = w.obj_protos.get(&o.vnum) else {
+            return CmdOutput::text("\r\nIt's gone now.\r\n".to_string());
+        };
+        (o.vnum, p.value[1])
+    };
+    if (flags & CONT_CLOSED) == 0 {
+        return CmdOutput::text(format!("\r\n{short} isn't even closed.\r\n"));
+    }
+    if (flags & CONT_LOCKED) == 0 {
+        return CmdOutput::text(format!("\r\n{short} wasn't locked after all.\r\n"));
+    }
+    if (flags & CONT_PICKPROOF) != 0 {
+        return CmdOutput::text(format!("\r\n{short} resists your attempts to pick it.\r\n"));
+    }
+    let learned = *me.skills.get(&Skill::PickLock).unwrap_or(&0);
+    let roll = rand::thread_rng().gen_range(0..100);
+    if roll >= learned as i32 {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} fumbles at {short} with a set of picks.\r\n", me.name));
+        return CmdOutput::text(format!("\r\nYou fumble at the lock on {short}.\r\n"));
+    }
+    {
+        let mut w = world.lock().await;
+        if let Some(p) = w.obj_protos.get_mut(&vnum) {
+            p.value[1] &= !CONT_LOCKED;
+        }
+    }
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} picks the lock on {short}.\r\n", me.name));
+    }
+    let mut out = format!("\r\nThe lock on {short} clicks open.\r\n");
     if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
     CmdOutput::text(out)
 }
@@ -12845,11 +13099,27 @@ async fn do_move(
             );
         }
     }
+    // Mount: a valid mount (charmed pet in this room) carries you, so your
+    // step costs no movement.  The mount itself is dragged along by the
+    // charm-follow logic later in this function.  A stale mount (gone or no
+    // longer charmed) is cleared lazily — you've fallen off.  (cp220)
+    let mounted = match me.mount {
+        Some(mid) => {
+            let w = world.lock().await;
+            w.mob_instances.iter().any(|m| m.id == mid
+                && m.charmer == Some(me.id) && m.in_room == me.current_room)
+        }
+        None => false,
+    };
+    if me.mount.is_some() && !mounted {
+        me.mount = None;
+    }
     // Movement-point gate.  Mortals pay (from_sector + to_sector) / 2
     // movement per step (rounded up, min 1); immortals are exempt.  Flying
-    // characters glide at a flat cost of 1 regardless of terrain.
+    // characters glide at a flat cost of 1 regardless of terrain; a mounted
+    // rider pays nothing (the mount does the walking).
     // Refuse with a "too exhausted" message at 0.
-    if me.level < LVL_IMMORT {
+    if me.level < LVL_IMMORT && !mounted {
         let cost = if flying {
             1
         } else {
@@ -14435,11 +14705,11 @@ pub async fn render_room(
     for p in cl.iter() {
         if p.current_room != vnum { continue; }
         if Some(p.id) == viewer_id { continue; }
-        let (hidden, invisible_aff, pose, invis_lvl, position, fighting) = {
+        let (hidden, invisible_aff, pose, invis_lvl, position, fighting, mount) = {
             let c = p.character.lock().await;
             let invisible = c.affects.iter()
                 .any(|a| a.skill == crate::character::Skill::Invisibility);
-            (c.hidden, invisible, c.pose.clone(), c.invis_level, c.position, c.fighting)
+            (c.hidden, invisible, c.pose.clone(), c.invis_level, c.position, c.fighting, c.mount)
         };
         // Immortal invis hides them from anyone below `invis_level`.
         if invis_lvl > viewer_level { continue; }
@@ -14462,11 +14732,19 @@ pub async fn render_room(
                 None => String::new(),
             }
         } else { String::new() };
+        // "(riding X)" suffix when mounted (cp220).
+        let mount_tag: String = if let Some(mid) = mount {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|x| x.id == mid)
+                .and_then(|x| w.mob_protos.get(&x.vnum))
+                .map(|p| format!(" (riding {})", p.short_descr))
+                .unwrap_or_default()
+        } else { String::new() };
         if !pose.is_empty() {
-            s.push_str(&format!("{} {pose}{fight_tag}{hidden_tag}{invis_tag}\r\n", p.name));
+            s.push_str(&format!("{} {pose}{fight_tag}{mount_tag}{hidden_tag}{invis_tag}\r\n", p.name));
         } else {
             s.push_str(&format!(
-                "{} {}.{fight_tag}{hidden_tag}{invis_tag}\r\n",
+                "{} {}.{fight_tag}{mount_tag}{hidden_tag}{invis_tag}\r\n",
                 p.name, position.room_verb(),
             ));
         }
