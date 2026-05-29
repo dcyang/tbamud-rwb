@@ -1315,6 +1315,86 @@ pub fn spawn_mob_regen_tick(
     });
 }
 
+/// Burn down lit ITEM_LIGHT sources (cp207).  Runs every game-hour (75s);
+/// each lit light with `light_hours > 0` loses one hour and, on reaching
+/// zero, is extinguished (`light_lit = false`, `light_hours = -1` so it
+/// can't be relit).  The holder (or the room, for a floor light) is told.
+pub fn spawn_light_burn_tick(
+    world: std::sync::Arc<tokio::sync::Mutex<crate::world::World>>,
+    chars: crate::character::SharedChars,
+) {
+    const TICK_SECONDS: u64 = 75;   // one game-hour, matches the clock tick
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(
+            std::time::Duration::from_secs(TICK_SECONDS)
+        );
+        interval.set_missed_tick_behavior(
+            tokio::time::MissedTickBehavior::Skip
+        );
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Phase A: decrement fuel; collect the ones that just died as
+            // (iid, in_room, short_descr).
+            let mut burned_out: Vec<(u32, crate::world::RoomVnum, String)> = Vec::new();
+            {
+                let mut w = world.lock().await;
+                // Snapshot short descriptions to avoid a borrow conflict.
+                let mut expired_ids: Vec<(u32, crate::world::RoomVnum)> = Vec::new();
+                for o in w.obj_instances.iter_mut() {
+                    if !o.light_lit || o.light_hours <= 0 { continue; }
+                    o.light_hours -= 1;
+                    if o.light_hours <= 0 {
+                        o.light_hours = -1;
+                        o.light_lit = false;
+                        expired_ids.push((o.id, o.in_room));
+                    }
+                }
+                for (iid, room) in expired_ids {
+                    let short = w.obj_instances.iter()
+                        .find(|o| o.id == iid)
+                        .and_then(|o| w.obj_protos.get(&o.vnum))
+                        .map(|p| p.short_description.clone())
+                        .unwrap_or_else(|| "a light".to_string());
+                    burned_out.push((iid, room, short));
+                }
+            }
+            if burned_out.is_empty() { continue; }
+
+            // Phase B: notify.  Floor lights broadcast to their room; a
+            // carried/equipped light (in_room == NOWHERE) is traced to its
+            // holder via the registry.
+            for (iid, room, short) in burned_out {
+                if room != crate::world::NOWHERE {
+                    chars.lock().await.broadcast_room(
+                        room, None,
+                        &format!("{short} flickers and goes out.\r\n"),
+                    );
+                    continue;
+                }
+                // Carried/equipped: find the player holding this iid.
+                let handles: Vec<crate::character::PlayerHandle> = {
+                    let cl = chars.lock().await;
+                    cl.iter().cloned().collect()
+                };
+                for ph in handles {
+                    let holds = {
+                        let c = ph.character.lock().await;
+                        c.inventory.contains(&iid)
+                            || c.equipment.iter().any(|s| *s == Some(iid))
+                    };
+                    if holds {
+                        let _ = ph.send.send(format!(
+                            "\r\n{short} flickers and goes out, leaving you in the dark.\r\n"
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
 pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
     const TICK_SECONDS: u64 = 60;
     tokio::spawn(async move {
@@ -1349,9 +1429,21 @@ pub fn spawn_hunger_tick(chars: crate::character::SharedChars) {
                     c.hp = (c.hp - 1).max(0);
                     thirst_msg = Some("You are parched — your strength fades.\r\n");
                 }
+                // Sober up one notch per tick (cp208).
+                let mut sober_msg: Option<&'static str> = None;
+                if c.drunk > 0 {
+                    let was_slurring = c.drunk >= crate::interpreter::DRUNK_SLUR_THRESHOLD;
+                    c.drunk -= 1;
+                    if was_slurring && c.drunk < crate::interpreter::DRUNK_SLUR_THRESHOLD {
+                        sober_msg = Some("Your head begins to clear.\r\n");
+                    } else if c.drunk == 0 {
+                        sober_msg = Some("You feel completely sober again.\r\n");
+                    }
+                }
                 drop(c);
                 if let Some(m) = hunger_msg { let _ = ph.send.send(m.to_string()); }
                 if let Some(m) = thirst_msg { let _ = ph.send.send(m.to_string()); }
+                if let Some(m) = sober_msg  { let _ = ph.send.send(m.to_string()); }
             }
         }
     });
@@ -1721,6 +1813,51 @@ pub fn spawn_mob_spec_tick(
                                 &format!("{short} picks up {label}.\r\n"),
                             );
                         }
+                    }
+                    crate::world::MobSpec::Thief => {
+                        use rand::Rng;
+                        use rand::seq::SliceRandom;
+                        // Don't pickpocket while in combat.
+                        let busy = {
+                            let w = world.lock().await;
+                            w.mob_instances.iter()
+                                .find(|m| m.id == mob_id)
+                                .map(|m| m.fighting.is_some())
+                                .unwrap_or(true)
+                        };
+                        if busy { continue; }
+                        // 25% chance per tick to attempt a lift.
+                        if rand::thread_rng().gen_range(0..100) >= 25 { continue; }
+                        // Snapshot mortal players sharing the room.
+                        let victims: Vec<crate::character::PlayerHandle> = {
+                            let cl = chars.lock().await;
+                            cl.iter()
+                                .filter(|p| p.current_room == room && p.level < 34)
+                                .cloned()
+                                .collect()
+                        };
+                        if victims.is_empty() { continue; }
+                        let victim = {
+                            let mut rng = rand::thread_rng();
+                            victims.choose(&mut rng).cloned()
+                        };
+                        let Some(victim) = victim else { continue; };
+                        // Lift up to ~25% of the victim's purse.
+                        let stolen = {
+                            let mut c = victim.character.lock().await;
+                            if c.gold <= 0 { 0 } else {
+                                let amt = (c.gold / 4).max(1).min(c.gold);
+                                c.gold -= amt;
+                                amt
+                            }
+                        };
+                        if stolen <= 0 { continue; }
+                        // The thief pockets the coins (no per-instance gold
+                        // store yet — the gold simply leaves the game).
+                        let _ = victim.send.send(format!(
+                            "\r\n{short} brushes past you — your purse feels lighter! \
+                             ({stolen} gold gone)\r\n"
+                        ));
                     }
                 }
             }
@@ -2272,6 +2409,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         triggers: Vec::new(),
                         timer: init_timer,
                         light_lit: false,
+            light_hours: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),
@@ -2289,6 +2427,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         triggers: Vec::new(),
                         timer: init_timer,
                         light_lit: false,
+            light_hours: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),
@@ -2328,6 +2467,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     triggers: Vec::new(),
                     timer: init_timer,
                     light_lit: false,
+            light_hours: 0,
                     condition: 100,
                     brewed_spell: None,
                     bonus_affects: Vec::new(),
@@ -2378,6 +2518,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     triggers: Vec::new(),
                     timer: init_timer,
                         light_lit: false,
+            light_hours: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),

@@ -88,6 +88,9 @@ pub enum Skill {
     /// Warrior physical skill — provoke a mob into attacking you instead
     /// of its current target (a tanking pull).
     Taunt,
+    /// Buff spell — grants flight: cross deep-water/no-swim sectors and
+    /// move at a flat low movement cost.
+    Fly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +157,7 @@ impl Skill {
             "stun"                            => Some(Skill::Stun),
             "berserk"                         => Some(Skill::Berserk),
             "taunt"                           => Some(Skill::Taunt),
+            "fly" | "flight"                  => Some(Skill::Fly),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
@@ -223,6 +227,7 @@ impl Skill {
             Skill::Restoration   => "restoration",
             Skill::Berserk       => "berserk",
             Skill::Taunt         => "taunt",
+            Skill::Fly           => "fly",
         }
     }
 
@@ -250,6 +255,7 @@ impl Skill {
                 | Skill::AcidBlast     | Skill::ChillTouch
                 | Skill::Brew          | Skill::Scribe
                 | Skill::Enchant       | Skill::Restoration
+                | Skill::Fly
                                       => SkillKind::Spell,
         }
     }
@@ -303,6 +309,7 @@ impl Skill {
             Skill::Scribe        => 40,
             Skill::Enchant       => 60,
             Skill::Restoration   => 80,
+            Skill::Fly           => 10,
         }
     }
 
@@ -367,6 +374,7 @@ impl Skill {
             Skill::Restoration   => &[Class::Cleric],
             Skill::Berserk       => &[Class::Warrior],
             Skill::Taunt         => &[Class::Warrior],
+            Skill::Fly           => &[Class::MagicUser, Class::Cleric],
         }
     }
 
@@ -432,6 +440,7 @@ impl Skill {
             Skill::Restoration   => "restoration",
             Skill::Berserk       => "berserk",
             Skill::Taunt         => "taunt",
+            Skill::Fly           => "fly",
         }
     }
 
@@ -463,6 +472,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Enchant,
     Skill::Restoration,
     Skill::Berserk, Skill::Taunt,
+    Skill::Fly,
 ];
 
 // ---------------------------------------------------------------------------
@@ -625,6 +635,10 @@ pub struct Character {
     pub hunger:       i32,
     /// Hours of drink remaining.  Same sentinel semantics as hunger.
     pub thirst:       i32,
+    /// Intoxication level (0 = sober).  Raised by drinking alcoholic
+    /// liquids, decremented one per game-hour tick.  When high enough it
+    /// garbles speech.  Transient (resets sober on reboot).
+    pub drunk:        i32,
     /// Accumulated hitroll bonus from worn equipment's APPLY_HITROLL.
     /// Applied by `apply_obj_affects` on wear and rolled back on remove.
     pub bonus_hitroll: i32,
@@ -1059,6 +1073,12 @@ impl Character {
     /// Sum of AC bonuses from active affects (Armor spell etc).
     pub fn affect_ac_bonus(&self) -> i32 {
         self.affects.iter().map(|a| a.to_ac).sum()
+    }
+
+    /// True while a Fly affect is active.  Lets the bearer cross deep-water
+    /// / no-swim sectors and pay a flat low movement cost (cp209).
+    pub fn is_flying(&self) -> bool {
+        self.affects.iter().any(|a| a.skill == Skill::Fly)
     }
 
     /// Total damage reduction percent (0..=75) from active affects.

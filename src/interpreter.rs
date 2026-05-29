@@ -1341,14 +1341,15 @@ async fn do_say(
         return CmdOutput::text("\r\nYak yak yak...\r\n");
     }
     me.reveal();
+    let spoken = garble_drunk(arg, me.drunk);
     {
         let cl = chars.lock().await;
         cl.broadcast_room(
             me.current_room, Some(me.id),
-            &format!("{} says, '{arg}'\r\n", me.name),
+            &format!("{} says, '{spoken}'\r\n", me.name),
         );
     }
-    CmdOutput::text(format!("\r\nYou say, '{arg}'\r\n"))
+    CmdOutput::text(format!("\r\nYou say, '{spoken}'\r\n"))
 }
 
 /// Public say wrapper used by the command dispatcher.  Fires any SPEECH
@@ -2922,7 +2923,8 @@ async fn do_gossip(
             );
         }
     }
-    let formatted = format!("\r\n@c{} gossips: '{msg}'@n\r\n", me.name);
+    let spoken = garble_drunk(msg, me.drunk);
+    let formatted = format!("\r\n@c{} gossips: '{spoken}'@n\r\n", me.name);
     let handles: Vec<crate::character::PlayerHandle> = {
         let cl = chars.lock().await;
         cl.iter().cloned().collect()
@@ -2934,7 +2936,7 @@ async fn do_gossip(
         let _ = ph.send.send(formatted.clone());
     }
     record_channel("gossip", &me.name, msg).await;
-    CmdOutput::text(format!("\r\n@cYou gossip, '{msg}'@n\r\n"))
+    CmdOutput::text(format!("\r\n@cYou gossip, '{spoken}'@n\r\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -4112,9 +4114,10 @@ async fn do_spec_assign(
         "healer"    => Some(crate::world::MobSpec::Healer),
         "postmaster" | "post" => Some(crate::world::MobSpec::Postmaster),
         "petshop"   | "pet"   => Some(crate::world::MobSpec::PetShop),
+        "thief"     => Some(crate::world::MobSpec::Thief),
         "none" | "off" | "clear" => None,
         ""          => return CmdOutput::text(
-            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|postmaster|petshop|none>\r\n".to_string()
+            "\r\nUsage: spec_assign <mob-vnum> <puff|fido|janitor|cityguard|snake|magicuser|healer|postmaster|petshop|thief|none>\r\n".to_string()
         ),
         _ => return CmdOutput::text(format!("\r\nUnknown spec '{name}'.\r\n")),
     };
@@ -4665,8 +4668,12 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         format!("PvP:   {} kills / {} deaths\r\n", me.pkills, me.pdeaths)
     } else { String::new() };
     let align_band = crate::character::AlignmentBand::of(me.alignment);
+    let drunk_line = if me.drunk >= MAX_DRUNK { "Drunk: completely smashed\r\n".to_string() }
+                     else if me.drunk >= DRUNK_SLUR_THRESHOLD { format!("Drunk: drunk ({})\r\n", me.drunk) }
+                     else if me.drunk > 0 { format!("Drunk: tipsy ({})\r\n", me.drunk) }
+                     else { String::new() };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\nAlign: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -7302,6 +7309,7 @@ async fn do_cast(
         crate::character::Skill::Summon       => cast_summon(target, me, world, chars).await,
         crate::character::Skill::SenseLife    => cast_sense_life(me),
         crate::character::Skill::Restoration  => cast_restoration(target, me, chars).await,
+        crate::character::Skill::Fly          => cast_buff(target, me, chars, learned, crate::character::Skill::Fly).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -9133,6 +9141,12 @@ async fn cast_buff(
             "Your skin hardens to the texture of granite.\r\n",
             "{}'s skin takes on the texture of stone.\r\n",
         ),
+        crate::character::Skill::Fly => (
+            10 + learned as i32 / 5,
+            0, 0,
+            "Your feet lift gently from the ground — you can fly!\r\n",
+            "{} rises gently off the ground, hovering in the air.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
 
@@ -10824,7 +10838,7 @@ async fn do_drink_container(
     // Drain one sip from the prototype (matches stock CircleMUD shared
     // state — sips drained by one player affect every instance, but
     // that's consistent with our wand/staff handling).
-    let (sips_after, capacity) = {
+    let (sips_after, capacity, liq_type) = {
         let mut w = world.lock().await;
         let Some(p) = w.obj_protos.get_mut(&vnum) else {
             return CmdOutput::text("\r\nThe container shimmers and is gone.\r\n".to_string());
@@ -10833,11 +10847,17 @@ async fn do_drink_container(
             return CmdOutput::text(format!("\r\n{} is empty.\r\n", short));
         }
         p.value[1] -= 1;
-        (p.value[1], p.value[0])
+        (p.value[1], p.value[0], p.value[2])
     };
     let was_thirsty = me.thirst >= 0 && me.thirst <= 3;
     if me.thirst >= 0 {
         me.thirst = (me.thirst + 3).min(MAX_THIRST);
+    }
+    // Alcoholic liquids raise intoxication (cp208).
+    let was_sober = me.drunk < DRUNK_SLUR_THRESHOLD;
+    let drunk_gain = liquid_drunk(liq_type);
+    if drunk_gain > 0 {
+        me.drunk = (me.drunk + drunk_gain).min(MAX_DRUNK);
     }
     let cl = chars.lock().await;
     cl.broadcast_room(me.current_room, Some(me.id),
@@ -10846,6 +10866,15 @@ async fn do_drink_container(
     let mut text = format!("\r\nYou drink from {}.\r\n", short);
     if was_thirsty && me.thirst > 3 {
         text.push_str("You are no longer thirsty.\r\n");
+    }
+    if drunk_gain > 0 {
+        if was_sober && me.drunk >= DRUNK_SLUR_THRESHOLD {
+            text.push_str("Your head begins to swim — you're getting drunk.\r\n");
+        } else if me.drunk >= MAX_DRUNK {
+            text.push_str("You are completely smashed.\r\n");
+        } else {
+            text.push_str("You feel a pleasant warmth spread through you.\r\n");
+        }
     }
     if sips_after == 0 {
         text.push_str(&format!("{} is now empty.\r\n", short));
@@ -11023,6 +11052,49 @@ async fn do_eat(
 /// CircleMUD constants.c.
 pub const MAX_HUNGER: i32 = 24;
 pub const MAX_THIRST: i32 = 24;
+/// Intoxication cap (game-hours of drunkenness). Matches stock CircleMUD.
+pub const MAX_DRUNK:  i32 = 24;
+/// Speech starts to slur at or above this intoxication level.
+pub const DRUNK_SLUR_THRESHOLD: i32 = 6;
+
+/// Drunkenness added per sip of a given liquid type (`value[2]` on an
+/// ITEM_DRINKCON).  Indices match CircleMUD's LIQ_* order; the values
+/// mirror the `drunk` column of `drink_aff[]` in constants.c.  Non-listed
+/// or non-alcoholic liquids contribute 0.
+pub fn liquid_drunk(liq_type: i32) -> i32 {
+    match liq_type {
+        1  => 3,   // LIQ_BEER
+        2  => 5,   // LIQ_WINE
+        3  => 2,   // LIQ_ALE
+        4  => 1,   // LIQ_DARKALE
+        5  => 6,   // LIQ_WHISKY
+        7  => 10,  // LIQ_FIREBRT (firebreather)
+        8  => 3,   // LIQ_LOCALSPC (local specialty)
+        _  => 0,   // water, juice, milk, tea, coffee, blood, etc.
+    }
+}
+
+/// Garble spoken text for a drunk speaker.  The drunker they are, the more
+/// letters get doubled and the more `*hic*` interjections appear.  Sober
+/// (below the slur threshold) text passes through unchanged.
+pub fn garble_drunk(text: &str, drunk: i32) -> String {
+    use rand::Rng;
+    if drunk < DRUNK_SLUR_THRESHOLD { return text.to_string(); }
+    // Slur intensity scales 0..=100 with drunkenness past the threshold.
+    let intensity = ((drunk - DRUNK_SLUR_THRESHOLD) * 6 + 10).min(60);
+    let mut rng = rand::thread_rng();
+    let mut out = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        out.push(ch);
+        if ch.is_alphabetic() && rng.gen_range(0..100) < intensity {
+            out.push(ch);   // slurred doubling
+        }
+        if ch == ' ' && rng.gen_range(0..100) < intensity / 4 {
+            out.push_str("*hic* ");
+        }
+    }
+    out
+}
 
 async fn do_recite(
     arg: &str,
@@ -11220,19 +11292,19 @@ async fn do_light(
     let kw = arg.to_ascii_lowercase();
 
     // Search inventory first, then the current room's floor.
-    let (iid, short) = {
+    let (iid, short, fuel_hours) = {
         let w = world.lock().await;
         let pool: Vec<u32> = me.inventory.iter().copied()
             .chain(w.rooms.get(&me.current_room)
                 .map(|r| r.objects.clone()).unwrap_or_default())
             .collect();
-        let mut found: Option<(u32, String)> = None;
+        let mut found: Option<(u32, String, i32)> = None;
         for iid in pool {
             let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue; };
             let Some(p) = w.obj_protos.get(&o.vnum) else { continue; };
             if p.item_type != ITEM_LIGHT { continue; }
             if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&kw)) {
-                found = Some((iid, p.short_description.clone()));
+                found = Some((iid, p.short_description.clone(), p.value[2]));
                 break;
             }
         }
@@ -11242,14 +11314,29 @@ async fn do_light(
         }
     };
 
-    // Toggle the lit state under a fresh lock.  Refuse no-op transitions.
+    // Toggle the lit state under a fresh lock.  Refuse no-op transitions and
+    // refuse relighting a burned-out source.  Seed the fuel counter from the
+    // proto's value[2] when first lighting a fresh light (cp207).
     let already = {
         let mut w = world.lock().await;
         let o = match w.obj_instances.iter_mut().find(|o| o.id == iid) {
             Some(o) => o,
             None    => return CmdOutput::text("\r\nIt's gone now.\r\n".to_string()),
         };
-        if o.light_lit == on { true } else { o.light_lit = on; false }
+        if on && o.light_hours < 0 {
+            return CmdOutput::text(format!(
+                "\r\n{} has burned out — there's nothing left to light.\r\n", short
+            ));
+        }
+        if o.light_lit == on {
+            true
+        } else {
+            o.light_lit = on;
+            if on && o.light_hours == 0 && fuel_hours > 0 {
+                o.light_hours = fuel_hours;
+            }
+            false
+        }
     };
     if already {
         return CmdOutput::text(format!(
@@ -11592,6 +11679,8 @@ async fn do_examine(
             9 => format!("This is {kind}, providing {} AC.\r\n", vals[0]),
             // ITEM_LIGHT: value[2] is hours remaining
             1 => format!("This is a {kind} with {} hours of light left.\r\n", vals[2]),
+            // ITEM_BOAT: lets the carrier cross deep (no-swim) water.
+            22 => format!("This is a {kind} — carry it to cross deep water.\r\n"),
             _ => format!("This is a {kind}.\r\n"),
         };
         let mut out = base.text;
@@ -12348,6 +12437,18 @@ async fn do_move(
         }
         _ => return CmdOutput::text(format!("\r\nAlas, you cannot go that way...\r\n")),
     };
+    // Does the player carry (or wear) a boat?  Lets them cross no-swim
+    // water without flying (cp210).
+    let has_boat = {
+        me.inventory.iter().copied()
+            .chain(me.equipment.iter().filter_map(|s| *s))
+            .any(|iid| {
+                w.obj_instances.iter().find(|o| o.id == iid)
+                    .and_then(|o| w.obj_protos.get(&o.vnum))
+                    .map(|p| p.item_type == crate::world::ITEM_BOAT)
+                    .unwrap_or(false)
+            })
+    };
     drop(w);
     if closed {
         return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
@@ -12361,13 +12462,35 @@ async fn do_move(
         _ =>
             return CmdOutput::text("\r\nYou should probably stand up first.\r\n".to_string()),
     }
+    // Deep-water / no-swim and underwater sectors are impassable on foot.
+    // No-swim water can be crossed by flying OR by carrying a boat (cp210);
+    // underwater requires flying (a boat doesn't help below the surface).
+    // Immortals bypass entirely (cp209).
+    let flying = me.is_flying();
+    if me.level < LVL_IMMORT {
+        if target_sector == crate::world::SECT_UNDERWATER && !flying {
+            return CmdOutput::text(
+                "\r\nYou'd drown — you need to be flying to go there.\r\n".to_string()
+            );
+        }
+        if target_sector == crate::world::SECT_WATER_NOSWIM && !flying && !has_boat {
+            return CmdOutput::text(
+                "\r\nYou need a boat (or to be flying) to go there.\r\n".to_string()
+            );
+        }
+    }
     // Movement-point gate.  Mortals pay (from_sector + to_sector) / 2
-    // movement per step (rounded up, min 1); immortals are exempt.
+    // movement per step (rounded up, min 1); immortals are exempt.  Flying
+    // characters glide at a flat cost of 1 regardless of terrain.
     // Refuse with a "too exhausted" message at 0.
     if me.level < LVL_IMMORT {
-        let from_cost = crate::world::sector_move_cost(from_sector);
-        let to_cost   = crate::world::sector_move_cost(target_sector);
-        let cost = ((from_cost + to_cost + 1) / 2).max(1);
+        let cost = if flying {
+            1
+        } else {
+            let from_cost = crate::world::sector_move_cost(from_sector);
+            let to_cost   = crate::world::sector_move_cost(target_sector);
+            ((from_cost + to_cost + 1) / 2).max(1)
+        };
         if me.movement < cost {
             return CmdOutput::text(
                 "\r\nYou are too exhausted.\r\n".to_string()

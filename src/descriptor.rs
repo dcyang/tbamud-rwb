@@ -301,6 +301,7 @@ pub async fn handle_connection(
                     completed_quests: p_ref.map(|p| p.completed_quests.clone()).unwrap_or_default(),
                     hunger:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.hunger).unwrap_or(24) },
                     thirst:           if session.level >= 34 { -1 } else { p_ref.map(|p| p.thirst).unwrap_or(24) },
+                    drunk:            0,   // cp208 — transient, starts sober
                     title:            {
                         let saved = p_ref.map(|p| p.title.clone()).unwrap_or_default();
                         if saved.is_empty() {

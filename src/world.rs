@@ -282,6 +282,13 @@ pub struct ObjInstance {
     /// here.  Persisted alongside condition; capped at a small total
     /// to prevent stacking.
     pub bonus_affects: Vec<ObjAffect>,
+    /// For ITEM_LIGHT only: game-hours of fuel remaining while lit.
+    /// `0`  = fresh/uninitialised (seeded from proto `value[2]` when lit);
+    /// `>0` = burning, hours left;
+    /// `-1` = burned out (cannot be relit).
+    /// Lights whose proto `value[2] <= 0` are treated as infinite and never
+    /// burn down.  Decremented by `db::spawn_light_burn_tick` (cp207).
+    pub light_hours: i32,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -330,6 +337,7 @@ pub const ITEM_CONTAINER: i32 = 15;
 pub const ITEM_DRINKCON:  i32 = 17;
 pub const ITEM_FOOD:      i32 = 19;
 pub const ITEM_FOUNTAIN:  i32 = 23;
+pub const ITEM_BOAT:      i32 = 22;
 
 /// Bits inside `ObjProto.extra_flags[0]`.  Mirrors structs.h
 /// ITEM_x_* macros.  Only the ANTI-class checks are wired right now;
@@ -542,6 +550,9 @@ pub enum MobSpec {
     /// `petbuy <kw>` command spawns a charmed copy as the buyer's
     /// follower.
     PetShop,
+    /// Cutpurse: periodically lifts a slice of gold from a random
+    /// non-immortal player sharing its room, then may slip away.
+    Thief,
 }
 
 impl MobSpec {
@@ -557,6 +568,7 @@ impl MobSpec {
             15 => Some(MobSpec::Healer),
             16 => Some(MobSpec::Postmaster),
             17 => Some(MobSpec::PetShop),
+            14 => Some(MobSpec::Thief),
             _  => None,
         }
     }
@@ -766,6 +778,7 @@ impl World {
             decay_in: Some(decay_secs),
             timer: None,
             light_lit: false,
+            light_hours: 0,
             condition: 100,
             brewed_spell: None,
             bonus_affects: Vec::new(),
@@ -878,6 +891,7 @@ impl World {
             triggers: Vec::new(),
             timer,
             light_lit: false,
+            light_hours: 0,
             condition: 100,
             brewed_spell: None,
             bonus_affects: Vec::new(),

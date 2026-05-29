@@ -111,6 +111,9 @@ pub async fn run(config: Config) -> Result<()> {
     // --- Spawn out-of-combat mob HP regen tick ---------------------------
     db::spawn_mob_regen_tick(Arc::clone(&world));
 
+    // --- Spawn light-source fuel burn tick (cp207) -----------------------
+    db::spawn_light_burn_tick(Arc::clone(&world), Arc::clone(&chars));
+
     // --- Spawn mob wander tick ---------------------------------------------
     db::spawn_wander_tick(Arc::clone(&world), Arc::clone(&chars));
 
