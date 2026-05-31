@@ -85,8 +85,8 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "junk", "donate", "put", "give", "wield", "wear", "remove",
-    "examine",
+    "get", "drop", "junk", "donate", "sacrifice", "sac", "put", "give", "wield", "wear", "remove",
+    "examine", "compare",
     "list", "buy", "sell", "appraise", "value",
     "kick", "bash", "backstab", "berserk", "taunt", "peek", "rescue", "disarm", "recover", "consider", "con",
     "sleep", "rest", "sit", "stand", "wake",
@@ -103,10 +103,10 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "fill", "empty", "recite", "use", "zap", "light", "extinguish",
-    "follow", "mount", "dismount", "group", "gtell", "split", "report", "title", "gossip", "chat",
+    "follow", "mount", "dismount", "tame", "group", "gtell", "split", "report", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
-    "commands", "scan", "track", "mail", "spells", "recall",
+    "commands", "scan", "track", "hunt", "mail", "spells", "recall",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk", "bind", "unbind",
     "achievements", "achs",
@@ -292,6 +292,7 @@ pub async fn dispatch_command(
         Some("drop")      => do_drop(rest, me, world, chars).await,
         Some("junk")      => do_junk(rest, me, world, chars).await,
         Some("donate")    => do_donate(rest, me, world, chars).await,
+        Some("sacrifice") | Some("sac") => do_sacrifice(rest, me, world, chars).await,
         Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
         Some("tell")      => do_tell(rest, me, chars, players).await,
@@ -352,6 +353,7 @@ pub async fn dispatch_command(
         Some("where")     => do_where(me, world, chars).await,
         Some("give")      => do_give(rest, me, world, chars).await,
         Some("examine")   => do_examine(rest, me, world, chars).await,
+        Some("compare")   => do_compare(rest, me, world).await,
         Some("list")      => do_list(me, world).await,
         Some("buy")       => do_buy(rest, me, world, chars).await,
         Some("sell")      => do_sell(rest, me, world, chars).await,
@@ -383,6 +385,7 @@ pub async fn dispatch_command(
         Some("follow")    => do_follow(rest, me, chars).await,
         Some("mount")     => do_mount(rest, me, world, chars).await,
         Some("dismount")  => do_dismount(me, world, chars).await,
+        Some("tame")      => do_tame(rest, me, world, chars).await,
         Some("group")     => do_group(rest, me, chars).await,
         Some("gtell")     => do_gtell(rest, me, chars).await,
         Some("split")     => do_split(rest, me, chars).await,
@@ -402,6 +405,7 @@ pub async fn dispatch_command(
         Some("commands")  => do_commands(),
         Some("scan")      => do_scan(rest, me, world, chars).await,
         Some("track")     => do_track(rest, me, world, chars).await,
+        Some("hunt")      => do_hunt(rest, me, world).await,
         Some("mail")      => do_mail(rest, me, chars, players).await,
         Some("spells")    => do_spells(me),
         Some("recall")    => do_cast("'word of recall'", me, world, chars).await,
@@ -687,6 +691,23 @@ async fn do_get(
         }
     };
 
+    // Coin pile: collect the gold instead of carrying the object (cp223).
+    let coins = w.obj_instances.iter().find(|o| o.id == iid)
+        .filter(|o| o.vnum == crate::db::GOLD_PILE_VNUM)
+        .map(|o| o.gold_amount);
+    if let Some(amount) = coins {
+        me.gold += amount;
+        w.extract_obj(iid);
+        drop(w);
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} picks up {}.\r\n", me.name, name));
+        drop(cl);
+        return CmdOutput::text(format!(
+            "\r\nYou pick up {name}.\r\nYou now have {} gold.\r\n", me.gold
+        ));
+    }
+
     // Capture the object's vnum + weight for quest hook + carry-cap check.
     let (picked_vnum, picked_weight) = w.obj_instances.iter().find(|o| o.id == iid)
         .map(|o| (Some(o.vnum), w.obj_protos.get(&o.vnum).map(|p| p.weight).unwrap_or(0)))
@@ -915,6 +936,18 @@ async fn do_drop(
         let kw = arg.split_once('.').map(|(_, k)| k.to_ascii_lowercase());
         return do_drop_all(me, world, chars, kw).await;
     }
+    // `drop <N> coins|gold|money` — drop a pile of coins on the floor (cp223).
+    {
+        let toks: Vec<&str> = arg.split_whitespace().collect();
+        if toks.len() == 2 {
+            if let Ok(n) = toks[0].parse::<i64>() {
+                let what = toks[1].to_ascii_lowercase();
+                if what == "coins" || what == "coin" || what == "gold" || what == "money" {
+                    return do_drop_gold(n, me, world, chars).await;
+                }
+            }
+        }
+    }
     let key = arg.to_ascii_lowercase();
     let mut w = world.lock().await;
 
@@ -1139,6 +1172,39 @@ async fn do_drop_all(
     CmdOutput::text(s)
 }
 
+/// `drop <N> coins` — drop a pile of gold on the floor as a synthetic
+/// GOLD_PILE object (cp223), collectible by anyone via `get coins`.
+async fn do_drop_gold(
+    n: i64,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if n <= 0 {
+        return CmdOutput::text("\r\nDrop how many coins?\r\n".to_string());
+    }
+    if n > me.gold {
+        return CmdOutput::text("\r\nYou don't have that much gold.\r\n".to_string());
+    }
+    me.gold -= n;
+    let room = me.current_room;
+    {
+        let mut w = world.lock().await;
+        if let Some(iid) = w.spawn_obj(crate::db::GOLD_PILE_VNUM) {
+            if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
+                o.gold_amount = n;
+                o.in_room = room;
+            }
+            if let Some(r) = w.rooms.get_mut(&room) {
+                r.objects.push(iid);
+            }
+        }
+    }
+    chars.lock().await.broadcast_room(room, Some(me.id),
+        &format!("{} drops some gold coins.\r\n", me.name));
+    CmdOutput::text(format!("\r\nYou drop {n} gold coins.\r\n"))
+}
+
 /// `junk <item>` — permanently destroy an inventory item.  Supports
 /// `junk all` / `junk all.<kw>` for bulk cleanup.  (cp204)
 async fn do_junk(
@@ -1197,6 +1263,76 @@ async fn do_junk(
         for n in &junked { s.push_str(&format!("  {n}\r\n")); }
         CmdOutput::text(s)
     }
+}
+
+/// `sacrifice <item>` (cp224): offer a corpse or item to your deity and
+/// receive a small token of gold in return.  Searches the room floor
+/// first (where corpses lie), then inventory.  Distinct from `junk`
+/// (which destroys for nothing) — sacrifice grants a deity-flavored
+/// reward and ties into `worship` (cp99).
+async fn do_sacrifice(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nSacrifice what?\r\n".to_string());
+    }
+    // Resolve the target: room floor first, then inventory.  Capture its
+    // short + proto cost (for the reward), and whether it was on the floor.
+    let (iid, short, cost, on_floor) = {
+        let w = world.lock().await;
+        let mut hit: Option<(u32, String, i64, bool)> = None;
+        // Room floor.
+        if let Some(r) = w.rooms.get(&me.current_room) {
+            for &iid in &r.objects {
+                if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+                    if obj_matches_keyword(&w, obj, &key) {
+                        let cost = w.obj_protos.get(&obj.vnum).map(|p| p.cost as i64).unwrap_or(0);
+                        hit = Some((iid, obj_view(&w, obj).short, cost, true));
+                        break;
+                    }
+                }
+            }
+        }
+        // Inventory fallback.
+        if hit.is_none() {
+            for &iid in &me.inventory {
+                if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+                    if obj_matches_keyword(&w, obj, &key) {
+                        let cost = w.obj_protos.get(&obj.vnum).map(|p| p.cost as i64).unwrap_or(0);
+                        hit = Some((iid, obj_view(&w, obj).short, cost, false));
+                        break;
+                    }
+                }
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(format!("\r\nYou see no {key} to sacrifice here.\r\n")),
+        }
+    };
+    // Reward: a token fraction of the item's worth, minimum 1.
+    let reward = (cost / 100).max(1);
+    if !on_floor {
+        me.inventory.retain(|&i| i != iid);
+    }
+    {
+        let mut w = world.lock().await;
+        w.extract_obj(iid);
+    }
+    me.gold += reward;
+    let deity = if me.god.is_empty() { "the gods".to_string() } else { me.god.clone() };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} sacrifices {short} to {deity}.\r\n", me.name));
+    }
+    CmdOutput::text(format!(
+        "\r\nYou offer {short} to {deity}, and receive {reward} gold for your devotion.\r\n"
+    ))
 }
 
 /// `donate <item>` — send an inventory item to the donation room (the
@@ -1649,6 +1785,79 @@ async fn do_track(
     match first_hop {
         Some(d) => CmdOutput::text(format!("\r\nYou sense {arg} is {} from here.\r\n", d.name())),
         None    => CmdOutput::text(format!("\r\nYou cannot sense {arg}.\r\n")),
+    }
+}
+
+/// `hunt <mob>` (cp222): like `track`, but seeks the nearest room holding
+/// a mob whose keywords match — reports the first-hop direction.  Reuses
+/// the cp72 BFS shape (closed doors / hidden exits for mortals / NOTRACK
+/// rooms all block) but tests each visited room for the quarry instead of
+/// a fixed target room.
+async fn do_hunt(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+) -> CmdOutput {
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nHunt what?\r\n".to_string());
+    }
+    let immortal = me.level >= LVL_IMMORT;
+    // Helper closure: does room `rv` hold a mob matching `kw`?
+    let w = world.lock().await;
+    let room_has = |rv: crate::world::RoomVnum| -> bool {
+        w.rooms.get(&rv).map(|r| r.mobs.iter().any(|&mid| {
+            w.mob_instances.iter().find(|m| m.id == mid)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&kw)))
+                .unwrap_or(false)
+        })).unwrap_or(false)
+    };
+    if room_has(me.current_room) {
+        return CmdOutput::text(format!("\r\nYour quarry ({arg}) is right here!\r\n"));
+    }
+
+    use std::collections::{VecDeque, HashMap};
+    let Some(start) = w.rooms.get(&me.current_room) else {
+        return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+    };
+    let mut visited: HashMap<crate::world::RoomVnum, Direction> = HashMap::new();
+    let mut queue: VecDeque<(crate::world::RoomVnum, i32, Direction)> = VecDeque::new();
+    for d in Direction::ALL {
+        if let Some(e) = &start.exits[d as usize] {
+            if e.to_room == crate::world::NOWHERE { continue; }
+            if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
+            if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
+            if w.rooms.get(&e.to_room)
+                .map(|r| r.room_flags[0] & crate::world::ROOM_NOTRACK != 0)
+                .unwrap_or(true) { continue; }
+            visited.insert(e.to_room, d);
+            queue.push_back((e.to_room, 1, d));
+        }
+    }
+    let mut found: Option<Direction> = None;
+    while let Some((rv, depth, first)) = queue.pop_front() {
+        if room_has(rv) { found = Some(first); break; }
+        if depth >= 50 { continue; }
+        let Some(r) = w.rooms.get(&rv) else { continue; };
+        for d in Direction::ALL {
+            if let Some(e) = &r.exits[d as usize] {
+                if e.to_room == crate::world::NOWHERE { continue; }
+                if (e.exit_info & crate::world::EX_CLOSED) != 0 { continue; }
+                if !immortal && (e.exit_info & crate::world::EX_HIDDEN) != 0 { continue; }
+                if w.rooms.get(&e.to_room)
+                    .map(|r| r.room_flags[0] & crate::world::ROOM_NOTRACK != 0)
+                    .unwrap_or(true) { continue; }
+                if visited.contains_key(&e.to_room) { continue; }
+                visited.insert(e.to_room, first);
+                queue.push_back((e.to_room, depth + 1, first));
+            }
+        }
+    }
+    drop(w);
+    match found {
+        Some(d) => CmdOutput::text(format!("\r\nYou catch the trail — {arg} is {} from here.\r\n", d.name())),
+        None    => CmdOutput::text(format!("\r\nYou find no trace of {arg} nearby.\r\n")),
     }
 }
 
@@ -6114,6 +6323,112 @@ async fn do_dismount(
     chars.lock().await.broadcast_room(me.current_room, Some(me.id),
         &format!("{} dismounts {short}.\r\n", me.name));
     CmdOutput::text(format!("\r\nYou dismount {short}.\r\n"))
+}
+
+/// `tame <mob>` (cp221): non-magical path to a pet — Warriors/Thieves can
+/// befriend a weaker, unclaimed creature, turning it into a charmed pet
+/// (which can then be ordered, mounted, etc).  Chance falls off sharply
+/// against higher-level targets; on a failed attempt the creature turns on
+/// the would-be tamer.
+async fn do_tame(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::{Skill, Affect, Target};
+    if !Skill::Tame.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou lack the knack for befriending wild creatures.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&Skill::Tame).unwrap_or(&0) as i32;
+    if learned == 0 {
+        return CmdOutput::text("\r\nYou have never practised tame.\r\n".to_string());
+    }
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nTame what?\r\n".to_string());
+    }
+    me.reveal();
+
+    // Resolve a mob in the room; capture its level + claimed/fighting state.
+    let (mob_id, short, mob_level, claimed, fighting) = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let mut hit = None;
+        for &mid in &r.mobs {
+            let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue; };
+            let Some(p) = w.mob_protos.get(&m.vnum) else { continue; };
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&kw)) {
+                hit = Some((mid, p.short_descr.clone(), p.level,
+                            m.charmer.is_some(), m.fighting.is_some()));
+                break;
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text("\r\nNo such creature is here.\r\n".to_string()),
+        }
+    };
+    if claimed {
+        return CmdOutput::text(format!("\r\n{short} already answers to someone else.\r\n"));
+    }
+    if fighting {
+        return CmdOutput::text(format!("\r\n{short} is too enraged to be tamed right now.\r\n"));
+    }
+    if mob_level > me.level {
+        return CmdOutput::text(format!("\r\n{short} is far too powerful for you to tame.\r\n"));
+    }
+
+    // Chance falls off vs. higher-level targets.
+    let chance = (40 + learned / 2 - (mob_level - me.level).max(0) * 5).clamp(5, 90);
+    let landed = rand::thread_rng().gen_range(1..=100) <= chance;
+    if !landed {
+        // The creature takes offence and attacks.
+        {
+            let mut w = world.lock().await;
+            if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                if m.fighting.is_none() {
+                    m.fighting = Some(Target { id: me.id, is_player: true });
+                }
+            }
+        }
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+        }
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} tries to tame {short}, but it turns on {} in fury!\r\n", me.name, me.name));
+        return CmdOutput::text(format!(
+            "\r\nYou fail to tame {short} — it lashes out at you!\r\n"
+        ));
+    }
+
+    // Success: claim it as a charmed pet.
+    {
+        let mut w = world.lock().await;
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.charmer = Some(me.id);
+            m.apply_affect(Affect {
+                skill: Skill::CharmPerson,
+                duration: 20 + learned / 5,
+                to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 0,
+            });
+        } else {
+            return CmdOutput::text("\r\nIt's gone now.\r\n".to_string());
+        }
+    }
+    let bump = learn_attempt(me, Skill::Tame, 5);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} gentles {short}, which now follows obediently.\r\n", me.name));
+    }
+    let mut out = format!("\r\nYou tame {short} — it is now your loyal companion.\r\n");
+    if let Some(b) = bump { out.push_str(&b); }
+    CmdOutput::text(out)
 }
 
 /// `clan [name]` — empty arg shows clan + online members.  Otherwise
@@ -12257,6 +12572,63 @@ async fn do_remove_all(
     CmdOutput::text(s)
 }
 
+/// `compare <a> <b>` (cp225): compare two carried/worn items of the same
+/// kind.  Weapons compare by average damage (`dice_count * (dice_size+1)/2`),
+/// armor by AC value; other types can't be meaningfully compared.  A
+/// connecting "to"/"with" word is ignored ("compare sword to axe").
+async fn do_compare(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    use crate::world::{ITEM_WEAPON, ITEM_ARMOR};
+    let parts: Vec<String> = arg.split_whitespace()
+        .filter(|t| !t.eq_ignore_ascii_case("to") && !t.eq_ignore_ascii_case("with"))
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    if parts.len() < 2 {
+        return CmdOutput::text("\r\nCompare what to what?\r\n".to_string());
+    }
+    let w = world.lock().await;
+    let resolve = |kw: &str| -> Option<(String, i32, [i32; 4])> {
+        let pool = me.inventory.iter().copied()
+            .chain(me.equipment.iter().filter_map(|s| *s));
+        for iid in pool {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if let Some(p) = w.obj_protos.get(&o.vnum) {
+                    if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(kw)) {
+                        return Some((p.short_description.clone(), p.item_type, p.value));
+                    }
+                }
+            }
+        }
+        None
+    };
+    let Some((s1, t1, v1)) = resolve(&parts[0]) else {
+        return CmdOutput::text(format!("\r\nYou have no {}.\r\n", parts[0]));
+    };
+    let Some((s2, t2, v2)) = resolve(&parts[1]) else {
+        return CmdOutput::text(format!("\r\nYou have no {}.\r\n", parts[1]));
+    };
+    drop(w);
+    if t1 != t2 {
+        return CmdOutput::text(format!(
+            "\r\nYou can't compare {s1} and {s2} — they're different kinds of item.\r\n"
+        ));
+    }
+    let (m1, m2, label) = match t1 {
+        ITEM_WEAPON => (v1[1] * (v1[2] + 1) / 2, v2[1] * (v2[2] + 1) / 2, "damage"),
+        ITEM_ARMOR  => (v1[0], v2[0], "armor"),
+        _ => return CmdOutput::text(format!(
+            "\r\nThere's no meaningful way to compare {s1} and {s2}.\r\n"
+        )),
+    };
+    let verdict = if m1 > m2 {
+        format!("{s1} looks better than {s2}.")
+    } else if m2 > m1 {
+        format!("{s2} looks better than {s1}.")
+    } else {
+        format!("{s1} and {s2} look about the same.")
+    };
+    CmdOutput::text(format!("\r\nComparing {label}: {verdict}\r\n"))
+}
+
 async fn do_examine(
     arg: &str,
     me: &Character,
@@ -14787,6 +15159,21 @@ fn obj_view(w: &World, obj: &crate::world::ObjInstance) -> ObjView {
             long:      format!("The corpse of {short} is lying here."),
             item_type: crate::world::ITEM_CONTAINER,
             keywords:  format!("corpse {short}"),
+        };
+    }
+    // Synthetic coin pile (cp223) — render with its actual amount.
+    if obj.vnum == crate::db::GOLD_PILE_VNUM {
+        let n = obj.gold_amount;
+        let (short, long) = if n == 1 {
+            ("a single gold coin".to_string(), "A single gold coin is lying here.".to_string())
+        } else {
+            (format!("a pile of {n} gold coins"),
+             format!("A pile of {n} gold coins is lying here."))
+        };
+        return ObjView {
+            short, long,
+            item_type: crate::world::ITEM_MONEY,
+            keywords: "pile coins gold money".to_string(),
         };
     }
     if let Some(p) = w.obj_protos.get(&obj.vnum) {

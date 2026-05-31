@@ -579,6 +579,9 @@ pub const BREWED_POTION_VNUM:  crate::world::ObjVnum = 99005;
 /// Synthetic proto used by `cast scribe`.  Each instance overrides
 /// the bound spell via `ObjInstance.brewed_spell`.
 pub const SCRIBED_SCROLL_VNUM: crate::world::ObjVnum = 99006;
+/// Synthetic proto for a dropped pile of coins (cp223).  Each instance's
+/// `ObjInstance.gold_amount` holds the actual amount.
+pub const GOLD_PILE_VNUM:      crate::world::ObjVnum = 99007;
 
 /// Insert four hardcoded synthetic prototypes so the first-login path
 /// can spawn a class-aware newbie kit without depending on world-file
@@ -680,6 +683,23 @@ fn inject_newbie_kit_protos(world: &mut crate::world::World) {
         affect_flags: [0;4],
         value: [0, 0, 0, 0],
         weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99007: generic pile of coins — amount lives on the instance's
+    // `gold_amount`; the keyword/short are overridden in obj_view (cp223).
+    world.obj_protos.insert(GOLD_PILE_VNUM, ObjProto {
+        vnum: GOLD_PILE_VNUM,
+        name: "pile coins gold money".to_string(),
+        short_description: "a pile of gold coins".to_string(),
+        description: "A pile of gold coins is lying here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_MONEY,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 0, 0, 0],
+        weight: 0, cost: 0, rent: 0, level: 0, timer: 0,
         extras: Vec::new(),
         affected: Vec::new(),
     });
@@ -2506,6 +2526,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         timer: init_timer,
                         light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),
@@ -2524,6 +2545,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                         timer: init_timer,
                         light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),
@@ -2564,6 +2586,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     timer: init_timer,
                     light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
                     condition: 100,
                     brewed_spell: None,
                     bonus_affects: Vec::new(),
@@ -2615,6 +2638,7 @@ pub fn reset_zone(world: &mut World, zone_vnum: i32) {
                     timer: init_timer,
                         light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
                         condition: 100,
                         brewed_spell: None,
                         bonus_affects: Vec::new(),

@@ -289,6 +289,10 @@ pub struct ObjInstance {
     /// Lights whose proto `value[2] <= 0` are treated as infinite and never
     /// burn down.  Decremented by `db::spawn_light_burn_tick` (cp207).
     pub light_hours: i32,
+    /// Amount of gold this instance represents, for synthetic "pile of
+    /// coins" objects dropped via `drop <N> coins` (cp223).  `0` for every
+    /// normal object.
+    pub gold_amount: i64,
 }
 
 /// Reserved vnum used for corpses (and other synthetic objects that have
@@ -345,6 +349,7 @@ pub const ITEM_DRINKCON:  i32 = 17;
 pub const ITEM_FOOD:      i32 = 19;
 pub const ITEM_FOUNTAIN:  i32 = 23;
 pub const ITEM_BOAT:      i32 = 22;
+pub const ITEM_MONEY:     i32 = 20;
 
 /// Bits inside `ObjProto.extra_flags[0]`.  Mirrors structs.h
 /// ITEM_x_* macros.  Only the ANTI-class checks are wired right now;
@@ -786,6 +791,7 @@ impl World {
             timer: None,
             light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
             condition: 100,
             brewed_spell: None,
             bonus_affects: Vec::new(),
@@ -899,6 +905,7 @@ impl World {
             timer,
             light_lit: false,
             light_hours: 0,
+            gold_amount: 0,
             condition: 100,
             brewed_spell: None,
             bonus_affects: Vec::new(),

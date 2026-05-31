@@ -102,6 +102,9 @@ pub enum Skill {
     /// Debuff spell — outlines a mob in glowing light, lowering its AC so
     /// it's easier to hit (the offensive counterpart to Armor).
     FaerieFire,
+    /// Warrior/Thief physical skill — befriend a weaker creature, turning
+    /// it into a charmed pet (non-magical path to pets + mounts).
+    Tame,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +176,7 @@ impl Skill {
             "calllightning" | "calllightening" => Some(Skill::CallLightning),
             "peek"                            => Some(Skill::Peek),
             "faeriefire" | "faerie" | "fairyfire" => Some(Skill::FaerieFire),
+            "tame"                            => Some(Skill::Tame),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
@@ -247,6 +251,7 @@ impl Skill {
             Skill::CallLightning => "call lightning",
             Skill::Peek          => "peek",
             Skill::FaerieFire    => "faerie fire",
+            Skill::Tame          => "tame",
         }
     }
 
@@ -255,7 +260,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt | Skill::Peek
+                | Skill::Berserk | Skill::Taunt | Skill::Peek | Skill::Tame
                 | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
@@ -286,7 +291,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt | Skill::Peek
+                | Skill::Berserk | Skill::Taunt | Skill::Peek | Skill::Tame
                 | Skill::Stun => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
@@ -402,6 +407,7 @@ impl Skill {
             Skill::CallLightning => &[Class::Cleric],
             Skill::Peek          => &[Class::Thief],
             Skill::FaerieFire    => &[Class::MagicUser, Class::Cleric],
+            Skill::Tame          => &[Class::Warrior, Class::Thief],
         }
     }
 
@@ -472,6 +478,7 @@ impl Skill {
             Skill::CallLightning => "call-lightning",
             Skill::Peek          => "peek",
             Skill::FaerieFire    => "faerie-fire",
+            Skill::Tame          => "tame",
         }
     }
 
@@ -507,6 +514,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::CallLightning,
     Skill::Peek,
     Skill::FaerieFire,
+    Skill::Tame,
 ];
 
 // ---------------------------------------------------------------------------
