@@ -310,12 +310,10 @@ pub async fn handle_connection(
                             Character::default_title_for(cls, session.level.max(1)).to_string()
                         } else { saved }
                     },
-                    description:      p_ref.map(|p| p.description.clone()).unwrap_or_default(),
                     bonus_hitroll:    0,
                     bonus_damroll:    0,
                     bonus_ac:         0,
                     following:        None,
-                    mount:            None,   // cp220
                     grouped:          false,
                     gossip_off:       false,
                     auction_off:      false,
@@ -328,8 +326,6 @@ pub async fn handle_connection(
                     notes:            p_ref.map(|p| p.notes.clone()).unwrap_or_default(),
                     pose:             p_ref.map(|p| p.pose.clone()).unwrap_or_default(),
                     pvp_ok:           false,
-                    duel_challenge_from: None,   // cp240
-                    dueling:          None,      // cp240
                     invis_level:      0,
                     nohassle:         session.level >= 34,   // immortals ignored by aggro mobs (cp202)
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
@@ -338,9 +334,6 @@ pub async fn handle_connection(
                     afk_msg:          None,
                     last_activity:    std::time::Instant::now(),
                     recall_cooldown_until: None,
-                    home_room:        p_ref.and_then(|p| p.home_room),
-                    achievements:     p_ref.map(|p| p.achievements.clone())
-                                           .unwrap_or_default(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline
@@ -665,8 +658,6 @@ async fn run_game_session(
             rec.pdeaths      = me.pdeaths;
             rec.practices = me.practices;
             rec.room      = me.current_room;
-            rec.home_room = me.home_room;
-            rec.achievements = me.achievements.clone();
             rec.gold      = me.gold;
             rec.exp       = me.exp;
             rec.level     = me.level;
@@ -686,7 +677,6 @@ async fn run_game_session(
             rec.hunger          = me.hunger;
             rec.thirst          = me.thirst;
             rec.title           = me.title.clone();
-            rec.description      = me.description.clone();
             rec.bank_gold       = me.bank_gold;
             rec.prompt_format   = me.prompt_format.clone();
             rec.aliases         = me.aliases.clone();

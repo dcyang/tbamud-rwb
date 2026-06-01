@@ -141,12 +141,6 @@ pub struct PlayerRecord {
     pub pdeaths:       i32,
     pub practices:     i32,
     pub room:          i32,
-    /// Personal bind point room vnum.  `None` = no override (use start
-    /// room on respawn/recall).  Persisted as `Home: <vnum>`.
-    pub home_room:     Option<i32>,
-    /// Earned achievement keys (see character::ACHIEVEMENTS).  Persisted
-    /// as one `Ach: <key>` line per entry.
-    pub achievements:  Vec<String>,
     pub gold:          i64,
     /// Gold on deposit at the bank.
     pub bank_gold:     i64,
@@ -171,7 +165,6 @@ pub struct PlayerRecord {
     pub thirst:        i32,
     /// Vanity title (empty for new chars).
     pub title:         String,
-    pub description:   String,
     /// Custom prompt format with %h/%H/%m/%M/%g/%x placeholders.
     /// Empty means use the legacy "> " prompt.
     pub prompt_format: String,
@@ -408,7 +401,6 @@ impl PlayerDb {
                 "Hung" => rec.hunger = val.parse().unwrap_or(24),
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 "Titl" => rec.title  = val.to_string(),
-                "Desc" => rec.description = val.to_string(),
                 "Bank" => rec.bank_gold = val.parse().unwrap_or(0),
                 "Prmt" => rec.prompt_format = val.to_string(),
                 "Alis" => {
@@ -424,8 +416,6 @@ impl PlayerDb {
                 "God"  => rec.god  = val.to_string(),
                 "Mute" => rec.muted  = val.parse::<i32>().unwrap_or(0) != 0,
                 "Frzn" => rec.frozen = val.parse::<i32>().unwrap_or(0) != 0,
-                "Home" => rec.home_room = val.parse::<i32>().ok(),
-                "Ach"  => rec.achievements.push(val.to_string()),
                 _ => {}
             }
         }
@@ -496,12 +486,6 @@ impl PlayerDb {
         if rec.room != 0 {
             writeln!(f, "Room: {}", rec.room)?;
         }
-        if let Some(home) = rec.home_room {
-            writeln!(f, "Home: {}", home)?;
-        }
-        for key in &rec.achievements {
-            writeln!(f, "Ach : {}", key)?;
-        }
         if rec.gold != 0 {
             writeln!(f, "Gold: {}", rec.gold)?;
         }
@@ -528,7 +512,6 @@ impl PlayerDb {
         writeln!(f, "Hung: {}", rec.hunger)?;
         writeln!(f, "Thst: {}", rec.thirst)?;
         if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
-        if !rec.description.is_empty() { writeln!(f, "Desc: {}", rec.description)?; }
         if rec.bank_gold > 0     { writeln!(f, "Bank: {}", rec.bank_gold)?; }
         if !rec.prompt_format.is_empty() { writeln!(f, "Prmt: {}", rec.prompt_format)?; }
         let mut anames: Vec<&String> = rec.aliases.keys().collect();

@@ -42,6 +42,8 @@ pub enum Skill {
     Identify,
     DetectInvis,
     DetectMagic,
+    DetectAlign,
+    DetectPoison,
     Poison,
     Sleep,
     Blindness,
@@ -76,32 +78,33 @@ pub enum Skill {
     ColorSpray,
     AcidBlast,
     ChillTouch,
-    Brew,
-    Scribe,
     Enchant,
     /// High-tier Cleric spell — full HP + mana + movement restore AND
     /// strip every negative affect (poison/sleep/blind/slow/charm).
     Restoration,
-    /// Warrior physical skill — self-applied combat frenzy: boosts damage
-    /// at the cost of defense for a short duration.
-    Berserk,
-    /// Warrior physical skill — provoke a mob into attacking you instead
-    /// of its current target (a tanking pull).
-    Taunt,
     /// Buff spell — grants flight: cross deep-water/no-swim sectors and
     /// move at a flat low movement cost.
     Fly,
-    /// Buff spell — lets the bearer enter underwater sectors without
-    /// drowning.
-    WaterBreathing,
     /// Cleric attack spell — calls down a lightning bolt; only works
     /// outdoors during rain or a thunderstorm.
     CallLightning,
+    /// Utility spell — fill a held drink container with water.
+    CreateWater,
+    /// Debuff spell — curses a mob (saps its damage).
+    Curse,
+    /// Cure spell — strips a Curse affect from self or a player.
+    RemoveCurse,
+    /// Offensive utility — strips a beneficial affect from a mob.
+    DispelMagic,
+    /// Cleric attack spells — smite a mob of the opposing alignment.
+    DispelEvil,
+    DispelGood,
+    /// MagicUser attack spell — drains life energy from a mob.
+    EnergyDrain,
+    /// Warrior physical skill — strike every mob in the room.
+    Whirlwind,
     /// Thief physical skill — glance at a target's carried inventory.
     Peek,
-    /// Debuff spell — outlines a mob in glowing light, lowering its AC so
-    /// it's easier to hit (the offensive counterpart to Armor).
-    FaerieFire,
     /// Warrior/Thief physical skill — befriend a weaker creature, turning
     /// it into a charmed pet (non-magical path to pets + mounts).
     Tame,
@@ -140,6 +143,8 @@ impl Skill {
             "identify"     => Some(Skill::Identify),
             "detectinvis" | "detectinvisible" => Some(Skill::DetectInvis),
             "detectmagic"                     => Some(Skill::DetectMagic),
+            "detectalignment" | "detectalign" => Some(Skill::DetectAlign),
+            "detectpoison"                    => Some(Skill::DetectPoison),
             "poison"                          => Some(Skill::Poison),
             "sleep"                           => Some(Skill::Sleep),
             "blindness" | "blind"             => Some(Skill::Blindness),
@@ -169,19 +174,21 @@ impl Skill {
             "heal"                            => Some(Skill::Heal),
             "infravision" | "infra"           => Some(Skill::Infravision),
             "stun"                            => Some(Skill::Stun),
-            "berserk"                         => Some(Skill::Berserk),
-            "taunt"                           => Some(Skill::Taunt),
             "fly" | "flight"                  => Some(Skill::Fly),
-            "waterbreathing" | "waterbreath" | "breathe" => Some(Skill::WaterBreathing),
             "calllightning" | "calllightening" => Some(Skill::CallLightning),
+            "createwater" | "createspring" => Some(Skill::CreateWater),
+            "curse"                           => Some(Skill::Curse),
+            "removecurse"                     => Some(Skill::RemoveCurse),
+            "dispelmagic"                     => Some(Skill::DispelMagic),
+            "dispelevil"                      => Some(Skill::DispelEvil),
+            "dispelgood"                      => Some(Skill::DispelGood),
+            "energydrain"                     => Some(Skill::EnergyDrain),
+            "whirlwind"                       => Some(Skill::Whirlwind),
             "peek"                            => Some(Skill::Peek),
-            "faeriefire" | "faerie" | "fairyfire" => Some(Skill::FaerieFire),
             "tame"                            => Some(Skill::Tame),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
             "acidblast" | "acid"              => Some(Skill::AcidBlast),
             "chilltouch" | "chill"            => Some(Skill::ChillTouch),
-            "brew"                            => Some(Skill::Brew),
-            "scribe"                          => Some(Skill::Scribe),
             "enchant" | "enchantweapon"       => Some(Skill::Enchant),
             "restoration" | "restore"         => Some(Skill::Restoration),
             _ => None,
@@ -208,6 +215,8 @@ impl Skill {
             Skill::Identify     => "identify",
             Skill::DetectInvis  => "detect invis",
             Skill::DetectMagic  => "detect magic",
+            Skill::DetectAlign  => "detect alignment",
+            Skill::DetectPoison => "detect poison",
             Skill::Poison       => "poison",
             Skill::Sleep        => "sleep",
             Skill::Blindness    => "blindness",
@@ -240,17 +249,19 @@ impl Skill {
             Skill::ColorSpray    => "color spray",
             Skill::AcidBlast     => "acid blast",
             Skill::ChillTouch    => "chill touch",
-            Skill::Brew          => "brew",
-            Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant weapon",
             Skill::Restoration   => "restoration",
-            Skill::Berserk       => "berserk",
-            Skill::Taunt         => "taunt",
             Skill::Fly           => "fly",
-            Skill::WaterBreathing => "water breathing",
             Skill::CallLightning => "call lightning",
+            Skill::CreateWater   => "create water",
+            Skill::Curse         => "curse",
+            Skill::RemoveCurse   => "remove curse",
+            Skill::DispelMagic   => "dispel magic",
+            Skill::DispelEvil    => "dispel evil",
+            Skill::DispelGood    => "dispel good",
+            Skill::EnergyDrain   => "energy drain",
+            Skill::Whirlwind     => "whirlwind",
             Skill::Peek          => "peek",
-            Skill::FaerieFire    => "faerie fire",
             Skill::Tame          => "tame",
         }
     }
@@ -260,13 +271,14 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt | Skill::Peek | Skill::Tame
+                | Skill::Peek | Skill::Tame | Skill::Whirlwind
                 | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
                 | Skill::Sanctuary | Skill::Harm
                 | Skill::WordOfRecall | Skill::Identify
                 | Skill::DetectInvis  | Skill::DetectMagic
+                | Skill::DetectAlign  | Skill::DetectPoison
                 | Skill::Poison       | Skill::Sleep | Skill::Blindness
                 | Skill::CurePoison   | Skill::CureBlind | Skill::CureCritic
                 | Skill::Strength     | Skill::Armor | Skill::Haste | Skill::Slow
@@ -277,10 +289,13 @@ impl Skill {
                 | Skill::CureSerious   | Skill::Heal
                 | Skill::Infravision   | Skill::ColorSpray
                 | Skill::AcidBlast     | Skill::ChillTouch
-                | Skill::Brew          | Skill::Scribe
                 | Skill::Enchant       | Skill::Restoration
-                | Skill::Fly           | Skill::WaterBreathing
-                | Skill::CallLightning | Skill::FaerieFire
+                | Skill::Fly
+                | Skill::CallLightning
+                | Skill::CreateWater
+                | Skill::Curse | Skill::RemoveCurse | Skill::DispelMagic
+                | Skill::DispelEvil | Skill::DispelGood
+                | Skill::EnergyDrain
                                       => SkillKind::Spell,
         }
     }
@@ -291,7 +306,7 @@ impl Skill {
             Skill::Kick | Skill::Bash | Skill::Backstab | Skill::PickLock
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
-                | Skill::Berserk | Skill::Taunt | Skill::Peek | Skill::Tame
+                | Skill::Peek | Skill::Tame | Skill::Whirlwind
                 | Skill::Stun => 0,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
@@ -303,6 +318,8 @@ impl Skill {
             Skill::Identify     => 15,
             Skill::DetectInvis  => 10,
             Skill::DetectMagic  => 8,
+            Skill::DetectAlign  => 6,
+            Skill::DetectPoison => 6,
             Skill::Poison       => 12,
             Skill::Sleep        => 15,
             Skill::Blindness    => 8,
@@ -330,14 +347,17 @@ impl Skill {
             Skill::ColorSpray    => 18,
             Skill::AcidBlast     => 25,
             Skill::ChillTouch    => 10,
-            Skill::Brew          => 50,
-            Skill::Scribe        => 40,
             Skill::Enchant       => 60,
             Skill::Restoration   => 80,
             Skill::Fly           => 10,
-            Skill::WaterBreathing => 8,
             Skill::CallLightning => 15,
-            Skill::FaerieFire    => 5,
+            Skill::CreateWater   => 5,
+            Skill::Curse         => 12,
+            Skill::RemoveCurse   => 12,
+            Skill::DispelMagic   => 15,
+            Skill::DispelEvil    => 15,
+            Skill::DispelGood    => 15,
+            Skill::EnergyDrain   => 35,
         }
     }
 
@@ -364,6 +384,8 @@ impl Skill {
             Skill::Identify     => &[Class::MagicUser],
             Skill::DetectInvis  => &[Class::MagicUser, Class::Cleric],
             Skill::DetectMagic  => &[Class::MagicUser, Class::Cleric],
+            Skill::DetectAlign  => &[Class::Cleric],
+            Skill::DetectPoison => &[Class::MagicUser, Class::Cleric],
             Skill::Poison       => &[Class::MagicUser, Class::Cleric],
             Skill::Sleep        => &[Class::MagicUser],
             Skill::Blindness    => &[Class::MagicUser, Class::Cleric],
@@ -396,17 +418,19 @@ impl Skill {
             Skill::ColorSpray    => &[Class::MagicUser],
             Skill::AcidBlast     => &[Class::MagicUser],
             Skill::ChillTouch    => &[Class::MagicUser],
-            Skill::Brew          => &[Class::Cleric, Class::MagicUser],
-            Skill::Scribe        => &[Class::Cleric, Class::MagicUser],
             Skill::Enchant       => &[Class::MagicUser],
             Skill::Restoration   => &[Class::Cleric],
-            Skill::Berserk       => &[Class::Warrior],
-            Skill::Taunt         => &[Class::Warrior],
             Skill::Fly           => &[Class::MagicUser, Class::Cleric],
-            Skill::WaterBreathing => &[Class::MagicUser, Class::Cleric],
             Skill::CallLightning => &[Class::Cleric],
+            Skill::CreateWater   => &[Class::Cleric, Class::MagicUser],
+            Skill::Curse         => &[Class::Cleric, Class::MagicUser],
+            Skill::RemoveCurse   => &[Class::Cleric],
+            Skill::DispelMagic   => &[Class::MagicUser, Class::Cleric],
+            Skill::DispelEvil    => &[Class::Cleric],
+            Skill::DispelGood    => &[Class::Cleric],
+            Skill::EnergyDrain   => &[Class::MagicUser],
+            Skill::Whirlwind     => &[Class::Warrior],
             Skill::Peek          => &[Class::Thief],
-            Skill::FaerieFire    => &[Class::MagicUser, Class::Cleric],
             Skill::Tame          => &[Class::Warrior, Class::Thief],
         }
     }
@@ -435,6 +459,8 @@ impl Skill {
             Skill::Identify     => "identify",
             Skill::DetectInvis  => "detect-invis",
             Skill::DetectMagic  => "detect-magic",
+            Skill::DetectAlign  => "detect-alignment",
+            Skill::DetectPoison => "detect-poison",
             Skill::Poison       => "poison",
             Skill::Sleep        => "sleep",
             Skill::Blindness    => "blindness",
@@ -467,17 +493,19 @@ impl Skill {
             Skill::ColorSpray    => "color-spray",
             Skill::AcidBlast     => "acid-blast",
             Skill::ChillTouch    => "chill-touch",
-            Skill::Brew          => "brew",
-            Skill::Scribe        => "scribe",
             Skill::Enchant       => "enchant-weapon",
             Skill::Restoration   => "restoration",
-            Skill::Berserk       => "berserk",
-            Skill::Taunt         => "taunt",
             Skill::Fly           => "fly",
-            Skill::WaterBreathing => "water-breathing",
             Skill::CallLightning => "call-lightning",
+            Skill::CreateWater   => "create-water",
+            Skill::Curse         => "curse",
+            Skill::RemoveCurse   => "remove-curse",
+            Skill::DispelMagic   => "dispel-magic",
+            Skill::DispelEvil    => "dispel-evil",
+            Skill::DispelGood    => "dispel-good",
+            Skill::EnergyDrain   => "energy-drain",
+            Skill::Whirlwind     => "whirlwind",
             Skill::Peek          => "peek",
-            Skill::FaerieFire    => "faerie-fire",
             Skill::Tame          => "tame",
         }
     }
@@ -496,7 +524,7 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Bless, Skill::BurningHands,
     Skill::Sanctuary, Skill::Harm,
     Skill::WordOfRecall, Skill::Identify,
-    Skill::DetectInvis, Skill::DetectMagic,
+    Skill::DetectInvis, Skill::DetectMagic, Skill::DetectAlign, Skill::DetectPoison,
     Skill::Poison, Skill::Sleep, Skill::Blindness,
     Skill::CurePoison, Skill::CureBlind, Skill::CureCritic,
     Skill::Strength, Skill::Armor, Skill::Haste, Skill::Slow, Skill::Earthquake,
@@ -506,14 +534,16 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::LightningBolt, Skill::Fireball, Skill::ShockingGrasp,
     Skill::Invisibility, Skill::Stoneskin, Skill::Disarm,
     Skill::CureSerious, Skill::Heal, Skill::Infravision,
-    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch, Skill::Brew, Skill::Scribe,
+    Skill::ColorSpray, Skill::AcidBlast, Skill::ChillTouch,
     Skill::Enchant,
     Skill::Restoration,
-    Skill::Berserk, Skill::Taunt,
-    Skill::Fly, Skill::WaterBreathing,
+    Skill::Fly,
     Skill::CallLightning,
+    Skill::CreateWater,
+    Skill::Curse, Skill::RemoveCurse, Skill::DispelMagic,
+    Skill::DispelEvil, Skill::DispelGood,
+    Skill::EnergyDrain, Skill::Whirlwind,
     Skill::Peek,
-    Skill::FaerieFire,
     Skill::Tame,
 ];
 
@@ -674,7 +704,6 @@ pub struct Character {
     /// Self-set physical description shown when another player `look`s at
     /// this character.  Empty by default; set via `describe` (cp232).
     /// Persisted, control-stripped + length-capped.
-    pub description:  String,
     /// Hours of food remaining. Counts down each game-hour tick;
     /// reaching 0 starts deducting HP. `-1` is the "never hungry"
     /// sentinel used by immortals and applied by certain food affects.
@@ -697,11 +726,6 @@ pub struct Character {
     /// or `None` if they aren't following anyone. Set by `follow`,
     /// cleared by `follow self` or by the leader logging off.
     pub following:    Option<u32>,
-    /// Mob instance id this character is currently riding (a charmed pet),
-    /// or `None`.  While mounted the rider's steps cost no movement (the
-    /// mount does the walking).  Transient; cleared by `dismount`, logout,
-    /// or lazily when the mount is gone.  (cp220)
-    pub mount:        Option<u32>,
     /// Whether this character is in a formal group with their leader (or,
     /// for a leader, with their followers). `group` toggles individual
     /// followers in/out; ungrouped followers tag along on movement but
@@ -741,13 +765,6 @@ pub struct Character {
     /// PvP opt-in.  When false, the player can neither be attacked by
     /// nor attack another player.  Transient.
     pub pvp_ok:       bool,
-    /// Sanctioned duel state (cp240).  `duel_challenge_from` holds a
-    /// pending challenger's id; `dueling` holds the current opponent's id
-    /// once a duel is accepted.  Both transient.  A duel sanctions PvP
-    /// between the two regardless of `pvp_ok`, and resolves non-lethally
-    /// (the loser yields, fully restored).
-    pub duel_challenge_from: Option<u32>,
-    pub dueling:      Option<u32>,
     /// Immortal invisibility level.  0 = visible to everyone; N > 0
     /// hides this character from anyone whose own level is &lt; N.
     /// Transient (cleared on reboot).
@@ -829,68 +846,6 @@ pub struct Character {
     /// take a breath").  None = no active cooldown.
     pub recall_cooldown_until: Option<std::time::Instant>,
 
-    /// Personal bind point: respawn-on-death and recall destination
-    /// override.  `None` = use the mortal/immortal start room.  Set via
-    /// the `bind` command (anywhere), cleared via `unbind`.  Persisted
-    /// as `Home: <vnum>` (omitted when None).
-    pub home_room: Option<crate::world::RoomVnum>,
-
-    /// Earned achievement keys.  See `ACHIEVEMENTS` for the catalog.
-    /// Persisted as `Ach: <key>` lines (one per entry).
-    pub achievements: Vec<String>,
-}
-
-/// Static achievement catalog.  Each tuple is `(key, description, predicate)`
-/// — the predicate runs against a Character snapshot and returns true if
-/// the milestone has been reached.  Award is one-shot: once earned, the
-/// key is appended to `Character.achievements` and never re-checked.
-pub const ACHIEVEMENTS: &[(&str, &str, fn(&Character) -> bool)] = &[
-    ("first-blood", "First Blood — score your first kill",
-        |c| c.exp > 0),
-    ("hero",        "Hero — reach level 10",
-        |c| c.level >= 10),
-    ("master",      "Master — reach level 25",
-        |c| c.level >= 25),
-    ("legend",      "Legend — reach the mortal cap (level 33)",
-        |c| c.level >= 33),
-    ("magnate",     "Magnate — amass 10,000 gold (purse + bank)",
-        |c| c.gold + c.bank_gold >= 10_000),
-    ("croesus",     "Croesus — amass 100,000 gold (purse + bank)",
-        |c| c.gold + c.bank_gold >= 100_000),
-    ("quester",     "Quester — complete your first quest",
-        |c| !c.completed_quests.is_empty()),
-    ("crusader",    "Crusader — complete ten quests",
-        |c| c.completed_quests.len() >= 10),
-    ("mastered",    "Mastered — push a skill to 100%",
-        |c| c.skills.values().any(|p| *p >= 100)),
-    ("devoted",     "Devoted — pick a god to worship",
-        |c| !c.god.is_empty()),
-    ("clan-member", "Clan Member — join a clan",
-        |c| !c.clan.is_empty()),
-    ("slayer",      "Slayer — score your first PvP kill",
-        |c| c.pkills >= 1),
-    ("champion",    "Champion — ten PvP kills",
-        |c| c.pkills >= 10),
-    ("homesteader", "Homesteader — establish a personal bind point",
-        |c| c.home_room.is_some()),
-];
-
-impl Character {
-    /// Walk the achievement catalog; for any entry the caller doesn't
-    /// already have AND whose predicate now returns true, append the
-    /// key and return the descriptions.  Caller surfaces the lines via
-    /// CmdOutput so the player sees them.
-    pub fn check_achievements(&mut self) -> Vec<&'static str> {
-        let mut newly = Vec::new();
-        for (key, desc, pred) in ACHIEVEMENTS {
-            if self.achievements.iter().any(|e| e == *key) { continue; }
-            if pred(self) {
-                self.achievements.push((*key).to_string());
-                newly.push(*desc);
-            }
-        }
-        newly
-    }
 }
 
 impl Character {
@@ -1137,12 +1092,6 @@ impl Character {
     /// / no-swim sectors and pay a flat low movement cost (cp209).
     pub fn is_flying(&self) -> bool {
         self.affects.iter().any(|a| a.skill == Skill::Fly)
-    }
-
-    /// True while a WaterBreathing affect is active.  Lets the bearer enter
-    /// underwater sectors without drowning (cp211).
-    pub fn can_breathe_water(&self) -> bool {
-        self.affects.iter().any(|a| a.skill == Skill::WaterBreathing)
     }
 
     /// Total damage reduction percent (0..=75) from active affects.

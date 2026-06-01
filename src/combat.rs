@@ -515,39 +515,6 @@ async fn resolve_pvp_attack(
             &format!("{} hits {target_name}.\r\n", p.attacker_name));
     }
     if dead {
-        // Sanctioned duel (cp240): non-lethal.  The loser yields, is fully
-        // restored, and both sides exit the duel — no death/respawn, no
-        // pkill/pdeath counters.
-        let dueling_with = ph.character.lock().await.dueling;
-        if dueling_with == Some(p.attacker_id) {
-            {
-                let mut c = ph.character.lock().await;
-                c.hp = c.max_hp;
-                c.dueling = None;
-                c.fighting = None;
-            }
-            let attacker_h = {
-                let cl = chars.lock().await;
-                let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
-                h
-            };
-            if let Some(ah) = &attacker_h {
-                let mut c = ah.character.lock().await;
-                c.dueling = None;
-                c.fighting = None;
-                let _ = ah.send.send(format!(
-                    "\r\n{target_name} yields — you win the duel!\r\n"
-                ));
-            }
-            let _ = ph.send.send(format!(
-                "\r\nYou yield — {} wins the duel. You are helped to your feet.\r\n",
-                p.attacker_name,
-            ));
-            let cl = chars.lock().await;
-            cl.broadcast_room(p.room, Some(p.attacker_id),
-                &format!("{target_name} yields — {} wins the duel!\r\n", p.attacker_name));
-            return;
-        }
         // PvP counters: bump killer.pkills and victim.pdeaths.
         let killer_h = {
             let cl = chars.lock().await;
@@ -669,15 +636,6 @@ async fn resolve_player_attack(
             m.remembers.push(p.attacker_id);
         }
         let low_hp = !dead && m.hp <= m.max_hp / 6;
-        // Weapon durability: 5% chance to ding the wielded weapon.
-        if let Some(weap) = p.weapon_iid {
-            use rand::Rng;
-            if rand::thread_rng().gen_range(0..100) < 5 {
-                if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == weap) {
-                    o.condition = (o.condition - 1).max(0);
-                }
-            }
-        }
         (proto_name, dead, in_room, has_memory, is_wimpy, low_hp)
     };
     let _ = has_memory;
@@ -696,45 +654,6 @@ async fn resolve_player_attack(
         }
         cl.broadcast_room(p.room, Some(p.attacker_id), &to_room);
     }
-    // If the weapon just broke (condition == 0), extract it from the
-    // attacker's WIELD slot and broadcast a shatter line.
-    if let Some(weap) = p.weapon_iid {
-        let broke = {
-            let w = world.lock().await;
-            w.obj_instances.iter().find(|o| o.id == weap)
-                .map(|o| o.condition == 0).unwrap_or(false)
-        };
-        if broke {
-            let (short, name) = {
-                let w = world.lock().await;
-                let s = w.obj_instances.iter().find(|o| o.id == weap)
-                    .and_then(|o| w.obj_protos.get(&o.vnum))
-                    .map(|p| p.short_description.clone())
-                    .unwrap_or_else(|| "your weapon".to_string());
-                (s, p.attacker_name.clone())
-            };
-            let kh = {
-                let cl = chars.lock().await;
-                let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
-                h
-            };
-            if let Some(kh) = kh {
-                let mut c = kh.character.lock().await;
-                c.equipment[crate::character::WEAR_WIELD] = None;
-                drop(c);
-                let _ = kh.send.send(format!(
-                    "\r\n*** {short} shatters in your hands! ***\r\n",
-                ));
-            }
-            let cl = chars.lock().await;
-            cl.broadcast_room(p.room, Some(p.attacker_id),
-                &format!("{}'s {short} shatters into pieces!\r\n", name));
-            // Extract the instance.
-            let mut w = world.lock().await;
-            w.extract_obj(weap);
-        }
-    }
-
     // MOB_HELPER assist: any non-fighting mob in the room with the
     // helper flag joins in on the side of the original victim — i.e.
     // it engages the attacker (the player).  Skip the original target
@@ -809,8 +728,6 @@ async fn resolve_player_attack(
         // Autoloot: if the attacker has autoloot set, drain the freshly
         // spawned corpse into their inventory.
         autoloot_after_kill(p.attacker_id, &target_name, target_room, world, chars).await;
-        // Achievement check (first-blood etc).
-        check_and_announce_achievements(p.attacker_id, chars).await;
         return;
     }
 
@@ -1232,92 +1149,6 @@ async fn resolve_mob_attack(
         (c.hp <= 0, c.current_room, short, wimpy_trigger)
     };
 
-    // Mob wielded weapon durability tick (only on non-spell hits).
-    if !is_spell {
-        use rand::Rng;
-        if rand::thread_rng().gen_range(0..100) < 5 {
-            let weap_iid = {
-                let w = world.lock().await;
-                w.mob_instances.iter().find(|x| x.id == m.attacker_id)
-                    .and_then(|x| x.equipment[crate::character::WEAR_WIELD])
-            };
-            if let Some(iid) = weap_iid {
-                let broke = {
-                    let mut w = world.lock().await;
-                    if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
-                        o.condition = (o.condition - 1).max(0);
-                        o.condition == 0
-                    } else { false }
-                };
-                if broke {
-                    let short = {
-                        let w = world.lock().await;
-                        w.obj_instances.iter().find(|o| o.id == iid)
-                            .and_then(|o| w.obj_protos.get(&o.vnum))
-                            .map(|p| p.short_description.clone())
-                            .unwrap_or_else(|| "the weapon".to_string())
-                    };
-                    {
-                        let mut w = world.lock().await;
-                        if let Some(mob) = w.mob_instances.iter_mut().find(|x| x.id == m.attacker_id) {
-                            mob.equipment[crate::character::WEAR_WIELD] = None;
-                        }
-                    }
-                    {
-                        let cl = chars.lock().await;
-                        cl.broadcast_room(m.room, None,
-                            &format!("{mob_short_name}'s {short} shatters into pieces!\r\n"));
-                    }
-                    let mut w = world.lock().await;
-                    w.extract_obj(iid);
-                }
-            }
-        }
-    }
-
-    // Armor durability tick (only on non-spell hits).
-    if !is_spell {
-        use rand::Rng;
-        if rand::thread_rng().gen_range(0..100) < 5 {
-            let armor_iid = {
-                let c = ph.character.lock().await;
-                c.equipment[crate::character::WEAR_BODY]
-            };
-            if let Some(iid) = armor_iid {
-                let broke = {
-                    let mut w = world.lock().await;
-                    if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == iid) {
-                        o.condition = (o.condition - 1).max(0);
-                        o.condition == 0
-                    } else { false }
-                };
-                if broke {
-                    let short = {
-                        let w = world.lock().await;
-                        w.obj_instances.iter().find(|o| o.id == iid)
-                            .and_then(|o| w.obj_protos.get(&o.vnum))
-                            .map(|p| p.short_description.clone())
-                            .unwrap_or_else(|| "your armor".to_string())
-                    };
-                    {
-                        let mut c = ph.character.lock().await;
-                        c.equipment[crate::character::WEAR_BODY] = None;
-                    }
-                    let _ = ph.send.send(format!(
-                        "\r\n*** {short} disintegrates under the blow! ***\r\n",
-                    ));
-                    {
-                        let cl = chars.lock().await;
-                        cl.broadcast_room(m.room, Some(m.target.id),
-                            &format!("{}'s {short} disintegrates under the blow!\r\n", ph.name));
-                    }
-                    let mut w = world.lock().await;
-                    w.extract_obj(iid);
-                }
-            }
-        }
-    }
-
     let (to_victim, to_room) = if is_spell {
         let (vict_v, vict_n, room_v, room_n) = mob_spell_flavor(m.level);
         (
@@ -1401,28 +1232,6 @@ async fn clear_player_fighting(player_id: u32, chars: &SharedChars) {
 /// Autoloot: if the killer has `autoloot` set, drain the corpse just
 /// created in `room` (matching `mob_short`) into their inventory.
 /// The emptied corpse is left in the room to decay normally.
-/// Lock the named player's Character, run the achievement-check sweep
-/// and, if anything was newly earned, fire the award banner through
-/// their mpsc.  Cheap to call after any milestone event.
-pub async fn check_and_announce_achievements(
-    player_id: u32,
-    chars: &SharedChars,
-) {
-    let ph = {
-        let cl = chars.lock().await;
-        let h = cl.iter().find(|p| p.id == player_id).cloned();
-        h
-    };
-    let Some(ph) = ph else { return; };
-    let banner = {
-        let mut c = ph.character.lock().await;
-        crate::interpreter::announce_achievements(&mut c)
-    };
-    if !banner.is_empty() {
-        let _ = ph.send.send(banner);
-    }
-}
-
 async fn autoloot_after_kill(
     killer_id: u32,
     mob_short: &str,
@@ -1556,14 +1365,9 @@ async fn player_death(
     let (old_room, start_room, max_hp, dropped, corpse_label, xp_lost) = {
         let mut c = ph.character.lock().await;
         let immortal = c.level >= 34;
-        // Honor personal bind point if set AND the room still exists,
-        // else fall back to the canonical start room.
         let start = {
             let w = world.lock().await;
-            match c.home_room {
-                Some(v) if w.rooms.contains_key(&v) => v,
-                _ => w.start_room(immortal),
-            }
+            w.start_room(immortal)
         };
         let old = c.current_room;
         let dropped: Vec<u32> = std::mem::take(&mut c.inventory);
