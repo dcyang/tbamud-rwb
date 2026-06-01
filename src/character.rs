@@ -882,6 +882,12 @@ pub struct Character {
     pub info_off:     bool,
     /// Personal toggle for the shout (zone) channel.
     pub shout_off:    bool,
+    /// Personal toggle for the grats (congratulations) channel.
+    pub grats_off:    bool,
+    /// `notell` — refuse incoming tells.  `nosummon` — refuse being the
+    /// target of the summon spell.  Both transient PRF toggles (stock).
+    pub notell:       bool,
+    pub nosummon:     bool,
     /// When true, color codes are stripped before sending to the client
     /// (mirrors CircleMUD's COLOR_OFF preference).
     pub color_off:    bool,

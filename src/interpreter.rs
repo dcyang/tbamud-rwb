@@ -106,6 +106,8 @@ const COMMANDS: &[&str] = &[
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "sip", "eat", "taste", "fill", "pour", "empty", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
+    "grats", "gratz", "holler", "version", "visible",
+    "notell", "nosummon", "nograts", "nogossip", "noauction",
     "auction", "auc", "whisper",
     "brief", "compact", "toggle", "time", "weather", "bank", "reply", "prompt", "alias",
     "balance", "deposit", "withdraw", "gsay", "take", "hold", "grab", "diagnose", "whoami",
@@ -399,6 +401,15 @@ pub async fn dispatch_command(
         Some("report")    => do_report(me, chars).await,
         Some("title")     => do_title(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
+        Some("grats") | Some("gratz") => do_grats(rest, me, world, chars).await,
+        Some("holler") => do_holler(rest, me, chars).await,
+        Some("version") => do_version(),
+        Some("visible") => do_visible(me),
+        Some("notell")  => { me.notell = !me.notell; CmdOutput::text(format!("\r\nYou will {} receive tells.\r\n", if me.notell { "no longer" } else { "now" })) }
+        Some("nosummon") => { me.nosummon = !me.nosummon; CmdOutput::text(format!("\r\nYou are {} protected from summon.\r\n", if me.nosummon { "now" } else { "no longer" })) }
+        Some("nograts")  => { me.grats_off = !me.grats_off; CmdOutput::text(format!("\r\nGrats channel: {}.\r\n", if me.grats_off { "off" } else { "on" })) }
+        Some("nogossip") => { me.gossip_off = !me.gossip_off; CmdOutput::text(format!("\r\nGossip channel: {}.\r\n", if me.gossip_off { "off" } else { "on" })) }
+        Some("noauction") => { me.auction_off = !me.auction_off; CmdOutput::text(format!("\r\nAuction channel: {}.\r\n", if me.auction_off { "off" } else { "on" })) }
         Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
         Some("whisper")   => do_whisper(rest, me, chars).await,
         Some("brief")     => do_brief(me),
@@ -1595,6 +1606,14 @@ async fn do_tell(
             "\r\n{canonical} is offline — your tell has been queued as mail.\r\n"
         ));
     };
+    // Respect the recipient's notell preference (immortals bypass).
+    if me.level < LVL_IMMORT {
+        let blocked = { p.character.lock().await.notell };
+        if blocked {
+            return CmdOutput::text(format!(
+                "\r\n{} is not receiving tells right now.\r\n", p.name));
+        }
+    }
     let _ = p.send.send(format!("{} tells you, '{msg}'\r\n", me.name));
     // Record who tell'd them so `reply` works; also grab the AFK msg
     // for an auto-reply (if any).
@@ -3147,6 +3166,104 @@ async fn do_gossip(
     }
     record_channel("gossip", &me.name, msg).await;
     CmdOutput::text(format!("\r\n@cYou gossip, '{spoken}'@n\r\n"))
+}
+
+/// `grats` — the congratulations channel.  Mirrors `do_gossip` but uses
+/// the grats toggle and a green envelope.
+async fn do_grats(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.muted { return muted_msg(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        me.grats_off = !me.grats_off;
+        return CmdOutput::text(format!(
+            "\r\nGrats channel: {}.\r\n",
+            if me.grats_off { "off" } else { "on" },
+        ));
+    }
+    if me.grats_off {
+        return CmdOutput::text("\r\nYou have the grats channel turned off.\r\n".to_string());
+    }
+    {
+        let w = world.lock().await;
+        if w.rooms.get(&me.current_room)
+            .map(|r| r.room_flags[0] & crate::world::ROOM_SOUNDPROOF != 0)
+            .unwrap_or(false)
+        {
+            return CmdOutput::text(
+                "\r\nThe walls dampen your voice.\r\n".to_string());
+        }
+    }
+    let formatted = format!("\r\n@g{} congrats: '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        if ph.character.lock().await.grats_off { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    record_channel("grats", &me.name, msg).await;
+    CmdOutput::text(format!("\r\n@gYou congrats, '{msg}'@n\r\n"))
+}
+
+/// `holler` — a global shout that costs movement points.  Mirrors stock
+/// `do_gen_comm` SCMD_HOLLER (reaches everyone, ignores soundproof for
+/// the listener side; costs the holler-er movement).
+async fn do_holler(
+    arg: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.muted { return muted_msg(); }
+    let msg = arg.trim();
+    if msg.is_empty() {
+        return CmdOutput::text("\r\nYell what?\r\n".to_string());
+    }
+    const HOLLER_COST: i32 = 20;
+    if me.level < LVL_IMMORT {
+        if me.movement < HOLLER_COST {
+            return CmdOutput::text("\r\nYou're too exhausted to holler.\r\n".to_string());
+        }
+        me.movement -= HOLLER_COST;
+    }
+    let formatted = format!("\r\n@Y{} hollers, '{msg}'@n\r\n", me.name);
+    let handles: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter().cloned().collect()
+    };
+    for ph in &handles {
+        if ph.id == me.id { continue; }
+        let _ = ph.send.send(formatted.clone());
+    }
+    CmdOutput::text(format!("\r\n@YYou holler, '{msg}'@n\r\n"))
+}
+
+/// `version` — display the MUD's identity/version banner.
+fn do_version() -> CmdOutput {
+    CmdOutput::text(
+        "\r\nTbaMUD (Rust rewrite, 'rwb') — a CircleMUD/DikuMUD derivative.\r\n"
+            .to_string())
+}
+
+/// `visible` — drop magical invisibility and any sneak/hide so others can
+/// see you again.  Mirrors stock `do_visible` for mortals.
+fn do_visible(me: &mut Character) -> CmdOutput {
+    me.hidden = false;
+    me.sneaking = false;
+    let had_invis = me.affects.iter()
+        .any(|a| a.skill == crate::character::Skill::Invisibility);
+    me.affects.retain(|a| a.skill != crate::character::Skill::Invisibility);
+    if had_invis {
+        CmdOutput::text("\r\nYou shimmer back into view.\r\n".to_string())
+    } else {
+        CmdOutput::text("\r\nYou step out of the shadows.\r\n".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -10380,6 +10497,14 @@ async fn cast_summon(
     };
     if ph.level > me.level + 5 {
         return CmdOutput::text(format!("\r\n{} resists the call.\r\n", ph.name));
+    }
+    // Respect the target's nosummon preference.
+    {
+        let blocked = { ph.character.lock().await.nosummon };
+        if blocked {
+            let _ = ph.send.send(format!("\r\n{} tried to summon you.\r\n", me.name));
+            return CmdOutput::text(format!("\r\n{} is protected from summon.\r\n", ph.name));
+        }
     }
     let to_room = me.current_room;
     let from_room = {
