@@ -85,6 +85,54 @@ const CLASS_MENU: &str = concat!(
     "   9) Rogue         10) Sorcerer     11) Warlock      12) Wizard\r\n",
 );
 
+/// Step-2 background menu for a class: the backgrounds whose abilities match
+/// the class's primary ability (PHB "Ability Scores and Backgrounds", p.36),
+/// numbered for selection.
+fn background_menu(class: Class) -> String {
+    let bgs = class.backgrounds();
+    let mut s = String::from(
+        "\r\nChoose a background (these suit your class's talents):\r\n");
+    for (i, b) in bgs.iter().enumerate() {
+        s.push_str(&format!("  {:>2}) {}\r\n", i + 1, b));
+    }
+    s.push_str("Background: ");
+    s
+}
+
+/// Step-2b starting-equipment menu: the background's option-A package vs
+/// option-B (gold). Text comes from `db::background_kit`.
+fn equipment_menu(bg: &str) -> String {
+    match crate::db::background_kit(bg) {
+        Some((a_desc, _items, _a_gold, b_gold)) => {
+            let b = if b_gold > 0 { format!("{b_gold} gold pieces") }
+                    else { "50 copper pieces".to_string() };
+            format!("\r\nChoose your starting equipment:\r\n  A) {a_desc}\r\n  B) {b}\r\nEquipment (A/B): ")
+        }
+        None => "\r\nEquipment (A/B): ".to_string(),
+    }
+}
+
+/// Step-2b ability-score-adjustment menu: the background's "+2 to one, +1 to
+/// another" option vs "+1 to all three" (PHB p.177). The specific abilities are
+/// derived from `players::background_ability_deltas` so they match what's
+/// actually applied at first login.
+fn ability_dist_menu(class: Class, bg: &str) -> String {
+    let names = &crate::players::ABILITY_NAMES;
+    // Render a delta array like "+2 Intelligence, +1 Constitution".
+    let describe = |d: [i32; 6]| -> String {
+        let parts: Vec<String> = (0..6)
+            .filter(|&i| d[i] != 0)
+            .map(|i| format!("+{} {}", d[i], names[i]))
+            .collect();
+        parts.join(", ")
+    };
+    let a = describe(crate::players::background_ability_deltas(class, bg, 1));
+    let b = describe(crate::players::background_ability_deltas(class, bg, 2));
+    format!(
+        "\r\nYour {bg} background can adjust your ability scores. Choose:\r\n  \
+         1) {a}\r\n  2) {b}\r\nAbility scores (1/2): ")
+}
+
 // ---------------------------------------------------------------------------
 // Login session state
 // ---------------------------------------------------------------------------
@@ -467,8 +515,92 @@ impl LoginSession {
                     p.class = class;
                 }
 
-                // Create the player in the DB and save
+                // Step 2: choose a background (filtered by the class's
+                // primary ability). Player creation is deferred until the
+                // background is picked (see ConnState::SelectBackground).
+                self.state = ConnState::SelectBackground;
+                LoginOutput::send(background_menu(class))
+            }
+
+            // ---------------------------------------------------------------
+            // Step 2 — background selection (no stock CON_* equivalent)
+            // ---------------------------------------------------------------
+            ConnState::SelectBackground => {
+                let class = self.player.as_ref().map(|p| p.class).unwrap_or_default();
+                let bgs = class.backgrounds();
+                let trimmed = input.trim();
+                // Accept a menu number or a case-insensitive name from the
+                // class-filtered list.
+                let chosen = trimmed.parse::<usize>().ok()
+                    .filter(|n| (1..=bgs.len()).contains(n))
+                    .map(|n| bgs[n - 1])
+                    .or_else(|| bgs.iter().copied()
+                        .find(|b| b.eq_ignore_ascii_case(trimmed)));
+                let bg = match chosen {
+                    Some(b) => b,
+                    None => {
+                        return LoginOutput::send(format!(
+                            "\r\nThat's not one of your background options.\r\n{}",
+                            background_menu(class)));
+                    }
+                };
+                if let Some(p) = &mut self.player {
+                    p.background = bg.to_string();
+                }
+
+                // Step 2b: choose the background's ability-score adjustment.
+                self.state = ConnState::SelectAbilityScores;
+                LoginOutput::send(ability_dist_menu(class, bg))
+            }
+
+            // ---------------------------------------------------------------
+            // Step 2b — background ability-score adjustment (+2/+1 or +1/+1/+1)
+            // ---------------------------------------------------------------
+            ConnState::SelectAbilityScores => {
+                let bg = self.player.as_ref()
+                    .map(|p| p.background.clone()).unwrap_or_default();
+                let class = self.player.as_ref().map(|p| p.class).unwrap_or_default();
+                let dist = match input.trim().chars().next() {
+                    Some('1') => 1,
+                    Some('2') => 2,
+                    _ => {
+                        return LoginOutput::send(format!(
+                            "\r\nPlease choose 1 or 2.\r\n{}", ability_dist_menu(class, &bg)));
+                    }
+                };
+                if let Some(p) = &mut self.player {
+                    p.ability_dist = dist;
+                }
+
+                // Step 2c: choose the background's starting-equipment set.
+                self.state = ConnState::SelectEquipment;
+                LoginOutput::send(equipment_menu(&bg))
+            }
+
+            // ---------------------------------------------------------------
+            // Step 2b — starting-equipment set (A or B); creates the player
+            // ---------------------------------------------------------------
+            ConnState::SelectEquipment => {
+                let bg = self.player.as_ref()
+                    .map(|p| p.background.clone()).unwrap_or_default();
+                let set = match input.trim().chars().next()
+                    .map(|c| c.to_ascii_uppercase())
+                {
+                    Some('A') => 1,
+                    Some('B') => 2,
+                    _ => {
+                        return LoginOutput::send(format!(
+                            "\r\nPlease choose A or B.\r\n{}", equipment_menu(&bg)));
+                    }
+                };
+                if let Some(p) = &mut self.player {
+                    p.start_kit = set;
+                }
+
+                // Create the player in the DB and save (now that class,
+                // background, and equipment set are all chosen).
                 let name = self.player_name.clone().unwrap_or_default();
+                let class = self.player.as_ref().map(|p| p.class).unwrap_or_default();
                 {
                     let mut players = players_arc.lock().await;
                     let id = players.create_entry(&name);
@@ -492,7 +624,8 @@ impl LoginSession {
                 }
 
                 self.level = self.player.as_ref().map(|p| p.level).unwrap_or(0);
-                tracing::info!(name = %name, class = ?class, "New player created");
+                tracing::info!(name = %name, class = ?class, background = %bg,
+                    kit = set, "New player created");
 
                 self.state = ConnState::ReadMotd;
                 LoginOutput::send(format!("{}\r\n*** PRESS RETURN: ", texts.motd))

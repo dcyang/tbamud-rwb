@@ -58,6 +58,56 @@ pub enum Class {
     Warlock = 11,
 }
 
+/// The 16 D&D 5e (2024) backgrounds and their three associated ability scores,
+/// as a STR,DEX,CON,INT,WIS,CHA flag mask.  Each background appears under
+/// exactly its three abilities in the PHB "Ability Scores and Backgrounds"
+/// table (logical p.36), which fully determines this mapping.
+pub const BACKGROUNDS: &[(&str, [bool; 6])] = &[
+    //               STR    DEX    CON    INT    WIS    CHA
+    ("Acolyte",     [false, false, false, true,  true,  true ]),
+    ("Artisan",     [true,  true,  false, true,  false, false]),
+    ("Charlatan",   [false, true,  true,  false, false, true ]),
+    ("Criminal",    [false, true,  true,  true,  false, false]),
+    ("Entertainer", [true,  true,  false, false, false, true ]),
+    ("Farmer",      [true,  false, true,  false, true,  false]),
+    ("Guard",       [true,  false, false, true,  true,  false]),
+    ("Guide",       [false, true,  true,  false, true,  false]),
+    ("Hermit",      [false, false, true,  false, true,  true ]),
+    ("Merchant",    [false, false, true,  true,  false, true ]),
+    ("Noble",       [true,  false, false, true,  false, true ]),
+    ("Sage",        [false, false, true,  true,  true,  false]),
+    ("Sailor",      [true,  true,  false, false, true,  false]),
+    ("Scribe",      [false, true,  false, true,  true,  false]),
+    ("Soldier",     [true,  true,  true,  false, false, false]),
+    ("Wayfarer",    [false, true,  false, false, true,  true ]),
+];
+
+/// The background ability-score adjustment as a STR,DEX,CON,INT,WIS,CHA delta
+/// array (PHB logical p.177).  `dist == 2` → "+1 to all three" of the
+/// background's abilities; otherwise (0/1) → "+2 to one, +1 to another": +2 to
+/// the background ability that overlaps the class's primary (guaranteed by the
+/// Step-2 menu filter), +1 to another of the three.  Used both to render the
+/// creation menu and to apply the bump at first login, so they always agree.
+pub fn background_ability_deltas(class: Class, bg: &str, dist: i32) -> [i32; 6] {
+    let mut d = [0i32; 6];
+    let Some((_n, abil)) = BACKGROUNDS.iter().find(|(n, _)| n.eq_ignore_ascii_case(bg))
+    else { return d; };
+    if dist == 2 {
+        for i in 0..6 { if abil[i] { d[i] = 1; } }
+    } else {
+        let primary = class.primary_abilities();
+        let plus2 = (0..6).find(|&i| abil[i] && primary[i]);
+        let plus1 = (0..6).find(|&i| abil[i] && Some(i) != plus2);
+        if let Some(i) = plus2 { d[i] += 2; }
+        if let Some(i) = plus1 { d[i] += 1; }
+    }
+    d
+}
+
+/// Full ability names in STR,DEX,CON,INT,WIS,CHA order (for menus/displays).
+pub const ABILITY_NAMES: [&str; 6] =
+    ["Strength", "Dexterity", "Constitution", "Intelligence", "Wisdom", "Charisma"];
+
 impl Class {
     pub fn from_i8(v: i8) -> Self {
         match v {
@@ -171,6 +221,39 @@ impl Class {
             Self::Wizard    => [ 8, 12, 13, 15, 14, 10],
             Self::Undefined => [13, 13, 13, 13, 13, 13],
         }
+    }
+
+    /// The class's primary ability/abilities (PHB Class Overview, logical
+    /// p.33) as a STR,DEX,CON,INT,WIS,CHA flag mask.  Drives the
+    /// background-choice filter at creation (Step 2).
+    pub fn primary_abilities(self) -> [bool; 6] {
+        //                     STR    DEX    CON    INT    WIS    CHA
+        match self {
+            Self::Barbarian => [true,  false, false, false, false, false], // STR
+            Self::Bard      => [false, false, false, false, false, true ], // CHA
+            Self::Cleric    => [false, false, false, false, true,  false], // WIS
+            Self::Druid     => [false, false, false, false, true,  false], // WIS
+            Self::Fighter   => [true,  true,  false, false, false, false], // STR or DEX
+            Self::Monk      => [false, true,  false, false, true,  false], // DEX & WIS
+            Self::Paladin   => [true,  false, false, false, false, true ], // STR & CHA
+            Self::Ranger    => [false, true,  false, false, true,  false], // DEX & WIS
+            Self::Rogue     => [false, true,  false, false, false, false], // DEX
+            Self::Sorcerer  => [false, false, false, false, false, true ], // CHA
+            Self::Warlock   => [false, false, false, false, false, true ], // CHA
+            Self::Wizard    => [false, false, false, true,  false, false], // INT
+            Self::Undefined => [false; 6],
+        }
+    }
+
+    /// Backgrounds whose ability set overlaps this class's primary ability
+    /// (or abilities) — the Step 2 menu, derived from the PHB "Ability Scores
+    /// and Backgrounds" table (logical p.36).  Returned in `BACKGROUNDS` order.
+    pub fn backgrounds(self) -> Vec<&'static str> {
+        let primary = self.primary_abilities();
+        BACKGROUNDS.iter()
+            .filter(|(_, abil)| (0..6).any(|i| primary[i] && abil[i]))
+            .map(|(name, _)| *name)
+            .collect()
     }
 
     /// Case-insensitive full-name or unambiguous-prefix match over the 12
@@ -329,6 +412,14 @@ pub struct PlayerRecord {
     pub last_login:    i64,
     /// Name of the deity the character worships (cosmetic, empty = none).
     pub god:           String,
+    /// D&D 5e background chosen at creation (cosmetic for now; empty = none).
+    pub background:    String,
+    /// Chosen starting-equipment set (0 = none/legacy, 1 = set A, 2 = set B).
+    /// Consumed once at first login to grant the background's gear.
+    pub start_kit:     i32,
+    /// Chosen background ability-score adjustment (PHB p.177): 0/1 = "+2 to
+    /// one, +1 to another"; 2 = "+1 to all three".  Applied once at first login.
+    pub ability_dist:  i32,
     pub muted:         bool,
     pub frozen:        bool,
 }
@@ -571,6 +662,9 @@ impl PlayerDb {
                 "Pose" => rec.pose = val.to_string(),
                 "LLog" => rec.last_login = val.parse().unwrap_or(0),
                 "God"  => rec.god  = val.to_string(),
+                "Bkgd" => rec.background = val.to_string(),
+                "SKit" => rec.start_kit = val.parse().unwrap_or(0),
+                "ADst" => rec.ability_dist = val.parse().unwrap_or(0),
                 "Mute" => rec.muted  = val.parse::<i32>().unwrap_or(0) != 0,
                 "Frzn" => rec.frozen = val.parse::<i32>().unwrap_or(0) != 0,
                 _ => {}
@@ -689,6 +783,9 @@ impl PlayerDb {
         if !rec.pose.is_empty() { writeln!(f, "Pose: {}", rec.pose)?; }
         if rec.last_login > 0   { writeln!(f, "LLog: {}", rec.last_login)?; }
         if !rec.god.is_empty()  { writeln!(f, "God : {}", rec.god)?; }
+        if !rec.background.is_empty() { writeln!(f, "Bkgd: {}", rec.background)?; }
+        if rec.start_kit != 0   { writeln!(f, "SKit: {}", rec.start_kit)?; }
+        if rec.ability_dist != 0 { writeln!(f, "ADst: {}", rec.ability_dist)?; }
         if rec.muted            { writeln!(f, "Mute: 1")?; }
         if rec.frozen           { writeln!(f, "Frzn: 1")?; }
 

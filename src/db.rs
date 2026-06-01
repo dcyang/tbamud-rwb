@@ -572,6 +572,69 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
 
 /// Vnums reserved for synthetic newbie-kit objects.  See
 /// `inject_newbie_kit_protos`.
+/// D&D 5e background starting-equipment kits (PHB Chapter 4, logical
+/// pp.178–185).  Maps a background name to its option-A description, the
+/// option-A item list `(obj_vnum, quantity)`, the option-A bonus gold, and the
+/// option-B gold.  Objects live in `lib/world/obj/{0,4}.obj`.  Option B is "50
+/// gold pieces" for every background except Guard (the PHB gives Guard 50 *copper*).
+#[allow(clippy::type_complexity)]
+pub fn background_kit(
+    name: &str,
+) -> Option<(&'static str, &'static [(crate::world::ObjVnum, i32)], i64, i64)> {
+    // vnums: dagger=120 (reused); the rest are 4.obj 404-457.
+    Some(match name {
+        "Acolyte" => (
+            "calligrapher's supplies, a book of prayers, a holy symbol, parchment, a robe, and 8 gold",
+            &[(445,1),(442,1),(432,1),(431,1),(426,1)], 8, 50),
+        "Artisan" => (
+            "a set of artisan's tools, 2 pouches, traveler's clothes, and 32 gold",
+            &[(446,1),(424,2),(428,1)], 32, 50),
+        "Charlatan" => (
+            "a forgery kit, a costume, fine clothes, and 15 gold",
+            &[(448,1),(430,1),(429,1)], 15, 50),
+        "Criminal" => (
+            "2 daggers, thieves' tools, a crowbar, 2 pouches, traveler's clothes, and 16 gold",
+            &[(120,2),(452,1),(441,1),(424,2),(428,1)], 16, 50),
+        "Entertainer" => (
+            "a musical instrument, 2 costumes, a mirror, perfume, traveler's clothes, and 11 gold",
+            &[(455,1),(430,2),(434,1),(435,1),(428,1)], 11, 50),
+        "Farmer" => (
+            "a sickle, carpenter's tools, a healer's kit, an iron pot, a shovel, traveler's clothes, and 30 gold",
+            &[(408,1),(449,1),(451,1),(444,1),(436,1),(428,1)], 30, 50),
+        "Guard" => (
+            "a spear, a light crossbow, 20 bolts, a gaming set, a hooded lantern, manacles, a quiver, traveler's clothes, and 12 gold",
+            &[(404,1),(412,1),(414,1),(456,1),(423,1),(438,1),(425,1),(428,1)], 12, 0),
+        "Guide" => (
+            "a shortbow, 20 arrows, cartographer's tools, a bedroll, a quiver, a tent, traveler's clothes, and 3 gold",
+            &[(413,1),(421,1),(453,1),(439,1),(425,1),(440,1),(428,1)], 3, 50),
+        "Hermit" => (
+            "a quarterstaff, an herbalism kit, a bedroll, a book of philosophy, a lamp, 3 flasks of oil, traveler's clothes, and 16 gold",
+            &[(405,1),(457,1),(439,1),(442,1),(422,1),(437,3),(428,1)], 16, 50),
+        "Merchant" => (
+            "navigator's tools, 2 pouches, traveler's clothes, and 22 gold",
+            &[(454,1),(424,2),(428,1)], 22, 50),
+        "Noble" => (
+            "a gaming set, fine clothes, perfume, and 29 gold",
+            &[(456,1),(429,1),(435,1)], 29, 50),
+        "Sage" => (
+            "a quarterstaff, calligrapher's supplies, a book of history, parchment, a robe, and 8 gold",
+            &[(405,1),(445,1),(442,1),(431,1),(426,1)], 8, 50),
+        "Sailor" => (
+            "a dagger, navigator's tools, a coil of rope, traveler's clothes, and 20 gold",
+            &[(120,1),(454,1),(443,1),(428,1)], 20, 50),
+        "Scribe" => (
+            "calligrapher's supplies, fine clothes, a lamp, 3 flasks of oil, parchment, and 23 gold",
+            &[(445,1),(429,1),(422,1),(437,3),(431,1)], 23, 50),
+        "Soldier" => (
+            "a spear, a shortbow, 20 arrows, a gaming set, a healer's kit, a quiver, traveler's clothes, and 14 gold",
+            &[(404,1),(413,1),(421,1),(456,1),(451,1),(425,1),(428,1)], 14, 50),
+        "Wayfarer" => (
+            "2 daggers, thieves' tools, a gaming set, a bedroll, 2 pouches, traveler's clothes, and 16 gold",
+            &[(120,2),(452,1),(456,1),(439,1),(424,2),(428,1)], 16, 50),
+        _ => return None,
+    })
+}
+
 pub const NEWBIE_WEAPON_VNUM:  crate::world::ObjVnum = 99001;
 pub const NEWBIE_ARMOR_VNUM:   crate::world::ObjVnum = 99002;
 pub const NEWBIE_LIGHT_VNUM:   crate::world::ObjVnum = 99003;

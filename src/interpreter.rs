@@ -4579,6 +4579,7 @@ async fn do_reload(
         c.alignment = rec.alignment;
         c.title    = rec.title.clone();
         c.god      = rec.god.clone();
+        c.background = rec.background.clone();
         c.practices = rec.practices;
         c.bank_gold = rec.bank_gold;
         c.rent_per_day = rec.rent_per_day;
@@ -5174,6 +5175,8 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
     };
     let god_line = if me.god.is_empty() { String::new() }
                    else { format!("God:   {}\r\n", me.god) };
+    let bkgd_line = if me.background.is_empty() { String::new() }
+                    else { format!("Bkgd:  {}\r\n", me.background) };
     let clan_line = if me.clan.is_empty() { String::new() }
                     else { format!("Clan:  {}\r\n", me.clan) };
     let pvp_line = if me.pkills + me.pdeaths > 0 {
@@ -5206,7 +5209,7 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         } else { String::new() }
     };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{bkgd_line}{clan_line}{pvp_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n{spell_line}",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -14567,6 +14570,7 @@ pub async fn save_character_to_db(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64).unwrap_or(r.last_login);
     r.god             = me.god.clone();
+    r.background      = me.background.clone();
     r.muted           = me.muted;
     r.frozen          = me.frozen;
     r.notes           = me.notes.clone();
@@ -14631,6 +14635,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64).unwrap_or(r.last_login);
             r.god             = me.god.clone();
+            r.background      = me.background.clone();
             r.muted           = me.muted;
             r.frozen          = me.frozen;
             r.notes           = me.notes.clone();

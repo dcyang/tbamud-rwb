@@ -982,6 +982,9 @@ pub struct Character {
     /// Name of the deity this character worships (empty for none).
     /// Persisted.  Cosmetic only at the moment.
     pub god:          String,
+    /// D&D 5e background chosen at creation (Step 2).  Persisted; cosmetic for
+    /// now (no ability/feat/skill mechanics attached yet).
+    pub background:   String,
     /// Muted: cannot use chat channels (say/tell/gossip/auction/...).
     /// Set by `mute` immortal command.  Persisted.
     pub muted:        bool,

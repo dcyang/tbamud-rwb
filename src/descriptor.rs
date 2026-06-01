@@ -45,6 +45,13 @@ pub enum ConnState {
     SelectSex,
     /// Choosing character class (CON_QCLASS)
     SelectClass,
+    /// Choosing a D&D background, filtered by the class's primary ability
+    /// (Step 2 of character creation; no stock CON_* equivalent).
+    SelectBackground,
+    /// Choosing the background ability-score adjustment (+2/+1 or +1/+1/+1).
+    SelectAbilityScores,
+    /// Choosing the background's starting-equipment set (A or B).
+    SelectEquipment,
     /// Waiting for Return after MOTD (CON_RMOTD)
     ReadMotd,
     /// At the main menu (CON_MENU)
@@ -369,6 +376,7 @@ pub async fn handle_connection(
                     invis_level:      0,
                     nohassle:         session.level >= 34,   // immortals ignored by aggro mobs (cp202)
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
+                    background:       p_ref.map(|p| p.background.clone()).unwrap_or_default(),
                     muted:            p_ref.map(|p| p.muted).unwrap_or(false),
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
                     afk_msg:          None,
@@ -387,6 +395,19 @@ pub async fn handle_connection(
                     let arr = me.class.standard_array(); // STR,DEX,CON,INT,WIS,CHA
                     me.str_ = arr[0]; me.dex = arr[1]; me.con = arr[2];
                     me.int_ = arr[3]; me.wis = arr[4]; me.cha = arr[5];
+                    // PHB background ability-score adjustment (logical p.177),
+                    // using the player's chosen distribution (+2/+1 or +1/+1/+1).
+                    {
+                        let dist = p_ref.map(|p| p.ability_dist).unwrap_or(0);
+                        let d = crate::players::background_ability_deltas(
+                            me.class, &me.background, dist);
+                        me.str_ = (me.str_ + d[0]).min(20);
+                        me.dex  = (me.dex  + d[1]).min(20);
+                        me.con  = (me.con  + d[2]).min(20);
+                        me.int_ = (me.int_ + d[3]).min(20);
+                        me.wis  = (me.wis  + d[4]).min(20);
+                        me.cha  = (me.cha  + d[5]).min(20);
+                    }
                     // Recompute HP/mana from the freshly-assigned scores so
                     // the level-1 pools reflect the standard array's Con/casting
                     // stat rather than the throwaway 3d6 rolled above.
@@ -476,28 +497,50 @@ pub async fn handle_connection(
                         && me.equipment.iter().all(|s| s.is_none());
                     if fresh && nothing {
                         let mut w = world.lock().await;
-                        let kit: &[crate::world::ObjVnum] = match me.class.base() {
-                            crate::players::Class::Fighter =>
-                                &[crate::db::NEWBIE_WEAPON_VNUM,
-                                  crate::db::NEWBIE_ARMOR_VNUM,
-                                  crate::db::NEWBIE_LIGHT_VNUM,
-                                  crate::db::NEWBIE_BREAD_VNUM],
-                            crate::players::Class::Cleric |
-                            crate::players::Class::Wizard =>
-                                &[crate::db::NEWBIE_ARMOR_VNUM,
-                                  crate::db::NEWBIE_LIGHT_VNUM,
-                                  crate::db::NEWBIE_BREAD_VNUM],
-                            crate::players::Class::Rogue =>
-                                &[crate::db::NEWBIE_WEAPON_VNUM,
-                                  crate::db::NEWBIE_LIGHT_VNUM,
-                                  crate::db::NEWBIE_BREAD_VNUM],
-                            _ =>
-                                &[crate::db::NEWBIE_LIGHT_VNUM,
-                                  crate::db::NEWBIE_BREAD_VNUM],
-                        };
-                        for &vnum in kit {
-                            if let Some(iid) = w.spawn_obj(vnum) {
-                                me.inventory.push(iid);
+                        let start_kit = p_ref.map(|p| p.start_kit).unwrap_or(0);
+                        if !me.background.is_empty() && start_kit != 0 {
+                            // D&D background starting equipment (Step 2b choice).
+                            if let Some((_d, items, a_gold, b_gold)) =
+                                crate::db::background_kit(&me.background)
+                            {
+                                if start_kit == 1 {
+                                    for &(vnum, qty) in items {
+                                        for _ in 0..qty {
+                                            if let Some(iid) = w.spawn_obj(vnum) {
+                                                me.inventory.push(iid);
+                                            }
+                                        }
+                                    }
+                                    me.gold += a_gold;
+                                } else {
+                                    me.gold += b_gold;
+                                }
+                            }
+                        } else {
+                            // Legacy newbie kit (no background chosen).
+                            let kit: &[crate::world::ObjVnum] = match me.class.base() {
+                                crate::players::Class::Fighter =>
+                                    &[crate::db::NEWBIE_WEAPON_VNUM,
+                                      crate::db::NEWBIE_ARMOR_VNUM,
+                                      crate::db::NEWBIE_LIGHT_VNUM,
+                                      crate::db::NEWBIE_BREAD_VNUM],
+                                crate::players::Class::Cleric |
+                                crate::players::Class::Wizard =>
+                                    &[crate::db::NEWBIE_ARMOR_VNUM,
+                                      crate::db::NEWBIE_LIGHT_VNUM,
+                                      crate::db::NEWBIE_BREAD_VNUM],
+                                crate::players::Class::Rogue =>
+                                    &[crate::db::NEWBIE_WEAPON_VNUM,
+                                      crate::db::NEWBIE_LIGHT_VNUM,
+                                      crate::db::NEWBIE_BREAD_VNUM],
+                                _ =>
+                                    &[crate::db::NEWBIE_LIGHT_VNUM,
+                                      crate::db::NEWBIE_BREAD_VNUM],
+                            };
+                            for &vnum in kit {
+                                if let Some(iid) = w.spawn_obj(vnum) {
+                                    me.inventory.push(iid);
+                                }
                             }
                         }
                     }
@@ -762,6 +805,7 @@ async fn run_game_session(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64).unwrap_or(rec.last_login);
             rec.god             = me.god.clone();
+            rec.background      = me.background.clone();
             rec.muted           = me.muted;
             rec.frozen          = me.frozen;
             rec.notes           = me.notes.clone();

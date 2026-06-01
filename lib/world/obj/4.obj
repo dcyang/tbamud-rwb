@@ -298,4 +298,472 @@ stone well~
    This basic stone well appears reasonably well maintained, a simple wooden
 bucket allowing water to be drawn from it.
 ~
+#404
+spear~
+a spear~
+A slender spear lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 11
+3 1 0 0 0
+E
+spear~
+   A simple spear with a leaf-shaped head, balanced for thrusting or throwing.
+~
+#405
+quarterstaff staff~
+a quarterstaff~
+A sturdy quarterstaff rests against the wall.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 7
+4 1 0 0 0
+E
+quarterstaff staff~
+   A long, hardwood staff worn smooth by years of travel and practice.
+~
+#408
+sickle~
+a sickle~
+A curved sickle lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 4 3
+2 1 0 0 0
+E
+sickle~
+   A short, curved blade used to harvest grain -- and, at need, to draw blood.
+~
+#412
+crossbow light~
+a light crossbow~
+A light crossbow lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 8 11
+5 25 0 0 0
+E
+crossbow light~
+   A compact crossbow that a single person can load and fire with ease.
+~
+#413
+shortbow short bow~
+a shortbow~
+A shortbow lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 11
+2 25 0 0 0
+E
+shortbow short bow~
+   A short, recurved bow of horn and wood, quick to draw and light to carry.
+~
+#414
+bolts case crossbow~
+a case of crossbow bolts~
+A case of crossbow bolts lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 1 0 0 0
+E
+bolts case crossbow~
+   A wooden case holding twenty iron-tipped crossbow bolts.
+~
+#421
+arrows quiver bundle~
+a bundle of arrows~
+A bundle of arrows lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 1 0 0 0
+E
+arrows quiver bundle~
+   Twenty straight arrows, fletched with grey goose feathers.
+~
+#422
+lamp~
+a lamp~
+A small oil lamp sits here.~
+~
+1 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 48 0
+1 1 0 0 0
+E
+lamp~
+   A simple oil lamp that casts a steady, warm light when lit and fuelled.
+~
+#423
+lantern hooded~
+a hooded lantern~
+A hooded lantern rests here.~
+~
+1 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 48 0
+2 5 0 0 0
+E
+lantern hooded~
+   A lantern with a sliding hood that can shutter its light at a moment's notice.
+~
+#424
+pouch~
+a pouch~
+A small leather pouch lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 1 0 0 0
+E
+pouch~
+   A drawstring pouch of soft leather for coins and oddments.
+~
+#425
+quiver~
+a quiver~
+A leather quiver lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 1 0 0 0
+E
+quiver~
+   A leather quiver, slung over the shoulder to carry arrows or bolts.
+~
+#426
+robe~
+a robe~
+A plain robe lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+4 1 0 0 0
+E
+robe~
+   A simple cloth robe of the kind worn by acolytes and scholars.
+~
+#428
+clothes travelers traveler~
+a set of traveler's clothes~
+A set of traveler's clothes lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+4 2 0 0 0
+E
+clothes travelers traveler~
+   Resilient, weatherproof garments designed for the road.
+~
+#429
+clothes fine~
+a set of fine clothes~
+A set of fine clothes lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+6 15 0 0 0
+E
+clothes fine~
+   Expensive fabrics and expert tailoring, fit for a noble's court.
+~
+#430
+costume~
+a costume~
+A theatrical costume lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+4 5 0 0 0
+E
+costume~
+   A flamboyant costume suited to performances and disguises alike.
+~
+#431
+parchment sheets~
+some sheets of parchment~
+Some sheets of parchment lie here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+0 1 0 0 0
+E
+parchment sheets~
+   Clean sheets of prepared parchment, ready for ink.
+~
+#432
+holy symbol~
+a holy symbol~
+A holy symbol lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 5 0 0 0
+E
+holy symbol~
+   An emblem of a deity, used by the faithful to focus prayer and divine magic.
+~
+#434
+mirror~
+a mirror~
+A small mirror lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 5 0 0 0
+E
+mirror~
+   A small polished steel mirror in a wooden frame.
+~
+#435
+perfume vial~
+a vial of perfume~
+A vial of perfume lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+0 5 0 0 0
+E
+perfume vial~
+   A slender glass vial of sweet, costly perfume.
+~
+#436
+shovel~
+a shovel~
+A shovel lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 2 0 0 0
+E
+shovel~
+   A sturdy iron-bladed shovel with a worn wooden handle.
+~
+#437
+oil flask~
+a flask of oil~
+A flask of oil lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 1 0 0 0
+E
+oil flask~
+   A sealed flask of lamp oil, enough to fuel a lantern for hours.
+~
+#438
+manacles~
+a pair of manacles~
+A pair of iron manacles lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+6 2 0 0 0
+E
+manacles~
+   Heavy iron manacles with a sturdy lock, for restraining prisoners.
+~
+#439
+bedroll~
+a bedroll~
+A rolled bedroll lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+7 1 0 0 0
+E
+bedroll~
+   A padded bedroll and blanket, rolled tight for travel.
+~
+#440
+tent~
+a tent~
+A folded tent lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+20 2 0 0 0
+E
+tent~
+   A simple two-person canvas tent with poles and stakes.
+~
+#441
+crowbar~
+a crowbar~
+An iron crowbar lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 2 0 0 0
+E
+crowbar~
+   A solid iron crowbar, useful for prying open doors and crates.
+~
+#442
+book~
+a book~
+A leather-bound book lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 25 0 0 0
+E
+book~
+   A thick, leather-bound book filled with closely written pages.
+~
+#443
+rope hempen~
+a coil of rope~
+A coil of hempen rope lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 1 0 0 0
+E
+rope hempen~
+   Fifty feet of sturdy hempen rope, coiled and ready.
+~
+#444
+pot iron~
+an iron pot~
+An iron cooking pot sits here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+10 2 0 0 0
+E
+pot iron~
+   A heavy iron pot for cooking over a campfire.
+~
+#445
+supplies calligraphers calligrapher~
+calligrapher's supplies~
+A set of calligrapher's supplies lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 10 0 0 0
+E
+supplies calligraphers calligrapher~
+   Ink, several quills, and parchment for writing with impressive flourishes.
+~
+#446
+tools artisans artisan~
+a set of artisan's tools~
+A set of artisan's tools lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 15 0 0 0
+E
+tools artisans artisan~
+   A specialized kit of tools for plying a skilled craft or trade.
+~
+#448
+kit forgery~
+a forgery kit~
+A forgery kit lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+5 15 0 0 0
+E
+kit forgery~
+   Inks, parchments, and seals for mimicking handwriting and faking documents.
+~
+#449
+tools carpenters carpenter~
+a set of carpenter's tools~
+A set of carpenter's tools lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+6 8 0 0 0
+E
+tools carpenters carpenter~
+   Saw, hammer, chisels, and nails for working wood.
+~
+#451
+kit healers healer healing~
+a healer's kit~
+A healer's kit lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+3 5 0 0 0
+E
+kit healers healer healing~
+   Bandages, salves, and splints for tending wounds in the field.
+~
+#452
+tools thieves thieve picks~
+a set of thieves' tools~
+A set of thieves' tools lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 25 0 0 0
+E
+tools thieves thieve picks~
+   Lockpicks and fine probes for opening locks and disarming traps.
+~
+#453
+tools cartographers cartographer~
+a set of cartographer's tools~
+A set of cartographer's tools lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+6 15 0 0 0
+E
+tools cartographers cartographer~
+   Compasses, quills, and rulers for drawing accurate maps.
+~
+#454
+tools navigators navigator~
+a set of navigator's tools~
+A set of navigator's tools lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+2 25 0 0 0
+E
+tools navigators navigator~
+   A sextant, charts, and compass for plotting a course by sea or stars.
+~
+#455
+instrument musical lute~
+a musical instrument~
+A musical instrument lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+2 30 0 0 0
+E
+instrument musical lute~
+   A finely made instrument, well suited to entertaining a crowd.
+~
+#456
+set gaming dice~
+a gaming set~
+A gaming set lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+0 1 0 0 0
+E
+set gaming dice~
+   A set of dice and cards for games of chance and skill.
+~
+#457
+kit herbalism herbalist~
+an herbalism kit~
+An herbalism kit lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+3 5 0 0 0
+E
+kit herbalism herbalist~
+   Pouches, vials, and clippers for preparing herbal remedies.
+~
 $~
