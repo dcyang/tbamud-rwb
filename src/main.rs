@@ -93,14 +93,32 @@ fn parse_args() -> Result<Config> {
 async fn main() -> Result<()> {
     let config = parse_args()?;
 
-    // Initialise structured logging to stderr.
+    // Initialise structured logging.
     // RUST_LOG env var overrides the default "info" level.
-    // Mirrors comm.c's setup_log() / open_logfile().
-    // TODO: redirect to config.logfile when set.
-    fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
-        .with_target(false)
-        .init();
+    // Mirrors comm.c's setup_log() / open_logfile().  The -o flag
+    // (config.logfile) redirects output to a file instead of stderr.
+    let env_filter = EnvFilter::from_default_env().add_directive("info".parse()?);
+    match &config.logfile {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("Failed to open log file {path}: {e}"))?;
+            fmt()
+                .with_env_filter(env_filter)
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+        None => {
+            fmt()
+                .with_env_filter(env_filter)
+                .with_target(false)
+                .init();
+        }
+    }
 
     tracing::info!(
         "tbaMUD-rwb starting (port={}, dir={})",
@@ -109,10 +127,25 @@ async fn main() -> Result<()> {
     );
 
     if config.syntax_check {
-        // -c mode: boot world data, report errors, exit.
-        // Deferred until db.rs is ported.
-        tracing::info!("Syntax-check mode requested (not yet implemented — exiting)");
-        return Ok(());
+        // -c mode: parse and load the world data, report the result, and
+        // exit without entering the game loop (mirrors `scheck` in comm.c).
+        tracing::info!("Syntax-check mode (-c): loading world data...");
+        match db::load_world(&config.dir, config.mini_mud) {
+            Ok(world) => {
+                tracing::info!(
+                    zones = world.zones.len(),
+                    rooms = world.rooms.len(),
+                    objs  = world.obj_protos.len(),
+                    mobs  = world.mob_protos.len(),
+                    "Syntax check passed -- world data loaded cleanly."
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::error!("Syntax check FAILED: {e:#}");
+                std::process::exit(1);
+            }
+        }
     }
 
     server::run(config).await

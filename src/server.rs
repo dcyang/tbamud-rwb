@@ -37,6 +37,13 @@ pub async fn run(config: Config) -> Result<()> {
         info!("Restricted mode: new-character creation disabled (-r)");
     }
 
+    // Honor the -s "suppress specials" flag.  Must be set before the world
+    // loads, since zone resets assign specs during load_world below.
+    if config.no_specials {
+        crate::world::NO_SPECIALS.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!("Special procedures suppressed (-s)");
+    }
+
     // --- Load greeting -------------------------------------------------------
     let greetings_path = format!("{}/text/greetings", config.dir);
     let greeting = Arc::new(

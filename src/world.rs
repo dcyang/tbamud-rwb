@@ -567,10 +567,22 @@ pub enum MobSpec {
     Thief,
 }
 
+/// When true, special procedures are not assigned to mobs (the `-s`
+/// "suppress specials" boot flag, mirroring `no_specials` in comm.c).
+/// Set once at boot in `server::run`; read by `MobSpec::for_vnum`, which
+/// is the single choke point every spawn site funnels through — so a
+/// suppressed mob gets `spec: None` and neither the spec tick nor the
+/// combat-driven spec behaviors (snake venom, cityguard, etc.) fire.
+pub static NO_SPECIALS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 impl MobSpec {
     /// Hard-coded vnum → spec table.  Matches the stock CircleMUD
     /// spec_assign for these canonical vnums.
     pub fn for_vnum(vnum: MobVnum) -> Option<MobSpec> {
+        if NO_SPECIALS.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
         match vnum {
             1  => Some(MobSpec::Puff),       // The dragon Puff
             11 => Some(MobSpec::Fido),

@@ -72,17 +72,16 @@ list. These are fully wired today:
 | `-d <dir>`  | Data directory to read `lib/` data from                      | `lib`   |
 | `-r`        | Restrict — disallow new-character creation                   | off     |
 | `-m`        | Mini-MUD mode — load the minimal world (`index.mini`)        | off     |
+| `-s`        | Suppress special procedures (mob spec_procs)                 | off     |
+| `-o <file>` | Write the log to `<file>` instead of stderr                  | stderr  |
+| `-c`        | Syntax-check: load the world data, report, and exit          | off     |
 
-The remaining upstream flags are **accepted on the command line but not yet
-functional** — they are parsed for CLI compatibility and reserved for parity,
-but currently have no effect on the running server:
+The one remaining upstream flag is **accepted on the command line but has no
+effect** — it is parsed for CLI compatibility only:
 
-| Flag        | Intended meaning                          | Status                          |
-|-------------|-------------------------------------------|---------------------------------|
-| `-o <file>` | Write the log to a file instead of stderr | not wired (logs go to stderr)   |
-| `-s`        | Suppress special procedures (spec_procs)  | not wired                       |
-| `-q`        | Quick boot (skip rent checks)             | not wired                       |
-| `-c`        | Syntax-check the world data and exit      | exits immediately; no check yet |
+| Flag        | Intended meaning                          | Status                                  |
+|-------------|-------------------------------------------|-----------------------------------------|
+| `-q`        | Quick boot (skip rent checks)             | no-op — this port has no rent system    |
 
 For example, to boot a second instance on another port with its own data
 directory:
