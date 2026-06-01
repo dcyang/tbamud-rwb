@@ -129,27 +129,6 @@ impl Class {
         ]
     }
 
-    /// The class's primary ability/abilities (PHB p.33 Class Overview), as
-    /// stat keys ("str"/"dex"/"con"/"int"/"wis"/"cha").  Used to bias a fresh
-    /// character's rolled scores so class choice matters at creation.
-    pub fn primary_abilities(self) -> &'static [&'static str] {
-        match self {
-            Self::Barbarian => &["str"],
-            Self::Bard      => &["cha"],
-            Self::Cleric    => &["wis"],
-            Self::Druid     => &["wis"],
-            Self::Fighter   => &["str"],          // "Strength or Dexterity"
-            Self::Monk      => &["dex", "wis"],
-            Self::Paladin   => &["str", "cha"],
-            Self::Ranger    => &["dex", "wis"],
-            Self::Rogue     => &["dex"],
-            Self::Sorcerer  => &["cha"],
-            Self::Warlock   => &["cha"],
-            Self::Wizard    => &["int"],
-            Self::Undefined => &[],
-        }
-    }
-
     /// Saving-throw proficiencies (PHB) as flags in STR,DEX,CON,INT,WIS,CHA
     /// order.  Each class is proficient in exactly two saving throws.
     pub fn save_proficiencies(self) -> [bool; 6] {
@@ -168,6 +147,29 @@ impl Class {
             Self::Warlock   => [false, false, false, false, true,  true ], // WIS, CHA
             Self::Wizard    => [false, false, false, true,  true,  false], // INT, WIS
             Self::Undefined => [false; 6],
+        }
+    }
+
+    /// The PHB "Standard Array by Class" (logical p.38) in STR,DEX,CON,INT,
+    /// WIS,CHA order — the suggested 15/14/13/12/10/8 spread assigned to each
+    /// class's key abilities.  Used to seed a fresh character's scores so class
+    /// choice matches the book at creation.
+    pub fn standard_array(self) -> [i32; 6] {
+        //                     STR DEX CON INT WIS CHA
+        match self {
+            Self::Barbarian => [15, 13, 14, 10, 12,  8],
+            Self::Bard      => [ 8, 14, 12, 13, 10, 15],
+            Self::Cleric    => [14,  8, 13, 10, 15, 12],
+            Self::Druid     => [ 8, 12, 14, 13, 15, 10],
+            Self::Fighter   => [15, 14, 13,  8, 10, 12],
+            Self::Monk      => [12, 15, 13, 10, 14,  8],
+            Self::Paladin   => [15, 10, 13,  8, 12, 14],
+            Self::Ranger    => [12, 15, 13,  8, 14, 10],
+            Self::Rogue     => [12, 15, 13, 14, 10,  8],
+            Self::Sorcerer  => [10, 13, 14,  8, 12, 15],
+            Self::Warlock   => [ 8, 14, 13, 12, 10, 15],
+            Self::Wizard    => [ 8, 12, 13, 15, 14, 10],
+            Self::Undefined => [13, 13, 13, 13, 13, 13],
         }
     }
 

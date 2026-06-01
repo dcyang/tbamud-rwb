@@ -378,24 +378,27 @@ pub async fn handle_connection(
                     ability_cooldowns: std::collections::HashMap::new(),
                 };
 
-                // Bias a brand-new mortal's rolled scores toward their class's
-                // primary ability (PHB p.33), so class choice matters at
-                // creation.  Only on a fresh character (no saved scores).
+                // Seed a brand-new mortal's ability scores from the PHB
+                // "Standard Array by Class" (logical p.38), so class choice
+                // matches the book at creation.  Only on a fresh character
+                // (no saved scores); immortals keep their rolled scores.
                 let fresh_abilities = p_ref.map(|p| p.str_).unwrap_or(0) <= 0;
                 if fresh_abilities && me.level < 34 {
-                    // +4 with a floor of 14 (and 18 cap) — the primary always
-                    // ends up a solid score so class identity is clear.
-                    for prim in me.class.primary_abilities() {
-                        match *prim {
-                            "str" => me.str_ = (me.str_ + 4).clamp(14, 18),
-                            "int" => me.int_ = (me.int_ + 4).clamp(14, 18),
-                            "wis" => me.wis  = (me.wis  + 4).clamp(14, 18),
-                            "dex" => me.dex  = (me.dex  + 4).clamp(14, 18),
-                            "con" => me.con  = (me.con  + 4).clamp(14, 18),
-                            "cha" => me.cha  = (me.cha  + 4).clamp(14, 18),
-                            _ => {}
-                        }
-                    }
+                    let arr = me.class.standard_array(); // STR,DEX,CON,INT,WIS,CHA
+                    me.str_ = arr[0]; me.dex = arr[1]; me.con = arr[2];
+                    me.int_ = arr[3]; me.wis = arr[4]; me.cha = arr[5];
+                    // Recompute HP/mana from the freshly-assigned scores so
+                    // the level-1 pools reflect the standard array's Con/casting
+                    // stat rather than the throwaway 3d6 rolled above.
+                    me.max_hp = Character::init_hp_for_class(me.class, me.con, me.level.max(1));
+                    me.hp = me.max_hp;
+                    let cast_stat = if me.class.base() == crate::players::Class::Cleric {
+                        me.wis
+                    } else {
+                        me.int_
+                    };
+                    me.max_mana = Character::init_mana_for_class(me.class, cast_stat, me.level.max(1));
+                    me.mana = me.max_mana;
                 }
 
                 // Settle any pending level-ups (e.g. character was offline

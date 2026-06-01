@@ -1143,9 +1143,11 @@ impl Character {
         }
     }
 
-    /// D&D proficiency bonus: +2 at level 1, +1 every 4 levels, capped at +6.
+    /// D&D proficiency bonus: +2 at level 1, +1 every 4 levels. The PHB only
+    /// defines this through level 20 (+6); we continue the same pattern across
+    /// the 30-level mortal range (+7 at 21–24, +8 at 25–28, +9 at 29–30).
     pub fn proficiency_bonus(&self) -> i32 {
-        (2 + (self.level - 1) / 4).clamp(2, 6)
+        (2 + (self.level - 1) / 4).max(2)
     }
 
     /// Whether this character's class is proficient in `a` saving throws.

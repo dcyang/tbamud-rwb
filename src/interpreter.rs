@@ -5191,9 +5191,23 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         let mark = if me.is_save_proficient(a) { "*" } else { "" };
         format!("{} {:+}{}", a.abbr(), v, mark)
     }).collect::<Vec<_>>().join("  ");
+    // Spell save DC / attack bonus (D&D `8 + prof + mod` / `prof + mod`),
+    // shown only for the full-caster classes (Cleric/Wizard lines). The
+    // casting ability is WIS for the Cleric line, INT for the Wizard line.
+    let spell_line = {
+        use crate::players::Class;
+        let base = me.class.base();
+        if matches!(base, Class::Cleric | Class::Wizard) {
+            let cast_mod = crate::character::ability_modifier(
+                if base == Class::Cleric { me.wis } else { me.int_ });
+            let dc  = 8 + me.proficiency_bonus() + cast_mod;
+            let atk = me.proficiency_bonus() + cast_mod;
+            format!("Spell: save DC {dc}, attack {atk:+}\r\n")
+        } else { String::new() }
+    };
     let s = format!(
         "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
-         Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n",
+         Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n{spell_line}",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
