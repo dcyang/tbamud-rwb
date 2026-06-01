@@ -85,7 +85,8 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "junk", "donate", "sacrifice", "sac", "put", "give", "wield", "wear", "remove",
+    "get", "drop", "junk", "donate", "sacrifice", "sac", "butcher", "cook", "forage", "fish",
+    "recipes", "craft", "put", "give", "wield", "wear", "remove",
     "examine", "compare",
     "list", "buy", "sell", "appraise", "value",
     "kick", "bash", "backstab", "berserk", "taunt", "peek", "rescue", "disarm", "recover", "consider", "con",
@@ -293,6 +294,12 @@ pub async fn dispatch_command(
         Some("junk")      => do_junk(rest, me, world, chars).await,
         Some("donate")    => do_donate(rest, me, world, chars).await,
         Some("sacrifice") | Some("sac") => do_sacrifice(rest, me, world, chars).await,
+        Some("butcher")   => do_butcher(rest, me, world, chars).await,
+        Some("cook")      => do_cook(rest, me, world, chars).await,
+        Some("forage")    => do_forage(me, world, chars).await,
+        Some("fish")      => do_fish(me, world, chars).await,
+        Some("recipes")   => do_recipes(world).await,
+        Some("craft")     => do_craft(rest, me, world, chars).await,
         Some("put")       => do_put(rest, me, world, chars).await,
         Some("say")       => do_say_with_triggers(rest, me, chars, world).await,
         Some("tell")      => do_tell(rest, me, chars, players).await,
@@ -1333,6 +1340,329 @@ async fn do_sacrifice(
     CmdOutput::text(format!(
         "\r\nYou offer {short} to {deity}, and receive {reward} gold for your devotion.\r\n"
     ))
+}
+
+/// `butcher <corpse>` (cp226): carve a corpse on the floor into a hunk of
+/// raw meat (ITEM_FOOD).  Requires a wielded weapon (a blade).  Any items
+/// the corpse held spill onto the floor via `extract_obj`.  Ties corpses
+/// (cp10/93) into the food/hunger system (cp43).
+async fn do_butcher(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.equipment[crate::character::WEAR_WIELD].is_none() {
+        return CmdOutput::text("\r\nYou need to wield a blade to butcher a corpse.\r\n".to_string());
+    }
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nButcher what?\r\n".to_string());
+    }
+    // Find a matching corpse on the room floor.
+    let (iid, short) = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let mut hit = None;
+        for &iid in &r.objects {
+            if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if obj.corpse_of.is_some() && obj_matches_keyword(&w, obj, &kw) {
+                    hit = Some((iid, obj_view(&w, obj).short));
+                    break;
+                }
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(format!("\r\nThere is no corpse called '{kw}' here.\r\n")),
+        }
+    };
+    // Extract the corpse (spilling its contents to the floor) and spawn meat
+    // into the butcher's inventory.
+    let meat_short = {
+        let mut w = world.lock().await;
+        w.extract_obj(iid);
+        if let Some(miid) = w.spawn_obj(crate::db::MEAT_VNUM) {
+            me.inventory.push(miid);
+            w.obj_protos.get(&crate::db::MEAT_VNUM)
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "a hunk of raw meat".to_string())
+        } else {
+            "a hunk of raw meat".to_string()
+        }
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} carves {short} into pieces.\r\n", me.name));
+    }
+    CmdOutput::text(format!(
+        "\r\nYou butcher {short}, carving out {meat_short}.\r\n"
+    ))
+}
+
+/// `cook <food>` (cp227): cook a hunk of raw meat into a more filling
+/// cooked steak.  Requires a lit fire nearby — any lit ITEM_LIGHT in
+/// inventory, equipment, or on the room floor (ties into cp207 light
+/// fuel).  Follows `butcher` (cp226) in the survival-foraging chain.
+async fn do_cook(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nCook what?\r\n".to_string());
+    }
+    // Locate raw meat in inventory + check for a nearby fire (a lit light).
+    let (raw_iid, has_fire) = {
+        let w = world.lock().await;
+        let raw = me.inventory.iter().copied().find(|&iid| {
+            w.obj_instances.iter().find(|o| o.id == iid)
+                .map(|o| o.vnum == crate::db::MEAT_VNUM
+                      && obj_matches_keyword(&w, o, &kw))
+                .unwrap_or(false)
+        });
+        let fire = me.inventory.iter().copied()
+            .chain(me.equipment.iter().filter_map(|s| *s))
+            .chain(w.rooms.get(&me.current_room).map(|r| r.objects.clone()).unwrap_or_default())
+            .any(|iid| w.obj_instances.iter().find(|o| o.id == iid)
+                .map(|o| o.light_lit).unwrap_or(false));
+        (raw, fire)
+    };
+    let Some(raw_iid) = raw_iid else {
+        return CmdOutput::text(format!("\r\nYou have no raw meat called '{kw}' to cook.\r\n"));
+    };
+    if !has_fire {
+        return CmdOutput::text("\r\nYou need a lit fire to cook over.\r\n".to_string());
+    }
+    let cooked_short = {
+        let mut w = world.lock().await;
+        me.inventory.retain(|&i| i != raw_iid);
+        w.extract_obj(raw_iid);
+        if let Some(ciid) = w.spawn_obj(crate::db::COOKED_MEAT_VNUM) {
+            me.inventory.push(ciid);
+            w.obj_protos.get(&crate::db::COOKED_MEAT_VNUM)
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "a cooked steak".to_string())
+        } else {
+            "a cooked steak".to_string()
+        }
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} cooks some meat over the flames.\r\n", me.name));
+    }
+    CmdOutput::text(format!("\r\nYou cook the meat into {cooked_short}.\r\n"))
+}
+
+/// `forage` (cp228): search the wilderness (FIELD / FOREST / HILLS) for
+/// wild edibles.  ~40% chance per attempt to turn up a handful of berries;
+/// otherwise you find nothing.  Rounds out the survival-foraging set
+/// alongside `butcher` (cp226) and `cook` (cp227).
+async fn do_forage(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    let sector = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).map(|r| r.sector_type).unwrap_or(crate::world::SECT_INSIDE)
+    };
+    let wild = matches!(sector,
+        crate::world::SECT_FIELD | crate::world::SECT_FOREST | crate::world::SECT_HILLS);
+    if !wild {
+        return CmdOutput::text("\r\nThere's nothing to forage here.\r\n".to_string());
+    }
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} searches the undergrowth for food.\r\n", me.name));
+    }
+    if rand::thread_rng().gen_range(0..100) >= 40 {
+        return CmdOutput::text("\r\nYou rummage about but find nothing edible.\r\n".to_string());
+    }
+    let short = {
+        let mut w = world.lock().await;
+        if let Some(iid) = w.spawn_obj(crate::db::BERRIES_VNUM) {
+            me.inventory.push(iid);
+            w.obj_protos.get(&crate::db::BERRIES_VNUM)
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "a handful of wild berries".to_string())
+        } else {
+            "a handful of wild berries".to_string()
+        }
+    };
+    CmdOutput::text(format!("\r\nYou forage and find {short}!\r\n"))
+}
+
+/// `fish` (cp229): catch a fish while standing in a water sector
+/// (WATER_SWIM / WATER_NOSWIM / UNDERWATER — reachable via swimming,
+/// a boat, or flight).  ~35% chance per attempt.  Completes the
+/// food-gathering set (forage on land, fish in water).
+async fn do_fish(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    let sector = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).map(|r| r.sector_type).unwrap_or(crate::world::SECT_INSIDE)
+    };
+    let watery = matches!(sector,
+        crate::world::SECT_WATER_SWIM
+        | crate::world::SECT_WATER_NOSWIM
+        | crate::world::SECT_UNDERWATER);
+    if !watery {
+        return CmdOutput::text("\r\nThere's no water here to fish in.\r\n".to_string());
+    }
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} casts a line into the water.\r\n", me.name));
+    }
+    if rand::thread_rng().gen_range(0..100) >= 35 {
+        return CmdOutput::text("\r\nYou wait, but nothing bites.\r\n".to_string());
+    }
+    let short = {
+        let mut w = world.lock().await;
+        if let Some(iid) = w.spawn_obj(crate::db::FISH_VNUM) {
+            me.inventory.push(iid);
+            w.obj_protos.get(&crate::db::FISH_VNUM)
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "a fresh fish".to_string())
+        } else {
+            "a fresh fish".to_string()
+        }
+    };
+    CmdOutput::text(format!("\r\nSomething bites — you reel in {short}!\r\n"))
+}
+
+/// A crafting recipe: consume `inputs` (vnum, qty) from inventory and
+/// produce one `output`.  `requires_fire` gates on a nearby lit light.
+/// (cp230 crafting v1)
+struct Recipe {
+    name:          &'static str,
+    inputs:        &'static [(crate::world::ObjVnum, i32)],
+    output:        crate::world::ObjVnum,
+    requires_fire: bool,
+}
+
+fn recipes() -> &'static [Recipe] {
+    use crate::db::*;
+    &[
+        Recipe {
+            name: "trail rations",
+            inputs: &[(COOKED_MEAT_VNUM, 1), (BERRIES_VNUM, 1)],
+            output: TRAIL_RATIONS_VNUM,
+            requires_fire: false,
+        },
+        Recipe {
+            name: "fish stew",
+            inputs: &[(FISH_VNUM, 1), (BERRIES_VNUM, 1)],
+            output: FISH_STEW_VNUM,
+            requires_fire: true,
+        },
+    ]
+}
+
+/// Count how many instances of `vnum` the player carries.
+fn count_in_inventory(w: &World, me: &Character, vnum: crate::world::ObjVnum) -> i32 {
+    me.inventory.iter().filter(|&&iid| {
+        w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum == vnum).unwrap_or(false)
+    }).count() as i32
+}
+
+fn proto_short(w: &World, vnum: crate::world::ObjVnum) -> String {
+    w.obj_protos.get(&vnum).map(|p| p.short_description.clone())
+        .unwrap_or_else(|| "something".to_string())
+}
+
+/// `recipes` (cp230): list known crafting recipes with their ingredients.
+async fn do_recipes(world: &Arc<Mutex<World>>) -> CmdOutput {
+    let w = world.lock().await;
+    let mut s = String::from("\r\nKnown recipes:\r\n");
+    for r in recipes() {
+        let ingredients: Vec<String> = r.inputs.iter()
+            .map(|&(v, q)| format!("{}x {}", q, proto_short(&w, v)))
+            .collect();
+        s.push_str(&format!(
+            "  {} = {}{}\r\n     → {}\r\n",
+            r.name,
+            ingredients.join(" + "),
+            if r.requires_fire { " (needs fire)" } else { "" },
+            proto_short(&w, r.output),
+        ));
+    }
+    s.push_str("Use `craft <recipe>` to make one.\r\n");
+    CmdOutput::text(s)
+}
+
+/// `craft <recipe>` (cp230): consume the recipe's ingredients from
+/// inventory and produce its output.  Prefix-matches the recipe name.
+async fn do_craft(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return CmdOutput::text("\r\nCraft what?  (Type `recipes` for a list.)\r\n".to_string());
+    }
+    let Some(recipe) = recipes().iter().find(|r| r.name.starts_with(&key) || key.starts_with(r.name)) else {
+        return CmdOutput::text(format!("\r\nYou don't know how to craft '{key}'.\r\n"));
+    };
+
+    // Verify ingredients (and fire) under one lock.
+    let (missing, has_fire, output_short) = {
+        let w = world.lock().await;
+        let missing: Option<String> = recipe.inputs.iter()
+            .find(|&&(v, q)| count_in_inventory(&w, me, v) < q)
+            .map(|&(v, _)| proto_short(&w, v));
+        let fire = me.inventory.iter().copied()
+            .chain(me.equipment.iter().filter_map(|s| *s))
+            .chain(w.rooms.get(&me.current_room).map(|r| r.objects.clone()).unwrap_or_default())
+            .any(|iid| w.obj_instances.iter().find(|o| o.id == iid)
+                .map(|o| o.light_lit).unwrap_or(false));
+        (missing, fire, proto_short(&w, recipe.output))
+    };
+    if let Some(m) = missing {
+        return CmdOutput::text(format!("\r\nYou lack the ingredients — you need more {m}.\r\n"));
+    }
+    if recipe.requires_fire && !has_fire {
+        return CmdOutput::text("\r\nYou need a lit fire to prepare that.\r\n".to_string());
+    }
+
+    // Consume inputs, produce output.
+    {
+        let mut w = world.lock().await;
+        for &(v, q) in recipe.inputs {
+            for _ in 0..q {
+                if let Some(iid) = me.inventory.iter().copied().find(|&iid| {
+                    w.obj_instances.iter().find(|o| o.id == iid).map(|o| o.vnum == v).unwrap_or(false)
+                }) {
+                    me.inventory.retain(|&i| i != iid);
+                    w.extract_obj(iid);
+                }
+            }
+        }
+        if let Some(iid) = w.spawn_obj(recipe.output) {
+            me.inventory.push(iid);
+        }
+    }
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} crafts {output_short}.\r\n", me.name));
+    }
+    CmdOutput::text(format!("\r\nYou carefully craft {output_short}.\r\n"))
 }
 
 /// `donate <item>` — send an inventory item to the donation room (the

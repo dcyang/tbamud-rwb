@@ -582,6 +582,17 @@ pub const SCRIBED_SCROLL_VNUM: crate::world::ObjVnum = 99006;
 /// Synthetic proto for a dropped pile of coins (cp223).  Each instance's
 /// `ObjInstance.gold_amount` holds the actual amount.
 pub const GOLD_PILE_VNUM:      crate::world::ObjVnum = 99007;
+/// Synthetic proto for a hunk of meat carved from a corpse (cp226).
+pub const MEAT_VNUM:           crate::world::ObjVnum = 99008;
+/// Synthetic proto for cooked meat (cp227) — more filling than raw.
+pub const COOKED_MEAT_VNUM:    crate::world::ObjVnum = 99009;
+/// Synthetic proto for foraged wild berries (cp228).
+pub const BERRIES_VNUM:        crate::world::ObjVnum = 99010;
+/// Synthetic proto for a fish caught while fishing (cp229).
+pub const FISH_VNUM:           crate::world::ObjVnum = 99011;
+/// Crafted-food output protos (cp230 crafting v1).
+pub const TRAIL_RATIONS_VNUM:  crate::world::ObjVnum = 99012;
+pub const FISH_STEW_VNUM:      crate::world::ObjVnum = 99013;
 
 /// Insert four hardcoded synthetic prototypes so the first-login path
 /// can spawn a class-aware newbie kit without depending on world-file
@@ -700,6 +711,103 @@ fn inject_newbie_kit_protos(world: &mut crate::world::World) {
         affect_flags: [0;4],
         value: [0, 0, 0, 0],
         weight: 0, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99008: a hunk of raw meat carved from a corpse — ITEM_FOOD, 8 filling
+    // hours (cp226).
+    world.obj_protos.insert(MEAT_VNUM, ObjProto {
+        vnum: MEAT_VNUM,
+        name: "meat hunk raw".to_string(),
+        short_description: "a hunk of raw meat".to_string(),
+        description: "A bloody hunk of raw meat lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [8, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99009: a cooked steak — ITEM_FOOD, 16 filling hours (cp227).
+    world.obj_protos.insert(COOKED_MEAT_VNUM, ObjProto {
+        vnum: COOKED_MEAT_VNUM,
+        name: "steak cooked meat".to_string(),
+        short_description: "a cooked steak".to_string(),
+        description: "A juicy cooked steak lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [16, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99010: a handful of wild berries — ITEM_FOOD, 4 filling hours (cp228).
+    world.obj_protos.insert(BERRIES_VNUM, ObjProto {
+        vnum: BERRIES_VNUM,
+        name: "berries handful wild".to_string(),
+        short_description: "a handful of wild berries".to_string(),
+        description: "A handful of wild berries lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [4, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99011: a fresh fish — ITEM_FOOD, 6 filling hours (cp229).
+    world.obj_protos.insert(FISH_VNUM, ObjProto {
+        vnum: FISH_VNUM,
+        name: "fish fresh raw".to_string(),
+        short_description: "a fresh fish".to_string(),
+        description: "A fresh fish flops here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [6, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99012: trail rations — ITEM_FOOD, 24 filling hours (cp230 craft).
+    world.obj_protos.insert(TRAIL_RATIONS_VNUM, ObjProto {
+        vnum: TRAIL_RATIONS_VNUM,
+        name: "rations trail".to_string(),
+        short_description: "trail rations".to_string(),
+        description: "A bundle of trail rations lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [24, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99013: fish stew — ITEM_FOOD, 18 filling hours (cp230 craft).
+    world.obj_protos.insert(FISH_STEW_VNUM, ObjProto {
+        vnum: FISH_STEW_VNUM,
+        name: "stew fish bowl".to_string(),
+        short_description: "a bowl of fish stew".to_string(),
+        description: "A steaming bowl of fish stew sits here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_FOOD,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [18, 0, 0, 0],
+        weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
         extras: Vec::new(),
         affected: Vec::new(),
     });
