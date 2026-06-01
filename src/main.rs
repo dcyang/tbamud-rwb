@@ -11,6 +11,7 @@ mod descriptor;
 mod interpreter;
 mod login;
 mod mail;
+mod olc;
 mod players;
 mod server;
 mod telnet;

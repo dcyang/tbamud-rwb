@@ -302,6 +302,7 @@ pub async fn handle_connection(
                     autokey:      p_ref.map(|p| p.autokey).unwrap_or(false),
                     automap:      p_ref.map(|p| p.automap).unwrap_or(false),
                     history:      std::collections::VecDeque::with_capacity(20),
+                    olc:          None,
                     tell_history: std::collections::VecDeque::with_capacity(20),
                     alignment:    p_ref.map(|p| p.alignment).unwrap_or(0),
                     clan:         p_ref.map(|p| p.clan.clone()).unwrap_or_default(),
@@ -645,8 +646,14 @@ async fn run_game_session(
         for line in lines {
             let line = line.trim();
             if line.is_empty() {
-                let _ = tx.send("> ".to_string());
-                continue;
+                // Blank lines normally just re-prompt, but while in an OLC
+                // editor a blank line is meaningful (paragraph breaks in the
+                // text editor), so pass it through to the dispatcher.
+                let in_olc = { character.lock().await.olc.is_some() };
+                if !in_olc {
+                    let _ = tx.send("> ".to_string());
+                    continue;
+                }
             }
             debug!(id, name = %my_name, cmd = %line, "command");
             let out = {

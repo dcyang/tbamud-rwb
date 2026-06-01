@@ -104,11 +104,15 @@ include the message + backtrace when reporting.
 The player-facing command/spell/skill set, shops, channels, quests, DG triggers
 (a subset), the rent system, and boards are implemented.
 
-### 4.2 Why doesn't `medit`/`oedit`/`zedit`/`aedit` work?
+### 4.2 Is there OLC (online creation)?
 
-There is no OLC. Edit the world data files by hand ([building.md](building.md))
-and restart. Immortal commands like `load`, `stat`, `dig`, `oset`, `zreset` help
-you inspect and prototype at runtime.
+Yes — the full editor set is implemented for immortals: `redit`, `oedit`,
+`medit`, `zedit`, `qedit`, `trigedit`, `sedit`, `aedit`, `hedit`. Each is a
+menu-driven editor that commits to the live world and rewrites the data file on
+quit (see [building.md](building.md)). You can still hand-edit the data files
+and restart if you prefer. (`cedit`/`prefedit`/`msgedit` are not ported — config
+is compile-time + command-driven, prefs use `toggle`/`set`, and combat messages
+are in code.)
 
 ### 4.3 Colors show as garbage / don't show.
 

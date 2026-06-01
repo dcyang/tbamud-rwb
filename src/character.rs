@@ -918,6 +918,9 @@ pub struct Character {
     /// Last N dispatched commands (transient).  Recorded at the top of
     /// `dispatch_command`; viewed via `history`.
     pub history:      std::collections::VecDeque<String>,
+    /// Active OLC editing session (None = not editing).  While set, all
+    /// input is routed to the editor instead of the command interpreter.
+    pub olc:          Option<crate::olc::OlcSession>,
     /// Last N received tells (transient).  Recorded at the receiving
     /// end of `do_tell`; viewed via `tells`.
     pub tell_history: std::collections::VecDeque<(String, String)>,

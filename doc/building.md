@@ -1,16 +1,47 @@
 # tbamud-rwb Builder's Manual
 
 Adapted from "The CircleMUD Builder's Manual". The stock manual is largely a
-guide to the in-game OLC editors (`redit`/`medit`/`oedit`/`zedit`/`sedit`/
-`trigedit`/`qedit`).
+guide to the in-game OLC (Oasis online creation) editors.
 
-The Rust rewrite has **NO OLC**. There are no in-game world editors. You build
-the world by editing the plain-text data files under `lib/world/` by hand and
-restarting the server (or by validating with `-c`). The file *formats* are
-unchanged from stock TbaMUD — the rewrite reads the same
+The Rust rewrite **implements OLC** — the full editor set is available in-game
+to immortals: `redit` (rooms), `oedit` (objects), `medit` (mobiles), `zedit`
+(zones + resets), `qedit` (quests), `trigedit` (DG triggers), `sedit` (shops),
+`aedit` (socials), and `hedit` (help). Each is a menu-driven editor that works
+on a working copy and, on `Q` (quit), commits to the live world AND rewrites the
+relevant data file (or `<editor> save [zone]` persists without editing). See the
+"Editing in-game with OLC" section below.
+
+You can also still build the world by editing the plain-text data files under
+`lib/world/` by hand and restarting (or validating with `-c`). The file
+*formats* are unchanged from stock TbaMUD — the rewrite reads the same
 `.wld`/`.mob`/`.obj`/`.zon`/`.shp`/`.qst`/`.trg` files — so existing stock areas
 load as-is, and the canonical way to learn a format is to open an existing file
 in the same `lib/world/<type>/` subtree and copy its shape exactly.
+
+## Editing in-game with OLC
+
+| Command | Edits | Saves to | Notes |
+|---------|-------|----------|-------|
+| `redit <vnum>` | a room | `<zone>.wld` | name, desc, flags, sector, exits, extras, script |
+| `oedit <vnum>` | an object | `<zone>.obj` | descs, type, flags, values, applies, extras |
+| `medit <vnum>` | a mobile | `<zone>.mob` | descs, flags, position, stats (level/HP/dam/…) |
+| `zedit <zone#>` | a zone | `<zone>.zon` | header + the reset-command list (M/O/G/E/P/D/R/T/V) |
+| `qedit <vnum>` | a quest | `<zone>.qst` | name, texts, type, target, rewards, values |
+| `trigedit <vnum>` | a DG trigger | `<zone>.trg` | name, attach, type, narg, arg, script |
+| `sedit <vnum>` | a shop | `<zone>.shp` | keeper, profits, items sold / types bought / rooms |
+| `aedit <name>` | a social | `misc/socials.new` | positions, target flag, the message slots |
+| `hedit <kw>` | a help entry | `text/help/help.hlp` | keywords, min level, body |
+
+A target vnum that doesn't exist yet creates a new record (within an existing
+zone's vnum range). Multi-line text fields (descriptions, scripts) open a
+line-by-line editor; put `@` (or `/s`) on a line by itself to finish. Each
+editor's menu also offers copy (`W`) and delete (`X`) where applicable.
+
+A few editors model a subset of the stock record and reset unmodeled fields to
+defaults on re-save: `sedit` (custom shop messages / hours), `aedit` (the legacy
+body-part/object social slots), `trigedit` (multi-type triggers collapse to one
+type), `oedit` (object script `T` records). Hand-edit those fields in the data
+file if you need them preserved.
 
 ## Golden rules
 
@@ -130,9 +161,10 @@ commands the rewrite supports. Shops drive the `list`/`buy`/`sell`/`value`/
    directories (and `index.mini` if you want it in mini-MUD boots).
 3. `cargo run -- -c` to validate, then boot.
 
-## In-game help while building
+## In-game inspection commands
 
-Although there's no OLC, immortal commands help you inspect and prototype:
+Alongside the OLC editors, these immortal commands help you inspect and
+prototype:
 
 | Command | Use |
 |---------|-----|

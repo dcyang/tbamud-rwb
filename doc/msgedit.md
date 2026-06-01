@@ -3,8 +3,10 @@
 Adapted from the stock TbaMUD "Message Editor" document.
 
 Stock TbaMUD has an in-game OLC editor, `msgedit`, for the combat/skill damage
-messages stored in `lib/misc/messages`. The Rust rewrite has no OLC at all (see
-[building.md](building.md)), so there is no `msgedit` command.
+messages stored in `lib/misc/messages`. The Rust rewrite has a full OLC editor
+set (see [building.md](building.md)), but **not** `msgedit` — because the
+rewrite doesn't load `lib/misc/messages` at all (combat messages are inline in
+the Rust source), there is no message data for such an editor to edit.
 
 It also does **not** load `lib/misc/messages`. The file is still present in
 `lib/misc/` (it ships with the data set), but the rewrite does not read it.

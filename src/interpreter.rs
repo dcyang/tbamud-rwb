@@ -133,7 +133,7 @@ const COMMANDS: &[&str] = &[
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk",
     "bug", "idea", "typo",
-    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "oset", "dig", "wizlock",
+    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "oset", "dig", "redit", "oedit", "medit", "zedit", "qedit", "trigedit", "sedit", "aedit", "hedit", "wizlock",
     "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "nohassle", "mute", "freeze",
@@ -187,6 +187,14 @@ pub async fn dispatch_command(
         return CmdOutput::text(String::new());
     }
     me.last_activity = std::time::Instant::now();
+
+    // OLC editing mode: while an editor is active, every line (including
+    // blank lines, for the text editor) is routed to the editor rather
+    // than the command interpreter.
+    if me.olc.is_some() {
+        return crate::olc::handle_input(raw, me, world, players).await;
+    }
+
     // History recording deferred to after speech/history-bang expansion
     // so the buffer shows the effective command, not the bang form.
 
@@ -491,6 +499,23 @@ pub async fn dispatch_command(
         Some("set")       => do_set(rest, me, chars).await,
         Some("oset")      => do_oset(rest, me, world).await,
         Some("dig")       => do_dig(rest, me, world).await,
+        Some("redit")     => if me.level >= LVL_IMMORT {
+                                 crate::olc::start_redit(rest, me, world, players).await
+                             } else { immort_huh() },
+        Some("oedit")     => if me.level >= LVL_IMMORT {
+                                 crate::olc::start_oedit(rest, me, world, players).await
+                             } else { immort_huh() },
+        Some("medit")     => if me.level >= LVL_IMMORT {
+                                 crate::olc::start_medit(rest, me, world, players).await
+                             } else { immort_huh() },
+        Some("zedit")     => if me.level >= LVL_IMMORT {
+                                 crate::olc::start_zedit(rest, me, world, players).await
+                             } else { immort_huh() },
+        Some("qedit")     => if me.level >= LVL_IMMORT { crate::olc::start_qedit(rest, me, world, players).await } else { immort_huh() },
+        Some("trigedit")  => if me.level >= LVL_IMMORT { crate::olc::start_trigedit(rest, me, world, players).await } else { immort_huh() },
+        Some("sedit")     => if me.level >= LVL_IMMORT { crate::olc::start_sedit(rest, me, world, players).await } else { immort_huh() },
+        Some("aedit")     => if me.level >= LVL_IMMORT { crate::olc::start_aedit(rest, me, world, players).await } else { immort_huh() },
+        Some("hedit")     => if me.level >= LVL_IMMORT { crate::olc::start_hedit(rest, me, world, players).await } else { immort_huh() },
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
         Some("olist")     => do_olist(rest, me, world).await,
@@ -2481,6 +2506,10 @@ fn do_prompt(arg: &str, me: &mut Character) -> CmdOutput {
 
 /// Substitute prompt placeholders against the player's current state.
 pub fn render_prompt(me: &Character) -> String {
+    // No prompt while in an OLC editor — the menu carries its own prompt.
+    if me.olc.is_some() {
+        return String::new();
+    }
     if me.prompt_format.is_empty() {
         return if me.compact { "> ".to_string() } else { "\r\n> ".to_string() };
     }
