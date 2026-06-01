@@ -1130,7 +1130,7 @@ async fn resolve_mob_attack(
     // Roll mob damage. Spell attacks (when cast_attempt) use a separate
     // dice pool that ignores mundane AC but is still reduced by
     // affect-based dmg_reduction (sanctuary). Mundane attacks go through AC.
-    let (dmg, is_spell): (i32, bool) = {
+    let (dmg, is_spell, spell_resisted): (i32, bool, bool) = {
         let raw_mundane = {
             let w = world.lock().await;
             // If the mob has a wielded weapon, use the weapon's dice
@@ -1164,21 +1164,26 @@ async fn resolve_mob_attack(
             };
             (base + affect_dam + eq_dam).max(1)
         };
-        let (ac, reduction) = {
+        // DC for the spell's Dexterity save scales with the mob's level.
+        let spell_dc = 10 + m.level / 3;
+        let (ac, reduction, dex_saved) = {
             let me = ph.character.lock().await;
             let ac = crate::interpreter::total_ac(&me, world).await;
             let r  = me.affect_dmg_reduction();
-            (ac, r)
+            // Reflex-style save: a successful DEX save halves spell damage.
+            let saved = me.roll_saving_throw(crate::character::Ability::Dex, spell_dc);
+            (ac, r, saved)
         };
         if cast_attempt {
             let (dn, ds) = mob_spell_dice(m.level);
-            let raw = dice(dn, ds) + m.level / 2;
+            let mut raw = dice(dn, ds) + m.level / 2;
+            if dex_saved { raw = (raw / 2).max(1); }
             let after = (raw * (100 - reduction)) / 100;
-            (after.max(1), true)
+            (after.max(1), true, dex_saved)
         } else {
             let after_ac = (raw_mundane - ac / 3).max(1);
             let after = (after_ac * (100 - reduction)) / 100;
-            (after.max(1), false)
+            (after.max(1), false, false)
         }
     };
 
@@ -1208,8 +1213,9 @@ async fn resolve_mob_attack(
 
     let (to_victim, to_room) = if is_spell {
         let (vict_v, vict_n, room_v, room_n) = mob_spell_flavor(m.level);
+        let resist = if spell_resisted { " (you twist aside — half damage!)" } else { "" };
         (
-            format!("\r\n{mob_short_name} {vict_v} {vict_n} you for {dmg} damage!\r\n"),
+            format!("\r\n{mob_short_name} {vict_v} {vict_n} you for {dmg} damage!{resist}\r\n"),
             format!("\r\n{mob_short_name} {room_v} {room_n} at {}.\r\n", ph.name),
         )
     } else {

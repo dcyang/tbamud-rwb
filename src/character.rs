@@ -1130,6 +1130,70 @@ impl Character {
     pub fn is_wild_shaped(&self) -> bool {
         self.affects.iter().any(|a| a.skill == Skill::WildShape)
     }
+
+    /// This character's current score in the given ability.
+    pub fn ability_score(&self, a: Ability) -> i32 {
+        match a {
+            Ability::Str => self.str_,
+            Ability::Dex => self.dex,
+            Ability::Con => self.con,
+            Ability::Int => self.int_,
+            Ability::Wis => self.wis,
+            Ability::Cha => self.cha,
+        }
+    }
+
+    /// D&D proficiency bonus: +2 at level 1, +1 every 4 levels, capped at +6.
+    pub fn proficiency_bonus(&self) -> i32 {
+        (2 + (self.level - 1) / 4).clamp(2, 6)
+    }
+
+    /// Whether this character's class is proficient in `a` saving throws.
+    pub fn is_save_proficient(&self, a: Ability) -> bool {
+        self.class.save_proficiencies()[a.index()]
+    }
+
+    /// Saving-throw bonus for `a`: ability modifier + proficiency bonus
+    /// (the latter only if the class is proficient in that save).
+    pub fn saving_throw(&self, a: Ability) -> i32 {
+        ability_modifier(self.ability_score(a))
+            + if self.is_save_proficient(a) { self.proficiency_bonus() } else { 0 }
+    }
+
+    /// Roll a saving throw vs `dc`: d20 + saving-throw bonus >= dc.
+    pub fn roll_saving_throw(&self, a: Ability, dc: i32) -> bool {
+        use rand::Rng;
+        rand::thread_rng().gen_range(1..=20) + self.saving_throw(a) >= dc
+    }
+}
+
+/// The six D&D ability scores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ability { Str, Dex, Con, Int, Wis, Cha }
+
+impl Ability {
+    /// Index into the STR,DEX,CON,INT,WIS,CHA-ordered arrays
+    /// (e.g. `Class::save_proficiencies`).
+    pub fn index(self) -> usize {
+        match self {
+            Ability::Str => 0, Ability::Dex => 1, Ability::Con => 2,
+            Ability::Int => 3, Ability::Wis => 4, Ability::Cha => 5,
+        }
+    }
+    pub fn abbr(self) -> &'static str {
+        match self {
+            Ability::Str => "Str", Ability::Dex => "Dex", Ability::Con => "Con",
+            Ability::Int => "Int", Ability::Wis => "Wis", Ability::Cha => "Cha",
+        }
+    }
+    /// All six, in STR,DEX,CON,INT,WIS,CHA order.
+    pub const ALL: [Ability; 6] =
+        [Ability::Str, Ability::Dex, Ability::Con, Ability::Int, Ability::Wis, Ability::Cha];
+}
+
+/// D&D ability modifier: `floor((score - 10) / 2)` (e.g. 10→0, 14→+2, 7→-2).
+pub fn ability_modifier(score: i32) -> i32 {
+    (score - 10).div_euclid(2)
 }
 
 /// STR-based damage modifier — mirrors str_app[].todam in constants.c

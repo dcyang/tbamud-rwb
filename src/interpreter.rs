@@ -119,7 +119,7 @@ const COMMANDS: &[&str] = &[
     "skills", "practice", "affects",
     "quest", "where",
     "say", "tell", "who",
-    "score", "exp", "equipment", "save", "help",
+    "score", "saves", "savingthrows", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "sip", "eat", "taste", "fill", "pour", "empty", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
@@ -332,6 +332,7 @@ pub async fn dispatch_command(
         Some("tell")      => do_tell(rest, me, chars, players).await,
         Some("who")       => do_who(rest, me, chars).await,
         Some("score")     => do_score(me, world).await,
+        Some("saves") | Some("savingthrows") => do_saves(me),
         Some("exp")       => do_exp(me),
         Some("levels")    => do_levels(rest, me),
         Some("areas")     => do_areas(me, world).await,
@@ -5183,15 +5184,41 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
                      else if me.drunk >= DRUNK_SLUR_THRESHOLD { format!("Drunk: drunk ({})\r\n", me.drunk) }
                      else if me.drunk > 0 { format!("Drunk: tipsy ({})\r\n", me.drunk) }
                      else { String::new() };
+    // D&D saving throws: ability modifier + proficiency (where the class is
+    // proficient, marked with a `*`).
+    let saves_str = crate::character::Ability::ALL.iter().map(|&a| {
+        let v = me.saving_throw(a);
+        let mark = if me.is_save_proficient(a) { "*" } else { "" };
+        format!("{} {:+}{}", a.abbr(), v, mark)
+    }).collect::<Vec<_>>().join("  ");
     let s = format!(
         "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{clan_line}{pvp_line}\
-         Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\n",
+         Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
         me.class, me.sex, me.gold, me.current_room, ac, me.practices,
         me.alignment, align_band.name(),
         me.str_, me.int_, me.wis, me.dex, me.con, me.cha,
+        me.proficiency_bonus(),
     );
+    CmdOutput::text(s)
+}
+
+/// `saves` — detailed D&D saving-throw / ability breakdown (proficiency
+/// bonus, each ability's score + modifier + save bonus, `*` = proficient).
+fn do_saves(me: &Character) -> CmdOutput {
+    use crate::character::{Ability, ability_modifier};
+    let mut s = format!(
+        "\r\nProficiency bonus: {:+}\r\n\r\n  Ability  Score  Mod  Save\r\n",
+        me.proficiency_bonus());
+    for &a in &Ability::ALL {
+        let score = me.ability_score(a);
+        let prof = if me.is_save_proficient(a) { " *" } else { "" };
+        s.push_str(&format!(
+            "  {:<7}  {:>4}  {:>+3}  {:>+3}{}\r\n",
+            a.abbr(), score, ability_modifier(score), me.saving_throw(a), prof));
+    }
+    s.push_str("\r\n  (* = your class is proficient in that saving throw.)\r\n");
     CmdOutput::text(s)
 }
 

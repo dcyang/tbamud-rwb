@@ -150,6 +150,27 @@ impl Class {
         }
     }
 
+    /// Saving-throw proficiencies (PHB) as flags in STR,DEX,CON,INT,WIS,CHA
+    /// order.  Each class is proficient in exactly two saving throws.
+    pub fn save_proficiencies(self) -> [bool; 6] {
+        //                     STR    DEX    CON    INT    WIS    CHA
+        match self {
+            Self::Barbarian => [true,  false, true,  false, false, false], // STR, CON
+            Self::Bard      => [false, true,  false, false, false, true ], // DEX, CHA
+            Self::Cleric    => [false, false, false, false, true,  true ], // WIS, CHA
+            Self::Druid     => [false, false, false, true,  true,  false], // INT, WIS
+            Self::Fighter   => [true,  false, true,  false, false, false], // STR, CON
+            Self::Monk      => [true,  true,  false, false, false, false], // STR, DEX
+            Self::Paladin   => [false, false, false, false, true,  true ], // WIS, CHA
+            Self::Ranger    => [true,  true,  false, false, false, false], // STR, DEX
+            Self::Rogue     => [false, true,  false, true,  false, false], // DEX, INT
+            Self::Sorcerer  => [false, false, true,  false, false, true ], // CON, CHA
+            Self::Warlock   => [false, false, false, false, true,  true ], // WIS, CHA
+            Self::Wizard    => [false, false, false, true,  true,  false], // INT, WIS
+            Self::Undefined => [false; 6],
+        }
+    }
+
     /// Case-insensitive full-name or unambiguous-prefix match over the 12
     /// selectable classes. Single letters that collide (e.g. "b" → Barbarian
     /// vs Bard, "w" → Warlock vs Wizard) return `None`.
