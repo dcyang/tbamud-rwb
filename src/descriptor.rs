@@ -374,6 +374,8 @@ pub async fn handle_connection(
                     afk_msg:          None,
                     last_activity:    std::time::Instant::now(),
                     recall_cooldown_until: None,
+                    hunters_mark: None,
+                    ability_cooldowns: std::collections::HashMap::new(),
                 };
 
                 // Settle any pending level-ups (e.g. character was offline

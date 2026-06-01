@@ -105,6 +105,8 @@ const COMMANDS: &[&str] = &[
     "examine",
     "list", "buy", "sell", "appraise", "value",
     "kick", "bash", "backstab", "whirlwind", "peek", "rescue", "disarm", "consider", "con",
+    "rage", "secondwind", "flurry", "layhands", "layonhands", "wildshape", "shift",
+    "meditate", "arcanerecovery",
     "sleep", "rest", "sit", "stand", "wake", "bandage",
     "wimpy",
     "info", "newbie", "shout", "color",
@@ -338,6 +340,12 @@ pub async fn dispatch_command(
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
         Some("whirlwind") => do_whirlwind(me, world, chars).await,
+        Some("rage")      => do_rage(me, chars).await,
+        Some("secondwind") => do_second_wind(me, chars).await,
+        Some("flurry")    => do_flurry(rest, me, world, chars).await,
+        Some("layhands") | Some("layonhands") => do_lay_on_hands(rest, me, chars).await,
+        Some("wildshape") | Some("shift") => do_wild_shape(me, chars).await,
+        Some("meditate") | Some("arcanerecovery") => do_arcane_recovery(me, chars).await,
         Some("peek")      => do_peek(rest, me, world, chars).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
@@ -7851,6 +7859,12 @@ async fn do_cast(
         crate::character::Skill::GroupRecall  => cast_group(me, world, chars, crate::character::Skill::GroupRecall).await,
         crate::character::Skill::AnimateDead  => cast_summon_servant(target, me, world, chars, crate::character::Skill::AnimateDead).await,
         crate::character::Skill::Clone        => cast_summon_servant(target, me, world, chars, crate::character::Skill::Clone).await,
+        // D&D 5e spell-like signatures.
+        crate::character::Skill::EldritchBlast => cast_eldritch_blast(target, me, world, chars, learned).await,
+        crate::character::Skill::TurnUndead    => cast_turn_undead(me, world, chars, learned).await,
+        crate::character::Skill::HuntersMark   => cast_hunters_mark(target, me, world, chars).await,
+        crate::character::Skill::BardicInspiration => cast_bardic_inspiration(target, me, chars, learned).await,
+        crate::character::Skill::InnateSorcery => cast_buff(target, me, chars, learned, crate::character::Skill::InnateSorcery).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -8598,7 +8612,7 @@ async fn cast_magic_missile(
     // Hit chance: 70 base + half of learned %. Magic missile rarely misses.
     let hit_chance = (70 + learned as i32 / 2).min(99);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
-    let base_dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_);
+    let base_dmg = crate::db::dice(1, 4) + me.level + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
     me.mana -= crate::character::Skill::MagicMissile.mana_cost();
 
     let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
@@ -8744,7 +8758,7 @@ async fn cast_lightning_bolt(
     let hit_chance = (60 + learned as i32 / 2).min(95);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
     let base_dmg = crate::db::dice(6, 6) + me.level
-        + crate::character::str_damage_bonus(me.int_);
+        + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
     me.mana -= crate::character::Skill::LightningBolt.mana_cost();
 
     let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
@@ -9068,7 +9082,7 @@ async fn cast_energy_drain(
             100
         } else {
             crate::db::dice(1, 10) + me.level
-                + crate::character::str_damage_bonus(me.int_)
+                + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus()
         };
         let saved = hit && save_vs_spell(me.level, target_level);
         let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
@@ -9194,7 +9208,7 @@ async fn cast_acid_blast(
     let hit_chance = (70 + learned as i32 / 2).min(98);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
     let base_dmg = crate::db::dice(5, 6) + me.level
-        + crate::character::str_damage_bonus(me.int_);
+        + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
     me.mana -= crate::character::Skill::AcidBlast.mana_cost();
 
     let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
@@ -9338,7 +9352,7 @@ async fn cast_chill_touch(
     let hit_chance = (75 + learned as i32 / 2).min(99);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
     let base_dmg = crate::db::dice(1, 8) + me.level
-        + crate::character::str_damage_bonus(me.int_);
+        + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
     me.mana -= crate::character::Skill::ChillTouch.mana_cost();
 
     let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
@@ -9494,7 +9508,7 @@ async fn cast_fireball(
         let hit_chance = (75 + learned as i32 / 4).min(98);
         if rand::thread_rng().gen_range(0..100) >= hit_chance { continue; }
         let base_dmg = dice(8, 8) + me.level
-            + crate::character::str_damage_bonus(me.int_);
+            + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
 
         let (mob_name, mob_dead, mob_room, dmg, saved) = {
             let mut w = world.lock().await;
@@ -9614,7 +9628,7 @@ async fn cast_shocking_grasp(
     let hit_chance = (75 + learned as i32 / 2).min(99);
     let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
     let base_dmg = crate::db::dice(3, 8) + me.level
-        + crate::character::str_damage_bonus(me.int_);
+        + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
     me.mana -= crate::character::Skill::ShockingGrasp.mana_cost();
 
     let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
@@ -10595,6 +10609,12 @@ async fn cast_buff(
             "You feel webbing between your toes.\r\n",
             "{}'s feet take on a webbed appearance.\r\n",
         ),
+        crate::character::Skill::InnateSorcery => (
+            4 + learned as i32 / 10,
+            0, 0,
+            "Raw sorcerous power wells up within you — your spells will strike harder!\r\n",
+            "{}'s eyes flare with arcane power.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
 
@@ -11074,7 +11094,7 @@ async fn cast_color_spray(
         let hit_chance = (70 + learned as i32 / 4).min(95);
         if rand::thread_rng().gen_range(0..100) >= hit_chance { continue; }
         let base_dmg = dice(2, 6) + me.level / 2
-            + crate::character::str_damage_bonus(me.int_);
+            + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
 
         let (mob_name, dmg, saved) = {
             let mut w = world.lock().await;
@@ -11155,7 +11175,7 @@ async fn cast_burning_hands(
         let hit_chance = (65 + learned as i32 / 4).min(95);
         if rand::thread_rng().gen_range(0..100) >= hit_chance { continue; }
         let base_dmg = dice(2, 4) + me.level / 2
-            + crate::character::str_damage_bonus(me.int_);
+            + crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
 
         let (mob_name, mob_dead, mob_room, dmg, saved) = {
             let mut w = world.lock().await;
@@ -11373,6 +11393,579 @@ async fn cast_earthquake(
         }
     }
     CmdOutput::text(to_me)
+}
+
+// ===================================================================
+// D&D 5e class signature abilities
+// ===================================================================
+//
+// Martial signatures (Rage / Second Wind / Flurry / Lay on Hands / Wild
+// Shape / Arcane Recovery) are own-verb skills.  They DRAIN movement
+// points (clamped at 0 — you can keep using them when exhausted) and are
+// gated by a per-ability cooldown.  Walking out of the room while at 0
+// movement is what's blocked (see `do_move`), not the ability itself.
+// Spell-like signatures (Eldritch Blast / Turn Undead / Hunter's Mark /
+// Bardic Inspiration / Innate Sorcery) route through `cast` and cost mana.
+
+/// Shared gate for the martial signatures: class allowed + practiced +
+/// off cooldown.  Returns Some(refusal) when the ability can't fire.
+fn martial_sig_gate(me: &Character, skill: crate::character::Skill) -> Option<CmdOutput> {
+    if !skill.is_class_allowed(me.class) {
+        return Some(CmdOutput::text(format!(
+            "\r\nYou have no idea how to use {}.\r\n", skill.name())));
+    }
+    if *me.skills.get(&skill).unwrap_or(&0) == 0 {
+        return Some(CmdOutput::text(format!(
+            "\r\nYou haven't practiced {} yet. Try `practice {}`.\r\n",
+            skill.name(), skill.save_key())));
+    }
+    let cd = me.ability_cooldown_remaining(skill);
+    if cd > 0 {
+        return Some(CmdOutput::text(format!(
+            "\r\nYou aren't ready to use {} again ({}s).\r\n", skill.name(), cd)));
+    }
+    None
+}
+
+/// Barbarian — Rage: a primal-fury self-buff (+damage, damage resistance,
+/// reckless defense).  Drains 30 movement; 45s cooldown.
+async fn do_rage(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::{Skill, Affect};
+    if let Some(r) = martial_sig_gate(me, Skill::Rage) { return r; }
+    if me.affects.iter().any(|a| a.skill == Skill::Rage) {
+        return CmdOutput::text("\r\nYou are already consumed by rage.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&Skill::Rage).unwrap_or(&0) as i32;
+    me.reveal();
+    me.movement = (me.movement - 30).max(0);
+    me.set_ability_cooldown(Skill::Rage, 45);
+    me.apply_affect(Affect {
+        skill: Skill::Rage,
+        duration: 6 + learned / 10,
+        to_hit: 0,
+        to_dam: 2 + me.level / 8,
+        dmg_reduction: 20,
+        dot_damage: 0,
+        to_ac: -10,
+    });
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} flies into a berserk rage!\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(
+        "\r\nA primal fury surges through you — your blows fall harder and pain barely registers!\r\n".to_string());
+    if let Some(b) = learn_attempt(me, Skill::Rage, 5) { out.text.push_str(&b); }
+    out
+}
+
+/// Fighter — Second Wind: recover `1d10 + level` HP.  Drains 20 movement;
+/// 60s cooldown.
+async fn do_second_wind(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::Skill;
+    if let Some(r) = martial_sig_gate(me, Skill::SecondWind) { return r; }
+    let heal = crate::db::dice(1, 10) + me.level;
+    me.movement = (me.movement - 20).max(0);
+    me.set_ability_cooldown(Skill::SecondWind, 60);
+    let before = me.hp;
+    me.hp = (me.hp + heal).min(me.max_hp);
+    let gained = me.hp - before;
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} catches a second wind.\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou catch your breath and recover {gained} hit points. ({}/{})\r\n",
+        me.hp, me.max_hp));
+    if let Some(b) = learn_attempt(me, Skill::SecondWind, 5) { out.text.push_str(&b); }
+    out
+}
+
+/// Druid — Wild Shape: assume a feral beast form (tougher hide + fiercer
+/// blows).  Drains 40 movement; 90s cooldown.
+async fn do_wild_shape(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::{Skill, Affect};
+    if let Some(r) = martial_sig_gate(me, Skill::WildShape) { return r; }
+    if me.is_wild_shaped() {
+        return CmdOutput::text("\r\nYou are already in beast form.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&Skill::WildShape).unwrap_or(&0) as i32;
+    me.reveal();
+    me.movement = (me.movement - 40).max(0);
+    me.set_ability_cooldown(Skill::WildShape, 90);
+    me.apply_affect(Affect {
+        skill: Skill::WildShape,
+        duration: 8 + learned / 10,
+        to_hit: 0,
+        to_dam: 1 + me.level / 10,
+        dmg_reduction: 10,
+        dot_damage: 0,
+        to_ac: 20,
+    });
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{}'s body twists and reforms into a wild beast!\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(
+        "\r\nYour limbs reshape into a feral beast — thick hide and rending claws.\r\n".to_string());
+    if let Some(b) = learn_attempt(me, Skill::WildShape, 5) { out.text.push_str(&b); }
+    out
+}
+
+/// Wizard — Arcane Recovery: meditate to recover `3d8 + level` mana.
+/// No movement cost (it's a rest, not exertion); 120s cooldown.
+async fn do_arcane_recovery(me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::Skill;
+    if let Some(r) = martial_sig_gate(me, Skill::ArcaneRecovery) { return r; }
+    let restore = crate::db::dice(3, 8) + me.level;
+    me.set_ability_cooldown(Skill::ArcaneRecovery, 120);
+    let before = me.mana;
+    me.mana = (me.mana + restore).min(me.max_mana);
+    let gained = me.mana - before;
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} closes their eyes in arcane meditation.\r\n", me.name));
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou draw spent magic back into yourself, recovering {gained} mana. ({}/{})\r\n",
+        me.mana, me.max_mana));
+    if let Some(b) = learn_attempt(me, Skill::ArcaneRecovery, 5) { out.text.push_str(&b); }
+    out
+}
+
+/// Paladin — Lay on Hands: channel divine power to heal self or a same-room
+/// ally for `level*3 + 2d8` and cure their poison.  Drains 20 movement;
+/// 45s cooldown.
+async fn do_lay_on_hands(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    use crate::character::Skill;
+    if let Some(r) = martial_sig_gate(me, Skill::LayOnHands) { return r; }
+    let heal = me.level * 3 + crate::db::dice(2, 8);
+    me.movement = (me.movement - 20).max(0);
+    me.set_ability_cooldown(Skill::LayOnHands, 45);
+
+    let target_self = arg.trim().is_empty() || arg.trim().eq_ignore_ascii_case(&me.name);
+    if target_self {
+        let before = me.hp;
+        me.hp = (me.hp + heal).min(me.max_hp);
+        let gained = me.hp - before;
+        me.affects.retain(|a| a.skill != Skill::Poison);
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(me.current_room, Some(me.id),
+                &format!("\r\n{}'s hands glow with divine light.\r\n", me.name));
+        }
+        let mut out = CmdOutput::text(format!(
+            "\r\nDivine power knits your wounds (+{gained} HP). ({}/{})\r\n",
+            me.hp, me.max_hp));
+        if let Some(b) = learn_attempt(me, Skill::LayOnHands, 5) { out.text.push_str(&b); }
+        return out;
+    }
+
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(arg.trim())).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text(format!("\r\nNo one named '{}' is here.\r\n", arg.trim()));
+    };
+    let gained = {
+        let mut c = ph.character.lock().await;
+        let before = c.hp;
+        c.hp = (c.hp + heal).min(c.max_hp);
+        c.affects.retain(|a| a.skill != Skill::Poison);
+        c.hp - before
+    };
+    let _ = ph.send.send(format!(
+        "\r\n{} lays hands on you — divine light heals {gained} HP.\r\n", me.name));
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} lays healing hands on {}.\r\n", me.name, ph.name));
+    }
+    let mut out = CmdOutput::text(format!(
+        "\r\nYou channel divine healing into {} (+{gained} HP).\r\n", ph.name));
+    if let Some(b) = learn_attempt(me, Skill::LayOnHands, 5) { out.text.push_str(&b); }
+    out
+}
+
+/// Monk — Flurry of Blows: a burst of `2 + level/8` (max 4) unarmed strikes
+/// against your current/named target.  Drains 25 movement; 20s cooldown.
+async fn do_flurry(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::Skill;
+    if let Some(r) = martial_sig_gate(me, Skill::FlurryOfBlows) { return r; }
+    let learned = *me.skills.get(&Skill::FlurryOfBlows).unwrap_or(&0) as i32;
+
+    // Resolve target: named mob in room, else current fighting target.
+    let target_id: Option<u32> = if !arg.trim().is_empty() {
+        let key = arg.trim().to_ascii_lowercase();
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+    let Some(mob_id) = target_id else {
+        return CmdOutput::text("\r\nFlurry of blows against whom?\r\n".to_string());
+    };
+
+    me.reveal();
+    me.movement = (me.movement - 25).max(0);
+    me.set_ability_cooldown(Skill::FlurryOfBlows, 20);
+
+    let strikes = (2 + me.level / 8).clamp(2, 4);
+    let hit_chance = (40 + learned / 2).min(90);
+    let str_b = crate::character::str_damage_bonus(me.str_);
+
+    let mut to_me = String::from("\r\nYou explode into a flurry of blows!\r\n");
+    let mut mob_name = String::from("the creature");
+    let mut killed = false;
+    let mut killed_vnum = 0;
+    let mut mob_room = me.current_room;
+
+    for _ in 0..strikes {
+        if killed { break; }
+        let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+        let dmg = (crate::db::dice(1, 6) + me.level / 4 + str_b + me.bonus_damroll).max(1);
+        let dead = {
+            let mut w = world.lock().await;
+            let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+                Some(m) => (m.vnum, m.in_room),
+                None => break,
+            };
+            if in_room != me.current_room { break; }
+            mob_room = in_room;
+            killed_vnum = vnum;
+            mob_name = w.mob_protos.get(&vnum)
+                .map(|p| p.short_descr.clone()).unwrap_or_else(|| "the creature".into());
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            if me.fighting.is_none() {
+                me.fighting = Some(Target { id: mob_id, is_player: false });
+            }
+            if m.fighting.is_none() {
+                m.fighting = Some(Target { id: me.id, is_player: true });
+            }
+            if hit { m.hp -= dmg; m.affects.retain(|a| a.skill != Skill::Sleep); m.hp <= 0 } else { false }
+        };
+        if hit {
+            to_me.push_str(&format!("  Your fist slams {mob_name} for {dmg} damage!\r\n"));
+        } else {
+            to_me.push_str(&format!("  Your strike at {mob_name} goes wide.\r\n"));
+        }
+        if dead { killed = true; }
+    }
+
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} unleashes a flurry of blows at {mob_name}!\r\n", me.name));
+    }
+
+    if killed {
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum)).map(|p| p.exp as i64).unwrap_or(0)
+        };
+        crate::combat::kill_mob_immediate(mob_id, mob_room, &mob_name, &me.name, world, chars).await;
+        me.fighting = None;
+        to_me.push_str(&format!("\r\nYou have slain {mob_name}!\r\n"));
+        if xp > 0 {
+            me.exp += xp;
+            to_me.push_str(&format!("You gain {xp} experience.\r\n"));
+            if me.check_level_up() > 0 {
+                to_me.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp));
+            }
+        }
+        if let Some(q) = quest_check_kill(me, killed_vnum, world).await { to_me.push_str(&q); }
+    }
+    if let Some(b) = learn_attempt(me, Skill::FlurryOfBlows, 5) { to_me.push_str(&b); }
+    CmdOutput::text(to_me)
+}
+
+/// Warlock — Eldritch Blast: `1 + level/6` (max 4) beams of force, each
+/// `1d10` + INT bonus.  Save-for-half.  Routes through `cast`.
+async fn cast_eldritch_blast(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let beams = (1 + me.level / 6).clamp(1, 4);
+    let hit_chance = (70 + learned as i32 / 2).min(99);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    let mut base_dmg = 0;
+    for _ in 0..beams { base_dmg += crate::db::dice(1, 10); }
+    base_dmg += crate::character::str_damage_bonus(me.int_) + me.spell_power_bonus();
+    me.mana -= crate::character::Skill::EldritchBlast.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone()).unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (format!("\r\nCrackling beams of eldritch force lance into {mob_name} for {dmg} damage (partial resist)!\r\n"),
+         format!("Beams of crackling force streak from {}'s hand at {mob_name}.\r\n", me.name))
+    } else if hit {
+        (format!("\r\n{beams} beam(s) of crackling force blast {mob_name} for {dmg} damage!\r\n"),
+         format!("Beams of crackling force erupt from {}'s hand into {mob_name}.\r\n", me.name))
+    } else {
+        (format!("\r\nYour eldritch beams sizzle past {mob_name}.\r\n"),
+         format!("{}'s eldritch beams scorch the wall past {mob_name}.\r\n", me.name))
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum)).map(|p| p.exp as i64).unwrap_or(0)
+        };
+        crate::combat::kill_mob_immediate(mob_id, mob_room, &mob_name, &me.name, world, chars).await;
+        me.fighting = None;
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            if me.check_level_up() > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp));
+            }
+        }
+        if let Some(q) = quest_check_kill(me, killed_vnum, world).await { msg.push_str(&q); }
+        return CmdOutput::text(msg);
+    }
+    CmdOutput::text(to_me)
+}
+
+/// Cleric — Channel Divinity (Turn Undead): a burst of searing radiance
+/// that smites every evil-aligned creature in the room (`2d6 + level + WIS
+/// bonus`).  Non-evil creatures are unharmed.
+async fn cast_turn_undead(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    me.mana -= crate::character::Skill::TurnUndead.mana_cost();
+    let wis_b = (me.wis - 10) / 2;
+
+    // Snapshot evil mobs in the room.
+    let targets: Vec<u32> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).map(|r| r.mobs.iter().copied().filter(|&mid| {
+            w.mob_instances.iter().find(|m| m.id == mid)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.alignment < 0).unwrap_or(false)
+        }).collect()).unwrap_or_default()
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} raises a holy symbol — searing radiance floods the room!\r\n", me.name));
+    }
+    if targets.is_empty() {
+        return CmdOutput::text(
+            "\r\nYou call down holy radiance, but nothing evil is here to burn.\r\n".to_string());
+    }
+    let _ = learned;
+
+    let mut out = String::from("\r\nDivine light sears the unholy:\r\n");
+    for mob_id in targets {
+        let dmg = (crate::db::dice(2, 6) + me.level + wis_b).max(1);
+        let (mob_name, killed_vnum, dead, mob_room) = {
+            let mut w = world.lock().await;
+            let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+                Some(m) => (m.vnum, m.in_room),
+                None => continue,
+            };
+            if in_room != me.current_room { continue; }
+            let mob_name = w.mob_protos.get(&vnum)
+                .map(|p| p.short_descr.clone()).unwrap_or_else(|| "the creature".into());
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            m.hp -= dmg;
+            (mob_name, vnum, m.hp <= 0, in_room)
+        };
+        out.push_str(&format!("  Radiance burns {mob_name} for {dmg} damage!\r\n"));
+        if dead {
+            let xp = {
+                let w = world.lock().await;
+                w.mob_instances.iter().find(|m| m.id == mob_id)
+                    .and_then(|m| w.mob_protos.get(&m.vnum)).map(|p| p.exp as i64).unwrap_or(0)
+            };
+            crate::combat::kill_mob_immediate(mob_id, mob_room, &mob_name, &me.name, world, chars).await;
+            if me.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                me.fighting = None;
+            }
+            out.push_str(&format!("  {mob_name} crumbles to ash!\r\n"));
+            if xp > 0 {
+                me.exp += xp;
+                if me.check_level_up() > 0 {
+                    out.push_str(&format!(
+                        "\r\n*** You feel more powerful!  You are now level {}. ***\r\n", me.level));
+                }
+            }
+            if let Some(q) = quest_check_kill(me, killed_vnum, world).await { out.push_str(&q); }
+        }
+    }
+    CmdOutput::text(out)
+}
+
+/// Ranger — Hunter's Mark: mark a quarry; the ranger then deals bonus
+/// damage to that mob in melee (see `resolve_player_attack`).
+async fn cast_hunters_mark(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    me.mana -= crate::character::Skill::HuntersMark.mana_cost();
+    let (mob_id, mob_name) = {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let id = if !target_kw.is_empty() {
+            w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+                let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+                let p = w.mob_protos.get(&m.vnum)?;
+                if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                    Some(mid)
+                } else { None }
+            }))
+        } else {
+            me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+        };
+        match id {
+            Some(mid) => {
+                let name = w.mob_instances.iter().find(|m| m.id == mid)
+                    .and_then(|m| w.mob_protos.get(&m.vnum))
+                    .map(|p| p.short_descr.clone()).unwrap_or_else(|| "the creature".into());
+                (Some(mid), name)
+            }
+            None => (None, String::new()),
+        }
+    };
+    let Some(mob_id) = mob_id else {
+        return CmdOutput::text("\r\nMark whom as your quarry?\r\n".to_string());
+    };
+    me.hunters_mark = Some(mob_id);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} fixes a hunter's gaze on {mob_name}.\r\n", me.name));
+    }
+    CmdOutput::text(format!(
+        "\r\nYou mark {mob_name} as your quarry — your attacks will bite deeper.\r\n"))
+}
+
+/// Bard — Bardic Inspiration: grant self or a same-room ally a +hit/+dam
+/// boost for a while.  Routes through `cast`; costs mana.
+async fn cast_bardic_inspiration(
+    target_kw: &str,
+    me: &mut Character,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use crate::character::{Skill, Affect};
+    me.mana -= Skill::BardicInspiration.mana_cost();
+    let bonus = 1 + learned as i32 / 25;
+    let duration = 6 + learned as i32 / 10;
+    let aff = Affect {
+        skill: Skill::BardicInspiration, duration,
+        to_hit: bonus, to_dam: bonus, dmg_reduction: 0, dot_damage: 0, to_ac: 0,
+    };
+    let target_self = target_kw.trim().is_empty()
+        || target_kw.trim().eq_ignore_ascii_case(&me.name);
+    if target_self {
+        me.apply_affect(aff);
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(me.current_room, Some(me.id),
+                &format!("\r\n{} hums a stirring, inspiring tune.\r\n", me.name));
+        }
+        return CmdOutput::text(format!(
+            "\r\nYou steel yourself with an inspiring melody (+{bonus} to hit and damage).\r\n"));
+    }
+    let ph = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p|
+            p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(target_kw.trim())).cloned();
+        h
+    };
+    let Some(ph) = ph else {
+        return CmdOutput::text(format!("\r\nNo one named '{}' is here.\r\n", target_kw.trim()));
+    };
+    { let mut c = ph.character.lock().await; c.apply_affect(aff); }
+    let _ = ph.send.send(format!(
+        "\r\n{} inspires you with a stirring tune (+{bonus} to hit and damage)!\r\n", me.name));
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("\r\n{} sings an inspiring tune to {}.\r\n", me.name, ph.name));
+    }
+    CmdOutput::text(format!("\r\nYou inspire {} with a rousing melody.\r\n", ph.name))
 }
 
 /// `whirlwind` — Warrior melee skill that strikes every mob in the room.
@@ -14148,6 +14741,13 @@ async fn do_move(
             })
     };
     drop(w);
+    // Exhaustion gate: martial signature abilities drain movement (clamped
+    // at 0).  A mortal with no movement left can still fight and use those
+    // abilities, but cannot walk out of the room until stamina recovers.
+    if me.level < LVL_IMMORT && me.movement <= 0 {
+        return CmdOutput::text(
+            "\r\nYou are too exhausted to move — catch your breath first.\r\n".to_string());
+    }
     let mut auto_msg = String::new();
     if closed {
         // Autodoor: try to open a closed door in the path before refusing.

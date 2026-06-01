@@ -157,6 +157,11 @@ async fn tick_once(world: &Arc<Mutex<World>>, chars: &SharedChars) {
                     hit_bonus:     me.affect_hit_bonus() + me.bonus_hitroll,
                     dam_bonus:     me.affect_dam_bonus() + me.bonus_damroll,
                     has_haste:     me.affects.iter().any(|a| a.skill == crate::character::Skill::Haste),
+                    sneak_pct:     if me.class == Class::Rogue {
+                                       *me.skills.get(&crate::character::Skill::SneakAttack).unwrap_or(&0)
+                                   } else { 0 },
+                    was_hidden:    me.hidden,
+                    mark_target:   me.hunters_mark,
                 });
             }
         }
@@ -385,6 +390,12 @@ struct PlayerIntent {
     hit_bonus:     i32,
     dam_bonus:     i32,
     has_haste:     bool,
+    /// Rogue Sneak Attack: learned %, 0 if not a Rogue / unpracticed.
+    sneak_pct:     u8,
+    /// Whether the attacker was hidden at snapshot time (sneak trigger).
+    was_hidden:    bool,
+    /// Ranger Hunter's Mark: the marked mob iid, if any.
+    mark_target:   Option<u32>,
 }
 
 /// Defender-side passive-skill learn bump: roll `chance_pct`%, on hit
@@ -573,7 +584,19 @@ async fn resolve_player_attack(
             (dice(1, 4), false)
         };
         let raw = (base.max(1) + p.level / 4 + str_damage_bonus(p.str_score) + p.dam_bonus).max(1);
-        let dmg = if two_handed { raw + raw / 2 } else { raw };
+        let mut dmg = if two_handed { raw + raw / 2 } else { raw };
+        // Rogue Sneak Attack: bonus damage when hidden, or flanking (the mob
+        // is focused on someone other than this rogue).
+        let flanking = mob_inst.and_then(|m| m.fighting)
+            .map(|t| !(t.is_player && t.id == p.attacker_id))
+            .unwrap_or(false);
+        if p.sneak_pct > 0 && (p.was_hidden || flanking) {
+            dmg += dice(((p.level + 1) / 2).max(1), 6);
+        }
+        // Ranger Hunter's Mark: bonus damage against the marked quarry.
+        if p.mark_target == Some(p.target.id) {
+            dmg += dice(1, 6) + p.level / 4;
+        }
         (mob_ac, dmg)
     };
     let hit_chance = (60 + p.level + dex_hit_bonus(p.dex_score) + p.hit_bonus - mob_ac / 10)

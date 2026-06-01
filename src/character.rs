@@ -130,6 +130,33 @@ pub enum Skill {
     /// Warrior/Thief physical skill — befriend a weaker creature, turning
     /// it into a charmed pet (non-magical path to pets + mounts).
     Tame,
+
+    // ---- D&D 5e class signature abilities (one per class, exact-class
+    // gated — see `is_signature` / `is_class_allowed`). ----
+    /// Barbarian — primal fury self-buff (+damage, damage resistance).
+    Rage,
+    /// Bard — inspire an ally (grants +hit/+dam for a while).
+    BardicInspiration,
+    /// Cleric — Channel Divinity: searing radiance that routs evil foes.
+    TurnUndead,
+    /// Druid — Wild Shape: beast form (tougher hide + fiercer blows).
+    WildShape,
+    /// Fighter — Second Wind: catch your breath and recover HP.
+    SecondWind,
+    /// Monk — Flurry of Blows: a burst of extra unarmed strikes.
+    FlurryOfBlows,
+    /// Paladin — Lay on Hands: channel divine power to heal + cure poison.
+    LayOnHands,
+    /// Ranger — Hunter's Mark: mark your quarry for extra damage.
+    HuntersMark,
+    /// Rogue — Sneak Attack: bonus damage when hidden or flanking (passive).
+    SneakAttack,
+    /// Sorcerer — Innate Sorcery: self-buff that empowers your spells.
+    InnateSorcery,
+    /// Warlock — Eldritch Blast: signature beams of crackling force.
+    EldritchBlast,
+    /// Wizard — Arcane Recovery: meditate to recover spent mana.
+    ArcaneRecovery,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +224,18 @@ impl Skill {
             "infravision" | "infra"           => Some(Skill::Infravision),
             "stun"                            => Some(Skill::Stun),
             "fly" | "flight"                  => Some(Skill::Fly),
+            "rage"                            => Some(Skill::Rage),
+            "bardicinspiration" | "inspire"   => Some(Skill::BardicInspiration),
+            "turnundead" | "channeldivinity" | "turn" => Some(Skill::TurnUndead),
+            "wildshape" | "shift"             => Some(Skill::WildShape),
+            "secondwind"                      => Some(Skill::SecondWind),
+            "flurryofblows" | "flurry"        => Some(Skill::FlurryOfBlows),
+            "layonhands" | "layhands"         => Some(Skill::LayOnHands),
+            "huntersmark" | "huntermark" | "mark" => Some(Skill::HuntersMark),
+            "sneakattack"                     => Some(Skill::SneakAttack),
+            "innatesorcery" | "innate"        => Some(Skill::InnateSorcery),
+            "eldritchblast" | "eldritch" | "blast" => Some(Skill::EldritchBlast),
+            "arcanerecovery" | "meditate" | "recover" => Some(Skill::ArcaneRecovery),
             "calllightning" | "calllightening" => Some(Skill::CallLightning),
             "createwater" | "createspring" => Some(Skill::CreateWater),
             "curse"                           => Some(Skill::Curse),
@@ -309,6 +348,18 @@ impl Skill {
             Skill::Clone         => "clone",
             Skill::Peek          => "peek",
             Skill::Tame          => "tame",
+            Skill::Rage              => "rage",
+            Skill::BardicInspiration => "bardic inspiration",
+            Skill::TurnUndead        => "turn undead",
+            Skill::WildShape         => "wild shape",
+            Skill::SecondWind        => "second wind",
+            Skill::FlurryOfBlows     => "flurry of blows",
+            Skill::LayOnHands        => "lay on hands",
+            Skill::HuntersMark       => "hunter's mark",
+            Skill::SneakAttack       => "sneak attack",
+            Skill::InnateSorcery     => "innate sorcery",
+            Skill::EldritchBlast     => "eldritch blast",
+            Skill::ArcaneRecovery    => "arcane recovery",
         }
     }
 
@@ -318,6 +369,9 @@ impl Skill {
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
                 | Skill::Peek | Skill::Tame | Skill::Whirlwind
+                | Skill::Rage | Skill::WildShape | Skill::SecondWind
+                | Skill::FlurryOfBlows | Skill::LayOnHands | Skill::SneakAttack
+                | Skill::ArcaneRecovery
                 | Skill::Stun => SkillKind::Physical,
             Skill::MagicMissile | Skill::CureLight
                 | Skill::Bless  | Skill::BurningHands
@@ -347,6 +401,9 @@ impl Skill {
                 | Skill::ControlWeather
                 | Skill::GroupHeal | Skill::GroupArmor | Skill::GroupRecall
                 | Skill::AnimateDead | Skill::Clone
+                | Skill::BardicInspiration | Skill::TurnUndead
+                | Skill::HuntersMark | Skill::InnateSorcery
+                | Skill::EldritchBlast
                                       => SkillKind::Spell,
         }
     }
@@ -358,7 +415,15 @@ impl Skill {
                 | Skill::Sneak | Skill::Hide | Skill::Steal
                 | Skill::Dodge | Skill::Parry | Skill::Rescue | Skill::Disarm
                 | Skill::Peek | Skill::Tame | Skill::Whirlwind
+                | Skill::Rage | Skill::WildShape | Skill::SecondWind
+                | Skill::FlurryOfBlows | Skill::LayOnHands | Skill::SneakAttack
+                | Skill::ArcaneRecovery
                 | Skill::Stun => 0,
+            Skill::EldritchBlast     => 5,
+            Skill::HuntersMark       => 8,
+            Skill::BardicInspiration => 10,
+            Skill::TurnUndead        => 15,
+            Skill::InnateSorcery     => 20,
             Skill::MagicMissile => 8,
             Skill::CureLight    => 6,
             Skill::Bless        => 5,
@@ -507,13 +572,43 @@ impl Skill {
             Skill::Clone         => &[Class::Wizard],
             Skill::Peek          => &[Class::Rogue],
             Skill::Tame          => &[Class::Fighter, Class::Rogue],
+            // Signature abilities — exact leaf class only (see is_signature).
+            Skill::Rage              => &[Class::Barbarian],
+            Skill::BardicInspiration => &[Class::Bard],
+            Skill::TurnUndead        => &[Class::Cleric],
+            Skill::WildShape         => &[Class::Druid],
+            Skill::SecondWind        => &[Class::Fighter],
+            Skill::FlurryOfBlows     => &[Class::Monk],
+            Skill::LayOnHands        => &[Class::Paladin],
+            Skill::HuntersMark       => &[Class::Ranger],
+            Skill::SneakAttack       => &[Class::Rogue],
+            Skill::InnateSorcery     => &[Class::Sorcerer],
+            Skill::EldritchBlast     => &[Class::Warlock],
+            Skill::ArcaneRecovery    => &[Class::Wizard],
         }
     }
 
+    /// True for the 12 D&D class signature abilities. These are gated to an
+    /// EXACT leaf class (not inherited via the base archetype), so e.g. Rage
+    /// is Barbarian-only and never granted to other Fighter-line classes.
+    pub fn is_signature(self) -> bool {
+        matches!(self,
+            Skill::Rage | Skill::BardicInspiration | Skill::TurnUndead
+            | Skill::WildShape | Skill::SecondWind | Skill::FlurryOfBlows
+            | Skill::LayOnHands | Skill::HuntersMark | Skill::SneakAttack
+            | Skill::InnateSorcery | Skill::EldritchBlast | Skill::ArcaneRecovery)
+    }
+
     pub fn is_class_allowed(self, class: Class) -> bool {
-        // Derived classes (Barbarian, Bard, …) inherit their base archetype's
-        // skill access; the `allowed_classes` table is keyed on the 4 bases.
-        self.allowed_classes().contains(&class.base())
+        if self.is_signature() {
+            // Signature abilities are exact-class only — never inherited via
+            // the base archetype (Rage is Barbarian-only, etc.).
+            self.allowed_classes().contains(&class)
+        } else {
+            // Derived classes (Barbarian, Bard, …) inherit their base
+            // archetype's skill access; the table is keyed on the 4 bases.
+            self.allowed_classes().contains(&class.base())
+        }
     }
 
     /// Storage key for serialisation in the player file (spaces collapsed).
@@ -596,6 +691,18 @@ impl Skill {
             Skill::Clone         => "clone",
             Skill::Peek          => "peek",
             Skill::Tame          => "tame",
+            Skill::Rage              => "rage",
+            Skill::BardicInspiration => "bardic-inspiration",
+            Skill::TurnUndead        => "turn-undead",
+            Skill::WildShape         => "wild-shape",
+            Skill::SecondWind        => "second-wind",
+            Skill::FlurryOfBlows     => "flurry-of-blows",
+            Skill::LayOnHands        => "lay-on-hands",
+            Skill::HuntersMark       => "hunters-mark",
+            Skill::SneakAttack       => "sneak-attack",
+            Skill::InnateSorcery     => "innate-sorcery",
+            Skill::EldritchBlast     => "eldritch-blast",
+            Skill::ArcaneRecovery    => "arcane-recovery",
         }
     }
 
@@ -638,6 +745,10 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::AnimateDead, Skill::Clone,
     Skill::Peek,
     Skill::Tame,
+    // D&D 5e class signatures.
+    Skill::Rage, Skill::BardicInspiration, Skill::TurnUndead, Skill::WildShape,
+    Skill::SecondWind, Skill::FlurryOfBlows, Skill::LayOnHands, Skill::HuntersMark,
+    Skill::SneakAttack, Skill::InnateSorcery, Skill::EldritchBlast, Skill::ArcaneRecovery,
 ];
 
 // ---------------------------------------------------------------------------
@@ -964,6 +1075,15 @@ pub struct Character {
     /// take a breath").  None = no active cooldown.
     pub recall_cooldown_until: Option<std::time::Instant>,
 
+    /// Ranger Hunter's Mark: the mob instance id currently marked.  While
+    /// set, the ranger deals bonus damage to that mob (cp: D&D signatures).
+    /// Transient — cleared on a fresh login.
+    pub hunters_mark: Option<u32>,
+    /// Per-ability cooldown gates for the martial class signatures (Rage,
+    /// Second Wind, Flurry of Blows, Lay on Hands, Wild Shape, Arcane
+    /// Recovery).  Maps a Skill to the Instant at which it may be used
+    /// again.  Transient — reset on a fresh login.
+    pub ability_cooldowns: HashMap<Skill, std::time::Instant>,
 }
 
 impl Character {
@@ -975,6 +1095,40 @@ impl Character {
         self.sneaking = false;
         self.hidden   = false;
         was_hidden
+    }
+
+    /// Seconds remaining on an ability's cooldown (0 = ready).
+    pub fn ability_cooldown_remaining(&self, skill: Skill) -> u64 {
+        match self.ability_cooldowns.get(&skill) {
+            Some(&until) => {
+                let now = std::time::Instant::now();
+                if until > now { (until - now).as_secs() + 1 } else { 0 }
+            }
+            None => 0,
+        }
+    }
+
+    /// Start (or refresh) an ability's cooldown for `secs` seconds.
+    pub fn set_ability_cooldown(&mut self, skill: Skill, secs: u64) {
+        self.ability_cooldowns.insert(
+            skill,
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        );
+    }
+
+    /// Bonus damage added to this caster's offensive spells while the
+    /// Sorcerer's Innate Sorcery self-buff is active (0 otherwise).
+    pub fn spell_power_bonus(&self) -> i32 {
+        if self.affects.iter().any(|a| a.skill == Skill::InnateSorcery) {
+            (self.level / 2).max(1)
+        } else {
+            0
+        }
+    }
+
+    /// True while a Druid's Wild Shape beast form is active.
+    pub fn is_wild_shaped(&self) -> bool {
+        self.affects.iter().any(|a| a.skill == Skill::WildShape)
     }
 }
 
