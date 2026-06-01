@@ -1312,23 +1312,39 @@ impl Character {
     /// Class-specific HP gain per level. Mirrors the CircleMUD ranges in
     /// constants.c::Class_apply_table[].hit_dice.
     pub fn hp_per_level(class: Class) -> i32 {
-        match class.base() {
-            Class::Fighter   => 12,
-            Class::Cleric    => 9,
-            Class::Rogue     => 8,
-            Class::Wizard    => 6,
-            _                => 8, // Undefined
+        // Tracks D&D 5e hit dice (d12 → 13, d10 → 11-12, d8 → 8-9, d6 → 6),
+        // normalised so the four legacy base classes keep their old values
+        // (Fighter 12, Cleric 9, Rogue 8, Wizard 6).
+        match class {
+            Class::Barbarian => 13, // d12
+            Class::Fighter   => 12, // d10
+            Class::Paladin   => 12, // d10
+            Class::Ranger    => 11, // d10
+            Class::Cleric    =>  9, // d8
+            Class::Druid     =>  9, // d8
+            Class::Monk      =>  9, // d8
+            Class::Bard      =>  9, // d8
+            Class::Rogue     =>  8, // d8 (legacy value)
+            Class::Warlock   =>  8, // d8
+            Class::Sorcerer  =>  6, // d6
+            Class::Wizard    =>  6, // d6
+            Class::Undefined =>  8,
         }
     }
 
-    /// Class-specific mana gain per level.  Spellcasters scale faster.
+    /// Class-specific mana gain per level.  Full casters scale fastest;
+    /// half-casters (Paladin/Ranger) get a little (Ranger needs it for
+    /// Hunter's Mark); pure martials barely any.
     pub fn mana_per_level(class: Class) -> i32 {
-        match class.base() {
-            Class::Wizard    => 10,
-            Class::Cleric    =>  8,
-            Class::Rogue     =>  2,
-            Class::Fighter   =>  2,
-            _                =>  4, // Undefined
+        match class {
+            Class::Wizard | Class::Sorcerer => 10,
+            Class::Bard                     =>  9,
+            Class::Cleric | Class::Druid    =>  8,
+            Class::Warlock                  =>  8,
+            Class::Ranger                   =>  4,
+            Class::Paladin                  =>  3,
+            Class::Fighter | Class::Barbarian | Class::Monk | Class::Rogue => 2,
+            Class::Undefined                =>  4,
         }
     }
 
@@ -1436,8 +1452,8 @@ impl Character {
     /// representative title per ~5-level band).
     pub fn default_title_for(class: crate::players::Class, level: i32) -> &'static str {
         use crate::players::Class;
-        // Derived classes reuse their base archetype's title bands for now.
-        match class.base() {
+        // Each of the 12 D&D classes has its own banded titles.
+        match class {
             Class::Fighter => match level {
                 ..=4   => "the Warrior",
                 5..=9  => "the Soldier",
@@ -1478,7 +1494,87 @@ impl Character {
                 30..=33 => "the Arch-Mage",
                 _       => "the Immortal Mage",
             },
-            _ => "the Adventurer", // Undefined
+            Class::Barbarian => match level {
+                ..=4   => "the Brawler",
+                5..=9  => "the Berserker",
+                10..=14 => "the Reaver",
+                15..=19 => "the Marauder",
+                20..=24 => "the Ravager",
+                25..=29 => "the Warlord",
+                30..=33 => "the Chieftain",
+                _       => "the Immortal Barbarian",
+            },
+            Class::Bard => match level {
+                ..=4   => "the Busker",
+                5..=9  => "the Songsmith",
+                10..=14 => "the Minstrel",
+                15..=19 => "the Lyrist",
+                20..=24 => "the Troubadour",
+                25..=29 => "the Loremaster",
+                30..=33 => "the Virtuoso",
+                _       => "the Immortal Bard",
+            },
+            Class::Druid => match level {
+                ..=4   => "the Initiate",
+                5..=9  => "the Wanderer",
+                10..=14 => "the Shaper",
+                15..=19 => "the Keeper of the Grove",
+                20..=24 => "the Warden of the Wild",
+                25..=29 => "the Elder",
+                30..=33 => "the Archdruid",
+                _       => "the Immortal Druid",
+            },
+            Class::Monk => match level {
+                ..=4   => "the Novice",
+                5..=9  => "the Disciple",
+                10..=14 => "the Adept",
+                15..=19 => "the Master",
+                20..=24 => "the Grandmaster",
+                25..=29 => "the Ascendant",
+                30..=33 => "the Enlightened",
+                _       => "the Immortal Monk",
+            },
+            Class::Paladin => match level {
+                ..=4   => "the Squire",
+                5..=9  => "the Cavalier",
+                10..=14 => "the Crusader",
+                15..=19 => "the Templar",
+                20..=24 => "the Justicar",
+                25..=29 => "the Paragon",
+                30..=33 => "the Holy Avenger",
+                _       => "the Immortal Paladin",
+            },
+            Class::Ranger => match level {
+                ..=4   => "the Tracker",
+                5..=9  => "the Strider",
+                10..=14 => "the Pathfinder",
+                15..=19 => "the Hunter",
+                20..=24 => "the Warden",
+                25..=29 => "the Beastmaster",
+                30..=33 => "the Ranger Lord",
+                _       => "the Immortal Ranger",
+            },
+            Class::Sorcerer => match level {
+                ..=4   => "the Awakened",
+                5..=9  => "the Channeler",
+                10..=14 => "the Adept of Power",
+                15..=19 => "the Evoker",
+                20..=24 => "the Thaumaturge",
+                25..=29 => "the Archsorcerer",
+                30..=33 => "the Dragonblood",
+                _       => "the Immortal Sorcerer",
+            },
+            Class::Warlock => match level {
+                ..=4   => "the Pactbound",
+                5..=9  => "the Cultist",
+                10..=14 => "the Invoker",
+                15..=19 => "the Occultist",
+                20..=24 => "the Channeler of the Pact",
+                25..=29 => "the Maledictor",
+                30..=33 => "the Patron's Chosen",
+                _       => "the Immortal Warlock",
+            },
+            Class::Undefined => "the Adventurer",
         }
     }
 

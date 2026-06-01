@@ -129,6 +129,27 @@ impl Class {
         ]
     }
 
+    /// The class's primary ability/abilities (PHB p.33 Class Overview), as
+    /// stat keys ("str"/"dex"/"con"/"int"/"wis"/"cha").  Used to bias a fresh
+    /// character's rolled scores so class choice matters at creation.
+    pub fn primary_abilities(self) -> &'static [&'static str] {
+        match self {
+            Self::Barbarian => &["str"],
+            Self::Bard      => &["cha"],
+            Self::Cleric    => &["wis"],
+            Self::Druid     => &["wis"],
+            Self::Fighter   => &["str"],          // "Strength or Dexterity"
+            Self::Monk      => &["dex", "wis"],
+            Self::Paladin   => &["str", "cha"],
+            Self::Ranger    => &["dex", "wis"],
+            Self::Rogue     => &["dex"],
+            Self::Sorcerer  => &["cha"],
+            Self::Warlock   => &["cha"],
+            Self::Wizard    => &["int"],
+            Self::Undefined => &[],
+        }
+    }
+
     /// Case-insensitive full-name or unambiguous-prefix match over the 12
     /// selectable classes. Single letters that collide (e.g. "b" → Barbarian
     /// vs Bard, "w" → Warlock vs Wizard) return `None`.

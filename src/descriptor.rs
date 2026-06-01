@@ -378,6 +378,26 @@ pub async fn handle_connection(
                     ability_cooldowns: std::collections::HashMap::new(),
                 };
 
+                // Bias a brand-new mortal's rolled scores toward their class's
+                // primary ability (PHB p.33), so class choice matters at
+                // creation.  Only on a fresh character (no saved scores).
+                let fresh_abilities = p_ref.map(|p| p.str_).unwrap_or(0) <= 0;
+                if fresh_abilities && me.level < 34 {
+                    // +4 with a floor of 14 (and 18 cap) — the primary always
+                    // ends up a solid score so class identity is clear.
+                    for prim in me.class.primary_abilities() {
+                        match *prim {
+                            "str" => me.str_ = (me.str_ + 4).clamp(14, 18),
+                            "int" => me.int_ = (me.int_ + 4).clamp(14, 18),
+                            "wis" => me.wis  = (me.wis  + 4).clamp(14, 18),
+                            "dex" => me.dex  = (me.dex  + 4).clamp(14, 18),
+                            "con" => me.con  = (me.con  + 4).clamp(14, 18),
+                            "cha" => me.cha  = (me.cha  + 4).clamp(14, 18),
+                            _ => {}
+                        }
+                    }
+                }
+
                 // Settle any pending level-ups (e.g. character was offline
                 // when their XP crossed thresholds).  This always runs on
                 // login; it's a no-op for characters with consistent state.
