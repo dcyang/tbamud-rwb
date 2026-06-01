@@ -50,6 +50,8 @@ pub enum ConnState {
     /// Choosing a D&D background, filtered by the class's primary ability
     /// (Step 2 of character creation; no stock CON_* equivalent).
     SelectBackground,
+    /// Choosing a D&D species (PHB pp.186–197), after the background.
+    SelectSpecies,
     /// Choosing the background ability-score adjustment (+2/+1 or +1/+1/+1).
     SelectAbilityScores,
     /// Choosing the background's starting-equipment set (A or B).
@@ -379,6 +381,7 @@ pub async fn handle_connection(
                     nohassle:         session.level >= 34,   // immortals ignored by aggro mobs (cp202)
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
                     background:       p_ref.map(|p| p.background.clone()).unwrap_or_default(),
+                    species:          p_ref.map(|p| p.species).unwrap_or_default(),
                     muted:            p_ref.map(|p| p.muted).unwrap_or(false),
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
                     afk_msg:          None,
@@ -414,6 +417,8 @@ pub async fn handle_connection(
                     // the level-1 pools reflect the standard array's Con/casting
                     // stat rather than the throwaway 3d6 rolled above.
                     me.max_hp = Character::init_hp_for_class(me.class, me.con, me.level.max(1));
+                    // Dwarven Toughness: +1 max HP per level (PHB p.188).
+                    me.max_hp += me.species.hp_bonus_per_level() * me.level.max(1);
                     me.hp = me.max_hp;
                     let cast_stat = if me.class.base() == crate::players::Class::Cleric {
                         me.wis
@@ -830,6 +835,7 @@ async fn run_game_session(
                 .map(|d| d.as_secs() as i64).unwrap_or(rec.last_login);
             rec.god             = me.god.clone();
             rec.background      = me.background.clone();
+            rec.species         = me.species;
             rec.muted           = me.muted;
             rec.frozen          = me.frozen;
             rec.notes           = me.notes.clone();

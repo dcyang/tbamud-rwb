@@ -5179,6 +5179,14 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
                    else { format!("God:   {}\r\n", me.god) };
     let bkgd_line = if me.background.is_empty() { String::new() }
                     else { format!("Bkgd:  {}\r\n", me.background) };
+    let race_line = if me.species == crate::players::Species::Undefined { String::new() }
+                    else {
+                        let dv = me.species.darkvision();
+                        let dv_str = if dv > 0 { format!(", darkvision {dv} ft") }
+                                     else { String::new() };
+                        format!("Race:  {} ({}{})\r\n",
+                            me.species.as_str(), me.species.size(), dv_str)
+                    };
     let clan_line = if me.clan.is_empty() { String::new() }
                     else { format!("Clan:  {}\r\n", me.clan) };
     let pvp_line = if me.pkills + me.pdeaths > 0 {
@@ -5211,7 +5219,7 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         } else { String::new() }
     };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{bkgd_line}{clan_line}{pvp_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{race_line}{bkgd_line}{clan_line}{pvp_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n{spell_line}",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -16421,8 +16429,8 @@ pub async fn render_room(
                     for slot in c.equipment.iter().flatten() {
                         v.push(*slot);
                     }
-                    let infra = c.affects.iter()
-                        .any(|a| a.skill == crate::character::Skill::Infravision);
+                    // Active Infravision affect OR a darkvision species trait.
+                    let infra = c.has_darkvision();
                     (v, infra)
                 }
                 None => (Vec::new(), false),

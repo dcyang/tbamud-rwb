@@ -135,6 +135,130 @@ pub fn background_proficiencies(name: &str) -> Option<(&'static [&'static str], 
     })
 }
 
+/// The 10 D&D 5e (2024 PHB, logical pp.186–197) player species, in PHB
+/// (alphabetical) order.  Persisted by name on the `Spec:` line.  Chosen at
+/// creation right after the background.  Languages are intentionally NOT
+/// modeled.  A handful of traits are mechanically active (see the helper
+/// methods — darkvision, Dwarven Toughness, Gnomish Cunning, Halfling Luck);
+/// the rest (breath weapons, lineage spells, Large Form, &c.) are flavour for
+/// now and surfaced via `traits_summary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Species {
+    #[default]
+    Undefined,
+    Aasimar,
+    Dragonborn,
+    Dwarf,
+    Elf,
+    Gnome,
+    Goliath,
+    Halfling,
+    Human,
+    Orc,
+    Tiefling,
+}
+
+impl Species {
+    /// The 10 selectable species, in PHB (alphabetical) order.
+    pub fn selectable() -> &'static [Species] {
+        use Species::*;
+        &[Aasimar, Dragonborn, Dwarf, Elf, Gnome, Goliath, Halfling, Human, Orc, Tiefling]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        use Species::*;
+        match self {
+            Undefined  => "Undefined",
+            Aasimar    => "Aasimar",
+            Dragonborn => "Dragonborn",
+            Dwarf      => "Dwarf",
+            Elf        => "Elf",
+            Gnome      => "Gnome",
+            Goliath    => "Goliath",
+            Halfling   => "Halfling",
+            Human      => "Human",
+            Orc        => "Orc",
+            Tiefling   => "Tiefling",
+        }
+    }
+
+    /// Case-insensitive full-name or unambiguous-prefix match over the 10
+    /// species.  Single letters that collide (`d`→Dragonborn/Dwarf,
+    /// `g`→Gnome/Goliath, `h`→Halfling/Human) return `None`.
+    pub fn parse_name(s: &str) -> Option<Species> {
+        let s = s.trim().to_ascii_lowercase();
+        if s.is_empty() { return None; }
+        if let Some(&sp) = Self::selectable().iter()
+            .find(|sp| sp.as_str().eq_ignore_ascii_case(&s))
+        {
+            return Some(sp);
+        }
+        let matches: Vec<Species> = Self::selectable().iter().copied()
+            .filter(|sp| sp.as_str().to_ascii_lowercase().starts_with(&s))
+            .collect();
+        if matches.len() == 1 { Some(matches[0]) } else { None }
+    }
+
+    /// Darkvision range in feet (0 = none), per the PHB species traits.
+    pub fn darkvision(self) -> i32 {
+        use Species::*;
+        match self {
+            Dwarf | Orc                                       => 120,
+            Aasimar | Dragonborn | Elf | Gnome | Tiefling     => 60,
+            Goliath | Halfling | Human | Undefined            => 0,
+        }
+    }
+
+    /// PHB Size category (cosmetic/flavour).  Species that may choose Medium or
+    /// Small are listed as "Medium/Small".
+    pub fn size(self) -> &'static str {
+        use Species::*;
+        match self {
+            Gnome | Halfling                  => "Small",
+            Aasimar | Human | Tiefling        => "Medium/Small",
+            _                                 => "Medium",
+        }
+    }
+
+    /// Bonus to maximum HP per character level (Dwarven Toughness: +1/level).
+    /// 0 for every other species.
+    pub fn hp_bonus_per_level(self) -> i32 {
+        if matches!(self, Species::Dwarf) { 1 } else { 0 }
+    }
+
+    /// Gnomish Cunning: advantage on Intelligence, Wisdom, and Charisma saving
+    /// throws.  (Other PHB save-advantage traits — Fey Ancestry, Brave, Dwarven
+    /// Resilience — key on conditions the engine doesn't model.)
+    pub fn mental_save_advantage(self) -> bool {
+        matches!(self, Species::Gnome)
+    }
+
+    /// Halfling Luck: when you roll a natural 1 on a d20 test, reroll and use
+    /// the new roll.  Applied to the saving throws / ability checks the engine
+    /// rolls.
+    pub fn has_luck(self) -> bool {
+        matches!(self, Species::Halfling)
+    }
+
+    /// One-line trait summary for the selection menu and `score`.
+    pub fn traits_summary(self) -> &'static str {
+        use Species::*;
+        match self {
+            Aasimar    => "Darkvision 60, resist necrotic/radiant, healing hands, Light cantrip",
+            Dragonborn => "Darkvision 60, draconic breath weapon, ancestry damage resistance",
+            Dwarf      => "Darkvision 120, poison resilience, +1 HP/level, stonecunning",
+            Elf        => "Darkvision 60, fey ancestry, keen senses, trance (no sleep)",
+            Gnome      => "Darkvision 60, gnomish cunning (adv. on INT/WIS/CHA saves)",
+            Goliath    => "Speed 35, giant ancestry boon, powerful build",
+            Halfling   => "Brave, halfling nimbleness, lucky (reroll 1s), naturally stealthy",
+            Human      => "Resourceful, skillful (a free skill), versatile (an origin feat)",
+            Orc        => "Darkvision 120, adrenaline rush, relentless endurance",
+            Tiefling   => "Darkvision 60, fiendish legacy resistance, Thaumaturgy cantrip",
+            Undefined  => "",
+        }
+    }
+}
+
 impl Class {
     pub fn from_i8(v: i8) -> Self {
         match v {
@@ -441,6 +565,8 @@ pub struct PlayerRecord {
     pub god:           String,
     /// D&D 5e background chosen at creation (cosmetic for now; empty = none).
     pub background:    String,
+    /// D&D 5e species chosen at creation (PHB pp.186–197; Undefined = none).
+    pub species:       Species,
     /// Chosen class starting-equipment option (0 = none/legacy, 1 = A, 2 = B,
     /// 3 = C for Fighter).  Consumed once at first login (PHB Chapter 3).
     pub start_kit_class: i32,
@@ -693,6 +819,7 @@ impl PlayerDb {
                 "LLog" => rec.last_login = val.parse().unwrap_or(0),
                 "God"  => rec.god  = val.to_string(),
                 "Bkgd" => rec.background = val.to_string(),
+                "Spec" => rec.species = Species::parse_name(val).unwrap_or_default(),
                 "SKit" => rec.start_kit_background = val.parse().unwrap_or(0),
                 "CKit" => rec.start_kit_class = val.parse().unwrap_or(0),
                 "ADst" => rec.ability_dist = val.parse().unwrap_or(0),
@@ -815,6 +942,7 @@ impl PlayerDb {
         if rec.last_login > 0   { writeln!(f, "LLog: {}", rec.last_login)?; }
         if !rec.god.is_empty()  { writeln!(f, "God : {}", rec.god)?; }
         if !rec.background.is_empty() { writeln!(f, "Bkgd: {}", rec.background)?; }
+        if rec.species != Species::Undefined { writeln!(f, "Spec: {}", rec.species.as_str())?; }
         if rec.start_kit_background != 0 { writeln!(f, "SKit: {}", rec.start_kit_background)?; }
         if rec.start_kit_class != 0 { writeln!(f, "CKit: {}", rec.start_kit_class)?; }
         if rec.ability_dist != 0 { writeln!(f, "ADst: {}", rec.ability_dist)?; }

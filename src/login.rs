@@ -147,6 +147,19 @@ fn class_equipment_menu(class: Class) -> String {
     s
 }
 
+/// Step-3 species menu (PHB pp.186–197): the 10 species in alphabetical order,
+/// each with a one-line trait summary.  Chosen by number or name.
+fn species_menu() -> String {
+    use crate::players::Species;
+    let mut s = String::from("\r\nChoose a species:\r\n");
+    for (i, sp) in Species::selectable().iter().enumerate() {
+        s.push_str(&format!("  {:>2}) {:<11}{}\r\n",
+            i + 1, sp.as_str(), sp.traits_summary()));
+    }
+    s.push_str("Species: ");
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Login session state
 // ---------------------------------------------------------------------------
@@ -591,9 +604,38 @@ impl LoginSession {
                     p.background = bg.to_string();
                 }
 
-                // Step 2b: choose the background's ability-score adjustment.
+                // Step 3: choose a species (PHB pp.186–197).
+                self.state = ConnState::SelectSpecies;
+                LoginOutput::send(species_menu())
+            }
+
+            // ---------------------------------------------------------------
+            // Step 3 — species selection (PHB pp.186–197)
+            // ---------------------------------------------------------------
+            ConnState::SelectSpecies => {
+                use crate::players::Species;
+                let trimmed = input.trim();
+                let chosen = trimmed.parse::<usize>().ok()
+                    .filter(|n| (1..=Species::selectable().len()).contains(n))
+                    .map(|n| Species::selectable()[n - 1])
+                    .or_else(|| Species::parse_name(trimmed));
+                let species = match chosen {
+                    Some(sp) => sp,
+                    None => {
+                        return LoginOutput::send(format!(
+                            "\r\nThat's not a species.\r\n{}", species_menu()));
+                    }
+                };
+                if let Some(p) = &mut self.player {
+                    p.species = species;
+                }
+
+                // Step 3b: choose the background's ability-score adjustment.
+                let class = self.player.as_ref().map(|p| p.class).unwrap_or_default();
+                let bg = self.player.as_ref()
+                    .map(|p| p.background.clone()).unwrap_or_default();
                 self.state = ConnState::SelectAbilityScores;
-                LoginOutput::send(ability_dist_menu(class, bg))
+                LoginOutput::send(ability_dist_menu(class, &bg))
             }
 
             // ---------------------------------------------------------------

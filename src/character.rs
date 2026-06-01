@@ -985,6 +985,10 @@ pub struct Character {
     /// D&D 5e background chosen at creation (Step 2).  Persisted; cosmetic for
     /// now (no ability/feat/skill mechanics attached yet).
     pub background:   String,
+    /// D&D 5e species chosen at creation (PHB pp.186–197).  Persisted.  Drives
+    /// darkvision, Dwarven Toughness HP, Gnomish Cunning save advantage, and
+    /// Halfling Luck; the rest of each species' traits are flavour for now.
+    pub species:      crate::players::Species,
     /// Muted: cannot use chat channels (say/tell/gossip/auction/...).
     /// Set by `mute` immortal command.  Persisted.
     pub muted:        bool,
@@ -1191,10 +1195,36 @@ impl Character {
             .unwrap_or(false)
     }
 
-    /// Roll a saving throw vs `dc`: d20 + saving-throw bonus >= dc.
-    pub fn roll_saving_throw(&self, a: Ability, dc: i32) -> bool {
+    /// Roll a single d20, applying Halfling Luck (reroll a natural 1 once,
+    /// keeping the new roll).
+    pub fn roll_d20(&self) -> i32 {
         use rand::Rng;
-        rand::thread_rng().gen_range(1..=20) + self.saving_throw(a) >= dc
+        let mut rng = rand::thread_rng();
+        let r = rng.gen_range(1..=20);
+        if r == 1 && self.species.has_luck() { rng.gen_range(1..=20) } else { r }
+    }
+
+    /// A d20 test: `roll + bonus`, with optional advantage (roll twice, keep
+    /// the higher).  Each die honours Halfling Luck.
+    pub fn roll_d20_test(&self, bonus: i32, advantage: bool) -> i32 {
+        let a = self.roll_d20();
+        let roll = if advantage { a.max(self.roll_d20()) } else { a };
+        roll + bonus
+    }
+
+    /// Roll a saving throw vs `dc`: d20 + saving-throw bonus >= dc.  Gnomish
+    /// Cunning grants advantage on INT/WIS/CHA saves; Halfling Luck rerolls 1s.
+    pub fn roll_saving_throw(&self, a: Ability, dc: i32) -> bool {
+        let advantage = self.species.mental_save_advantage()
+            && matches!(a, Ability::Int | Ability::Wis | Ability::Cha);
+        self.roll_d20_test(self.saving_throw(a), advantage) >= dc
+    }
+
+    /// Whether this character can see in the dark — from a darkvision species
+    /// trait (PHB) or an active Infravision affect.
+    pub fn has_darkvision(&self) -> bool {
+        self.species.darkvision() > 0
+            || self.affects.iter().any(|a| a.skill == Skill::Infravision)
     }
 }
 
@@ -1756,9 +1786,10 @@ impl Character {
             && self.exp >= Self::exp_for_level(self.level)
         {
             self.level += 1;
-            // Class-specific HP gain + CON bonus, heal to full.
+            // Class-specific HP gain + CON bonus (+ Dwarven Toughness), heal full.
             let con_bonus = (self.con - 10).max(0) / 2;
-            self.max_hp   += Self::hp_per_level(self.class)   + con_bonus;
+            self.max_hp   += Self::hp_per_level(self.class) + con_bonus
+                + self.species.hp_bonus_per_level();
             self.hp = self.max_hp;
             // Mana gain: scales with INT for arcane, WIS for divine.
             let casting_stat = match self.class.base() {
