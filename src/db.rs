@@ -593,6 +593,9 @@ pub const FISH_VNUM:           crate::world::ObjVnum = 99011;
 /// Crafted-food output protos (cp230 crafting v1).
 pub const TRAIL_RATIONS_VNUM:  crate::world::ObjVnum = 99012;
 pub const FISH_STEW_VNUM:      crate::world::ObjVnum = 99013;
+/// Skinning material + its crafted armor (cp231).
+pub const HIDE_VNUM:           crate::world::ObjVnum = 99014;
+pub const LEATHER_ARMOR_VNUM:  crate::world::ObjVnum = 99015;
 
 /// Insert four hardcoded synthetic prototypes so the first-login path
 /// can spawn a class-aware newbie kit without depending on world-file
@@ -808,6 +811,38 @@ fn inject_newbie_kit_protos(world: &mut crate::world::World) {
         affect_flags: [0;4],
         value: [18, 0, 0, 0],
         weight: 1, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99014: a tattered hide — crafting material (cp231).  item_type 12 (OTHER).
+    world.obj_protos.insert(HIDE_VNUM, ObjProto {
+        vnum: HIDE_VNUM,
+        name: "hide tattered".to_string(),
+        short_description: "a tattered hide".to_string(),
+        description: "A tattered animal hide lies here.".to_string(),
+        action_description: String::new(),
+        item_type: 12,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [0, 0, 0, 0],
+        weight: 2, cost: 0, rent: 0, level: 0, timer: 0,
+        extras: Vec::new(),
+        affected: Vec::new(),
+    });
+    // 99015: crafted leather armor — ITEM_ARMOR, AC 3, wear body (cp231).
+    world.obj_protos.insert(LEATHER_ARMOR_VNUM, ObjProto {
+        vnum: LEATHER_ARMOR_VNUM,
+        name: "armor leather crafted".to_string(),
+        short_description: "a suit of leather armor".to_string(),
+        description: "A suit of crafted leather armor lies here.".to_string(),
+        action_description: String::new(),
+        item_type: ITEM_ARMOR,
+        extra_flags: [0;4],
+        wear_flags: [crate::character::ITEM_WEAR_TAKE | crate::character::ITEM_WEAR_BODY, 0, 0, 0],
+        affect_flags: [0;4],
+        value: [3, 0, 0, 0],
+        weight: 8, cost: 0, rent: 0, level: 0, timer: 0,
         extras: Vec::new(),
         affected: Vec::new(),
     });

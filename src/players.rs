@@ -171,6 +171,7 @@ pub struct PlayerRecord {
     pub thirst:        i32,
     /// Vanity title (empty for new chars).
     pub title:         String,
+    pub description:   String,
     /// Custom prompt format with %h/%H/%m/%M/%g/%x placeholders.
     /// Empty means use the legacy "> " prompt.
     pub prompt_format: String,
@@ -407,6 +408,7 @@ impl PlayerDb {
                 "Hung" => rec.hunger = val.parse().unwrap_or(24),
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 "Titl" => rec.title  = val.to_string(),
+                "Desc" => rec.description = val.to_string(),
                 "Bank" => rec.bank_gold = val.parse().unwrap_or(0),
                 "Prmt" => rec.prompt_format = val.to_string(),
                 "Alis" => {
@@ -526,6 +528,7 @@ impl PlayerDb {
         writeln!(f, "Hung: {}", rec.hunger)?;
         writeln!(f, "Thst: {}", rec.thirst)?;
         if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
+        if !rec.description.is_empty() { writeln!(f, "Desc: {}", rec.description)?; }
         if rec.bank_gold > 0     { writeln!(f, "Bank: {}", rec.bank_gold)?; }
         if !rec.prompt_format.is_empty() { writeln!(f, "Prmt: {}", rec.prompt_format)?; }
         let mut anames: Vec<&String> = rec.aliases.keys().collect();

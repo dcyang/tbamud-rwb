@@ -671,6 +671,10 @@ pub struct Character {
     /// Vanity title shown after the name on `who` and `score`.  Empty
     /// for new characters; trimmed and length-capped on set.
     pub title:        String,
+    /// Self-set physical description shown when another player `look`s at
+    /// this character.  Empty by default; set via `describe` (cp232).
+    /// Persisted, control-stripped + length-capped.
+    pub description:  String,
     /// Hours of food remaining. Counts down each game-hour tick;
     /// reaching 0 starts deducting HP. `-1` is the "never hungry"
     /// sentinel used by immortals and applied by certain food affects.

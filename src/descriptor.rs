@@ -310,6 +310,7 @@ pub async fn handle_connection(
                             Character::default_title_for(cls, session.level.max(1)).to_string()
                         } else { saved }
                     },
+                    description:      p_ref.map(|p| p.description.clone()).unwrap_or_default(),
                     bonus_hitroll:    0,
                     bonus_damroll:    0,
                     bonus_ac:         0,
@@ -683,6 +684,7 @@ async fn run_game_session(
             rec.hunger          = me.hunger;
             rec.thirst          = me.thirst;
             rec.title           = me.title.clone();
+            rec.description      = me.description.clone();
             rec.bank_gold       = me.bank_gold;
             rec.prompt_format   = me.prompt_format.clone();
             rec.aliases         = me.aliases.clone();

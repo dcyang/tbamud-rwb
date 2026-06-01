@@ -85,7 +85,7 @@ const COMMANDS: &[&str] = &[
     "north", "east", "south", "west", "up", "down",
     // Common short verbs
     "look", "inventory", "kill", "flee",
-    "get", "drop", "junk", "donate", "sacrifice", "sac", "butcher", "cook", "forage", "fish",
+    "get", "drop", "junk", "donate", "sacrifice", "sac", "butcher", "skin", "cook", "forage", "fish",
     "recipes", "craft", "put", "give", "wield", "wear", "remove",
     "examine", "compare",
     "list", "buy", "sell", "appraise", "value",
@@ -104,14 +104,14 @@ const COMMANDS: &[&str] = &[
     "score", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "eat", "fill", "empty", "recite", "use", "zap", "light", "extinguish",
-    "follow", "mount", "dismount", "tame", "group", "gtell", "split", "report", "title", "gossip", "chat",
+    "follow", "mount", "dismount", "tame", "group", "gtell", "split", "report", "title", "describe", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "hunt", "mail", "spells", "recall",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk", "bind", "unbind",
     "achievements", "achs",
-    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "wizlock",
+    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "oset", "mset", "rset", "wizlock",
     "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "nohassle", "mute", "freeze",
@@ -295,6 +295,7 @@ pub async fn dispatch_command(
         Some("donate")    => do_donate(rest, me, world, chars).await,
         Some("sacrifice") | Some("sac") => do_sacrifice(rest, me, world, chars).await,
         Some("butcher")   => do_butcher(rest, me, world, chars).await,
+        Some("skin")      => do_skin(rest, me, world, chars).await,
         Some("cook")      => do_cook(rest, me, world, chars).await,
         Some("forage")    => do_forage(me, world, chars).await,
         Some("fish")      => do_fish(me, world, chars).await,
@@ -398,6 +399,7 @@ pub async fn dispatch_command(
         Some("split")     => do_split(rest, me, chars).await,
         Some("report")    => do_report(me, chars).await,
         Some("title")     => do_title(rest, me),
+        Some("describe") | Some("description") => do_describe(rest, me),
         Some("gossip") | Some("chat") => do_gossip(rest, me, world, chars).await,
         Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
         Some("whisper")   => do_whisper(rest, me, chars).await,
@@ -442,6 +444,9 @@ pub async fn dispatch_command(
         Some("househere") => do_househere(me, world).await,
         Some("house")     => do_house(rest, me, world, players).await,
         Some("set")       => do_set(rest, me, chars).await,
+        Some("oset")      => do_oset(rest, me, world).await,
+        Some("mset")      => do_mset(rest, me, world).await,
+        Some("rset")      => do_rset(rest, me, world).await,
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
         Some("olist")     => do_olist(rest, me, world).await,
@@ -613,7 +618,19 @@ async fn do_look(
         p.current_room == me.current_room && p.id != me.id
             && p.name.to_ascii_lowercase() == key
     }) {
-        return CmdOutput::text(format!("\r\nYou see {}, a player.\r\n", other.name));
+        let (title, desc) = {
+            let c = other.character.lock().await;
+            (c.title.clone(), c.description.clone())
+        };
+        let header = if title.is_empty() {
+            format!("You see {}, a player.", other.name)
+        } else {
+            format!("You see {} {}.", other.name, title)
+        };
+        if desc.is_empty() {
+            return CmdOutput::text(format!("\r\n{header}\r\n"));
+        }
+        return CmdOutput::text(format!("\r\n{header}\r\n{desc}\r\n"));
     }
 
     CmdOutput::text("\r\nYou do not see that here.\r\n".to_string())
@@ -1403,6 +1420,63 @@ async fn do_butcher(
     ))
 }
 
+/// `skin <corpse>` (cp231): strip the hide from a corpse on the floor for
+/// a crafting material (a tattered hide).  Like `butcher` but yields a
+/// hide instead of meat — pairs with the leather-armor recipe (cp230
+/// crafting).  Requires a wielded blade; corpse contents spill to the
+/// floor via `extract_obj`.
+async fn do_skin(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    if me.equipment[crate::character::WEAR_WIELD].is_none() {
+        return CmdOutput::text("\r\nYou need to wield a blade to skin a corpse.\r\n".to_string());
+    }
+    let kw = arg.trim().to_ascii_lowercase();
+    if kw.is_empty() {
+        return CmdOutput::text("\r\nSkin what?\r\n".to_string());
+    }
+    let (iid, short) = {
+        let w = world.lock().await;
+        let Some(r) = w.rooms.get(&me.current_room) else {
+            return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+        };
+        let mut hit = None;
+        for &iid in &r.objects {
+            if let Some(obj) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if obj.corpse_of.is_some() && obj_matches_keyword(&w, obj, &kw) {
+                    hit = Some((iid, obj_view(&w, obj).short));
+                    break;
+                }
+            }
+        }
+        match hit {
+            Some(h) => h,
+            None => return CmdOutput::text(format!("\r\nThere is no corpse called '{kw}' here.\r\n")),
+        }
+    };
+    let hide_short = {
+        let mut w = world.lock().await;
+        w.extract_obj(iid);
+        if let Some(hiid) = w.spawn_obj(crate::db::HIDE_VNUM) {
+            me.inventory.push(hiid);
+            w.obj_protos.get(&crate::db::HIDE_VNUM)
+                .map(|p| p.short_description.clone())
+                .unwrap_or_else(|| "a tattered hide".to_string())
+        } else {
+            "a tattered hide".to_string()
+        }
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("{} skins {short}.\r\n", me.name));
+    }
+    CmdOutput::text(format!("\r\nYou skin {short}, peeling away {hide_short}.\r\n"))
+}
+
 /// `cook <food>` (cp227): cook a hunk of raw meat into a more filling
 /// cooked steak.  Requires a lit fire nearby — any lit ITEM_LIGHT in
 /// inventory, equipment, or on the room floor (ties into cp207 light
@@ -1568,6 +1642,12 @@ fn recipes() -> &'static [Recipe] {
             inputs: &[(FISH_VNUM, 1), (BERRIES_VNUM, 1)],
             output: FISH_STEW_VNUM,
             requires_fire: true,
+        },
+        Recipe {
+            name: "leather armor",
+            inputs: &[(HIDE_VNUM, 2)],
+            output: LEATHER_ARMOR_VNUM,
+            requires_fire: false,
         },
     ]
 }
@@ -3884,6 +3964,132 @@ async fn do_househere(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 /// of common fields: level / hp / maxhp / mana / maxmana / gold / exp /
 /// room. Room change updates the registry and broadcasts a "vanishes"
 /// / "appears" pair so other players see the move.
+/// `rset <field> <value>` (cp235): edit the room the immortal is standing
+/// in (builder tool, room parallel to `oset`/`mset`).  Fields: `sector
+/// <n>` sets the sector type, `name <text>` renames the room, `flags <n>`
+/// overwrites `room_flags[0]` (raw bitmask).  Operates on `me.current_room`
+/// — no vnum argument needed.
+async fn do_rset(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let parts: Vec<&str> = arg.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return CmdOutput::text(
+            "\r\nUsage: rset <field> <value>\r\n  Fields: sector <n>  name <text>  flags <bitmask>\r\n".to_string()
+        );
+    }
+    let field = parts[0].to_ascii_lowercase();
+    let value = parts[1].trim();
+    let vnum = me.current_room;
+    let mut w = world.lock().await;
+    let Some(r) = w.rooms.get_mut(&vnum) else {
+        return CmdOutput::text("\r\nYou are nowhere.\r\n".to_string());
+    };
+    match field.as_str() {
+        "sector" => {
+            let Ok(n) = value.parse::<i32>() else {
+                return CmdOutput::text("\r\nBad sector number.\r\n".to_string());
+            };
+            r.sector_type = n;
+            CmdOutput::text(format!("\r\nRoom {vnum} sector set to {n}.\r\n"))
+        }
+        "name" => {
+            let clean: String = value.chars().filter(|c| !c.is_control()).take(80).collect();
+            r.name = clean.clone();
+            CmdOutput::text(format!("\r\nRoom {vnum} name set to '{clean}'.\r\n"))
+        }
+        "flags" => {
+            let Ok(n) = value.parse::<u32>() else {
+                return CmdOutput::text("\r\nBad flags bitmask.\r\n".to_string());
+            };
+            r.room_flags[0] = n;
+            CmdOutput::text(format!("\r\nRoom {vnum} flags[0] set to {n}.\r\n"))
+        }
+        _ => CmdOutput::text(format!("\r\nUnknown field '{field}'.\r\n")),
+    }
+}
+
+/// `mset <vnum> <field> <value>` (cp234): edit a mob prototype's numeric
+/// stats at runtime (immortal builder tool, mob parallel to `oset`).
+/// Fields: level, hitroll, damroll, ac, gold, exp, alignment, hpdice,
+/// hpsize, hpadd, damdice, damsize.  Affects the prototype (future
+/// spawns); already-spawned instances keep their rolled HP.
+async fn do_mset(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() < 3 {
+        return CmdOutput::text(
+            "\r\nUsage: mset <vnum> <field> <value>\r\n  Fields: level hitroll damroll ac gold exp alignment hpdice hpsize hpadd damdice damsize\r\n".to_string()
+        );
+    }
+    let Ok(vnum) = parts[0].parse::<crate::world::MobVnum>() else {
+        return CmdOutput::text("\r\nThat's not a valid mob vnum.\r\n".to_string());
+    };
+    let field = parts[1].to_ascii_lowercase();
+    let Ok(v) = parts[2].parse::<i32>() else {
+        return CmdOutput::text(format!("\r\nBad value for '{field}'.\r\n"));
+    };
+    let mut w = world.lock().await;
+    let Some(p) = w.mob_protos.get_mut(&vnum) else {
+        return CmdOutput::text(format!("\r\nNo mob prototype with vnum {vnum}.\r\n"));
+    };
+    match field.as_str() {
+        "level"     => p.level = v,
+        "hitroll"   => p.hitroll = v,
+        "damroll"   => p.damroll = v,
+        "ac"        => p.ac = v,
+        "gold"      => p.gold = v,
+        "exp"       => p.exp = v,
+        "alignment" | "align" => p.alignment = v,
+        "hpdice"    => p.hp_dice = v,
+        "hpsize"    => p.hp_size = v,
+        "hpadd"     => p.hp_add = v,
+        "damdice"   => p.dam_dice = v,
+        "damsize"   => p.dam_size = v,
+        _ => return CmdOutput::text(format!("\r\nUnknown field '{field}'.\r\n")),
+    }
+    let short = p.short_descr.clone();
+    CmdOutput::text(format!("\r\nSet {short} (vnum {vnum}) {field} = {v}.\r\n"))
+}
+
+/// `oset <vnum> <field> <value>` (cp233): edit an object prototype's
+/// numeric stats at runtime (immortal builder tool).  Fields: cost,
+/// weight, level, timer, value0..value3.  Affects the prototype, so it
+/// changes all current and future instances (consistent with our
+/// shared-proto model for charges/sips/etc).
+async fn do_oset(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() < 3 {
+        return CmdOutput::text(
+            "\r\nUsage: oset <vnum> <field> <value>\r\n  Fields: cost weight level timer value0 value1 value2 value3\r\n".to_string()
+        );
+    }
+    let Ok(vnum) = parts[0].parse::<crate::world::ObjVnum>() else {
+        return CmdOutput::text("\r\nThat's not a valid object vnum.\r\n".to_string());
+    };
+    let field = parts[1].to_ascii_lowercase();
+    let Ok(v) = parts[2].parse::<i32>() else {
+        return CmdOutput::text(format!("\r\nBad value for '{field}'.\r\n"));
+    };
+    let mut w = world.lock().await;
+    let Some(p) = w.obj_protos.get_mut(&vnum) else {
+        return CmdOutput::text(format!("\r\nNo object prototype with vnum {vnum}.\r\n"));
+    };
+    match field.as_str() {
+        "cost"   => p.cost = v,
+        "weight" => p.weight = v,
+        "level"  => p.level = v,
+        "timer"  => p.timer = v,
+        "value0" => p.value[0] = v,
+        "value1" => p.value[1] = v,
+        "value2" => p.value[2] = v,
+        "value3" => p.value[3] = v,
+        _ => return CmdOutput::text(format!("\r\nUnknown field '{field}'.\r\n")),
+    }
+    let short = p.short_description.clone();
+    CmdOutput::text(format!("\r\nSet {short} (vnum {vnum}) {field} = {v}.\r\n"))
+}
+
 async fn do_set(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
     if me.level < LVL_IMMORT { return immort_huh(); }
     let parts: Vec<&str> = arg.split_whitespace().collect();
@@ -5107,6 +5313,23 @@ fn do_title(arg: &str, me: &mut Character) -> CmdOutput {
     }
     me.title = sanitized;
     CmdOutput::text(format!("\r\nTitle set: {}\r\n", me.title))
+}
+
+/// `describe <text>` (cp232): set the physical description others see when
+/// they `look` at you.  `describe -` (or empty) clears it.  Control bytes
+/// stripped, capped at 240 chars.
+fn do_describe(arg: &str, me: &mut Character) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() || arg == "-" {
+        me.description.clear();
+        return CmdOutput::text("\r\nDescription cleared.\r\n".to_string());
+    }
+    let sanitized: String = arg.chars().filter(|c| !c.is_control()).take(240).collect();
+    if sanitized.is_empty() {
+        return CmdOutput::text("\r\nDescription was empty after stripping control bytes.\r\n".to_string());
+    }
+    me.description = sanitized;
+    CmdOutput::text(format!("\r\nDescription set:\r\n{}\r\n", me.description))
 }
 
 async fn do_where(
@@ -13550,6 +13773,7 @@ pub async fn save_character_to_db(
     r.hunger          = me.hunger;
     r.thirst          = me.thirst;
     r.title           = me.title.clone();
+    r.description     = me.description.clone();
     r.bank_gold       = me.bank_gold;
     r.prompt_format   = me.prompt_format.clone();
     r.aliases         = me.aliases.clone();
