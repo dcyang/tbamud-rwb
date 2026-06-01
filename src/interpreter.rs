@@ -123,7 +123,8 @@ const COMMANDS: &[&str] = &[
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
     "grats", "gratz", "holler", "version", "visible",
     "notell", "nosummon", "nograts", "nogossip", "noauction",
-    "auction", "auc", "whisper",
+    "auction", "auc", "whisper", "ask", "unfollow", "cls", "norepeat", "hindex",
+    "display", "qsay", "enter", "leave", "page", "happyhour", "receive",
     "brief", "compact", "toggle", "time", "weather", "bank", "reply", "prompt", "alias",
     "balance", "deposit", "withdraw", "offer", "rent", "gsay", "take", "hold", "grab", "diagnose", "whoami",
     "news", "credits", "motd", "imotd", "policy", "policies", "handbook", "background",
@@ -435,6 +436,19 @@ pub async fn dispatch_command(
         Some("noauction") => { me.auction_off = !me.auction_off; CmdOutput::text(format!("\r\nAuction channel: {}.\r\n", if me.auction_off { "off" } else { "on" })) }
         Some("auction") | Some("auc") => do_auction(rest, me, world, chars).await,
         Some("whisper")   => do_whisper(rest, me, chars).await,
+        Some("ask")       => do_spec_comm(rest, me, chars, true).await,
+        Some("unfollow")  => do_follow("stop", me, chars).await,
+        Some("cls")       => do_cls(),
+        Some("norepeat")  => do_norepeat(me),
+        Some("hindex")    => do_hindex(rest, me, world).await,
+        Some("display")   => do_display(rest, me),
+        Some("qsay")      => if rest.trim().is_empty() { CmdOutput::text("\r\nQuest-say what?\r\n".to_string()) }
+                             else { self_echo(me, format!("\r\nYou quest-say, '{}'\r\n", rest.trim())) },
+        Some("enter")     => CmdOutput::text("\r\nThere is no portal here to enter.\r\n".to_string()),
+        Some("leave")     => CmdOutput::text("\r\nYou see no exit to leave through here.\r\n".to_string()),
+        Some("page")      => CmdOutput::text("\r\nOutput is not paged on this MUD; everything is sent at once.\r\n".to_string()),
+        Some("happyhour") => CmdOutput::text("\r\nThere is no happy hour at the moment.\r\n".to_string()),
+        Some("receive")   => CmdOutput::text("\r\nSorry, but you cannot do that here!\r\n".to_string()),
         Some("brief")     => do_brief(me),
         Some("toggle")    => do_toggle(rest, me),
         Some("compact")   => do_compact(me),
@@ -1583,7 +1597,7 @@ async fn do_say(
             &format!("{} says, '{spoken}'\r\n", me.name),
         );
     }
-    CmdOutput::text(format!("\r\nYou say, '{spoken}'\r\n"))
+    self_echo(me, format!("\r\nYou say, '{spoken}'\r\n"))
 }
 
 /// Public say wrapper used by the command dispatcher.  Fires any SPEECH
@@ -3107,18 +3121,21 @@ async fn do_auction(
 /// `whisper <player> <msg>` — private same-room speech.  The named
 /// player and the sender see the full text; everyone else in the room
 /// sees "Name whispers something to Target." without content.
-async fn do_whisper(
-    arg: &str,
-    me: &Character,
-    chars: &SharedChars,
-) -> CmdOutput {
+async fn do_whisper(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
+    do_spec_comm(arg, me, chars, false).await
+}
+
+/// Same-room private speech: `whisper` (ask=false) or `ask` (ask=true).
+/// Mirrors stock do_spec_comm (SCMD_WHISPER / SCMD_ASK).
+async fn do_spec_comm(arg: &str, me: &Character, chars: &SharedChars, ask: bool) -> CmdOutput {
     if me.muted { return muted_msg(); }
+    let (verb, prompt) = if ask { ("ask", "Ask whom what?") } else { ("whisper to", "Whisper to whom what?") };
     let (target, msg) = match arg.find(char::is_whitespace) {
         Some(i) => (arg[..i].trim(), arg[i..].trim()),
-        None    => return CmdOutput::text("\r\nWhisper to whom what?\r\n".to_string()),
+        None    => return CmdOutput::text(format!("\r\n{prompt}\r\n")),
     };
     if target.is_empty() || msg.is_empty() {
-        return CmdOutput::text("\r\nWhisper to whom what?\r\n".to_string());
+        return CmdOutput::text(format!("\r\n{prompt}\r\n"));
     }
     let ph = {
         let cl = chars.lock().await;
@@ -3131,17 +3148,98 @@ async fn do_whisper(
     let Some(ph) = ph else {
         return CmdOutput::text("\r\nThere is no one by that name here.\r\n".to_string());
     };
-    let _ = ph.send.send(format!("\r\n{} whispers to you, '{msg}'\r\n", me.name));
-    // Manually broadcast to room peers EXCEPT me and the recipient —
-    // they each get their own copy above.
+    if ask {
+        let _ = ph.send.send(format!("\r\n{} asks you, '{msg}'\r\n", me.name));
+    } else {
+        let _ = ph.send.send(format!("\r\n{} whispers to you, '{msg}'\r\n", me.name));
+    }
+    // Room peers (except me and the recipient) see a redacted line.
     let cl = chars.lock().await;
-    let line = format!("\r\n{} whispers something to {}.\r\n", me.name, ph.name);
+    let line = if ask {
+        format!("\r\n{} asks {} a question.\r\n", me.name, ph.name)
+    } else {
+        format!("\r\n{} whispers something to {}.\r\n", me.name, ph.name)
+    };
     for peer in cl.iter() {
         if peer.id == me.id || peer.id == ph.id { continue; }
         if peer.current_room != me.current_room { continue; }
         let _ = peer.send.send(line.clone());
     }
-    CmdOutput::text(format!("\r\nYou whisper to {}, '{msg}'\r\n", ph.name))
+    self_echo(me, format!("\r\nYou {verb} {}, '{msg}'\r\n", ph.name))
+}
+
+/// Self-echo for communication: blanked when the player has `norepeat` set
+/// (mirrors stock PRF_NOREPEAT).
+fn self_echo(me: &Character, s: String) -> CmdOutput {
+    if me.norepeat { CmdOutput::text(String::new()) } else { CmdOutput::text(s) }
+}
+
+/// `cls` — clear the screen (ANSI home + erase-display).
+fn do_cls() -> CmdOutput {
+    CmdOutput::text("\x1b[H\x1b[J".to_string())
+}
+
+/// `norepeat` — toggle suppression of your own communication echo.
+fn do_norepeat(me: &mut Character) -> CmdOutput {
+    me.norepeat = !me.norepeat;
+    CmdOutput::text(format!(
+        "\r\nYou will {} your own communication.\r\n",
+        if me.norepeat { "no longer see" } else { "now see" }))
+}
+
+/// `hindex <prefix>` — list help topics whose keyword starts with the prefix.
+async fn do_hindex(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let needle = arg.trim().to_ascii_uppercase();
+    if needle.is_empty() {
+        return CmdOutput::text("\r\nUsage: hindex <prefix>\r\n".to_string());
+    }
+    let w = world.lock().await;
+    let mut hits: Vec<&str> = Vec::new();
+    for e in &w.help {
+        if e.min_level > me.level { continue; }
+        for k in &e.keywords {
+            if k.starts_with(&needle) { hits.push(k.as_str()); }
+        }
+    }
+    hits.sort_unstable();
+    hits.dedup();
+    if hits.is_empty() {
+        return CmdOutput::text(format!("\r\nNo help topics start with '{}'.\r\n", arg.trim()));
+    }
+    let mut s = format!("\r\nHelp topics starting with '{}':\r\n", arg.trim());
+    for (i, k) in hits.iter().enumerate() {
+        s.push_str(&format!("{:<20}", k));
+        if (i + 1) % 4 == 0 { s.push_str("\r\n"); }
+    }
+    if hits.len() % 4 != 0 { s.push_str("\r\n"); }
+    s.push_str(&format!("({} topic(s))\r\n", hits.len()));
+    CmdOutput::text(s)
+}
+
+/// `display <all|none|prompt elements>` — set the prompt to a quick preset.
+/// Mirrors stock `do_display` (choose which of HP/Mana/Move appear).
+fn do_display(arg: &str, me: &mut Character) -> CmdOutput {
+    let a = arg.trim().to_ascii_lowercase();
+    if a.is_empty() {
+        return CmdOutput::text(
+            "\r\nUsage: display <all | none | a string of h m v>\r\n\
+             e.g. `display hmv` shows hit/mana/move; `display none` shows just '> '.\r\n".to_string());
+    }
+    if a == "none" {
+        me.prompt_format = "> ".to_string();
+        return CmdOutput::text("\r\nPrompt set to minimal.\r\n".to_string());
+    }
+    if a == "all" {
+        me.prompt_format = "%h/%HH %m/%MM %v/%VV> ".to_string();
+        return CmdOutput::text("\r\nPrompt now shows HP, mana and movement.\r\n".to_string());
+    }
+    let mut p = String::new();
+    if a.contains('h') { p.push_str("%h/%HH "); }
+    if a.contains('m') { p.push_str("%m/%MM "); }
+    if a.contains('v') { p.push_str("%v/%VV "); }
+    p.push_str("> ");
+    me.prompt_format = p;
+    CmdOutput::text("\r\nPrompt updated.\r\n".to_string())
 }
 
 fn muted_msg() -> CmdOutput {
@@ -3211,7 +3309,7 @@ async fn do_gossip(
         let _ = ph.send.send(formatted.clone());
     }
     record_channel("gossip", &me.name, msg).await;
-    CmdOutput::text(format!("\r\n@cYou gossip, '{spoken}'@n\r\n"))
+    self_echo(me, format!("\r\n@cYou gossip, '{spoken}'@n\r\n"))
 }
 
 /// `grats` — the congratulations channel.  Mirrors `do_gossip` but uses

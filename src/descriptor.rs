@@ -288,6 +288,7 @@ pub async fn handle_connection(
                     info_off:     false,
                     shout_off:    false,
                     grats_off:    false,
+                    norepeat:     false,
                     notell:       false,
                     nosummon:     false,
                     color_off:    p_ref.map(|p| p.color_off).unwrap_or(false),

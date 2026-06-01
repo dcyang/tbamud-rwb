@@ -887,6 +887,9 @@ pub struct Character {
     pub shout_off:    bool,
     /// Personal toggle for the grats (congratulations) channel.
     pub grats_off:    bool,
+    /// `norepeat` — suppress the self-echo of your own communication
+    /// (you won't see "You say, '...'" etc.).  Transient PRF toggle.
+    pub norepeat:     bool,
     /// `notell` — refuse incoming tells.  `nosummon` — refuse being the
     /// target of the summon spell.  Both transient PRF toggles (stock).
     pub notell:       bool,
