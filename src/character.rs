@@ -427,91 +427,93 @@ impl Skill {
     /// Which classes can learn this skill.
     pub fn allowed_classes(self) -> &'static [Class] {
         match self {
-            Skill::Kick         => &[Class::Warrior, Class::Thief, Class::Cleric],
-            Skill::Bash         => &[Class::Warrior],
-            Skill::Backstab     => &[Class::Thief],
-            Skill::PickLock     => &[Class::Thief],
-            Skill::MagicMissile => &[Class::MagicUser],
+            Skill::Kick         => &[Class::Fighter, Class::Rogue, Class::Cleric],
+            Skill::Bash         => &[Class::Fighter],
+            Skill::Backstab     => &[Class::Rogue],
+            Skill::PickLock     => &[Class::Rogue],
+            Skill::MagicMissile => &[Class::Wizard],
             Skill::CureLight    => &[Class::Cleric],
             Skill::Bless        => &[Class::Cleric],
-            Skill::BurningHands => &[Class::MagicUser],
+            Skill::BurningHands => &[Class::Wizard],
             Skill::Sanctuary    => &[Class::Cleric],
             Skill::Harm         => &[Class::Cleric],
-            Skill::Sneak        => &[Class::Thief],
-            Skill::Hide         => &[Class::Thief],
-            Skill::Steal        => &[Class::Thief],
+            Skill::Sneak        => &[Class::Rogue],
+            Skill::Hide         => &[Class::Rogue],
+            Skill::Steal        => &[Class::Rogue],
             // Word of recall is Cleric-only here, but in CircleMUD it's
             // shared between Cleric and MagicUser (and trivially castable
             // by all in many forks).  Keep Cleric-only for now.
-            Skill::WordOfRecall => &[Class::Cleric, Class::MagicUser],
-            Skill::Identify     => &[Class::MagicUser],
-            Skill::DetectInvis  => &[Class::MagicUser, Class::Cleric],
-            Skill::DetectMagic  => &[Class::MagicUser, Class::Cleric],
+            Skill::WordOfRecall => &[Class::Cleric, Class::Wizard],
+            Skill::Identify     => &[Class::Wizard],
+            Skill::DetectInvis  => &[Class::Wizard, Class::Cleric],
+            Skill::DetectMagic  => &[Class::Wizard, Class::Cleric],
             Skill::DetectAlign  => &[Class::Cleric],
-            Skill::DetectPoison => &[Class::MagicUser, Class::Cleric],
-            Skill::Poison       => &[Class::MagicUser, Class::Cleric],
-            Skill::Sleep        => &[Class::MagicUser],
-            Skill::Blindness    => &[Class::MagicUser, Class::Cleric],
+            Skill::DetectPoison => &[Class::Wizard, Class::Cleric],
+            Skill::Poison       => &[Class::Wizard, Class::Cleric],
+            Skill::Sleep        => &[Class::Wizard],
+            Skill::Blindness    => &[Class::Wizard, Class::Cleric],
             Skill::CurePoison   => &[Class::Cleric],
             Skill::CureBlind    => &[Class::Cleric],
             Skill::CureCritic   => &[Class::Cleric],
-            Skill::Strength     => &[Class::MagicUser],
+            Skill::Strength     => &[Class::Wizard],
             Skill::Armor        => &[Class::Cleric],
-            Skill::Haste        => &[Class::MagicUser],
-            Skill::Slow         => &[Class::MagicUser],
-            Skill::Earthquake   => &[Class::MagicUser, Class::Cleric],
-            Skill::CharmPerson  => &[Class::MagicUser],
-            Skill::LocateObject => &[Class::MagicUser, Class::Cleric],
+            Skill::Haste        => &[Class::Wizard],
+            Skill::Slow         => &[Class::Wizard],
+            Skill::Earthquake   => &[Class::Wizard, Class::Cleric],
+            Skill::CharmPerson  => &[Class::Wizard],
+            Skill::LocateObject => &[Class::Wizard, Class::Cleric],
             Skill::Refresh      => &[Class::Cleric],
-            Skill::Summon       => &[Class::MagicUser],
-            Skill::SenseLife    => &[Class::Cleric, Class::MagicUser],
-            Skill::Dodge        => &[Class::Warrior, Class::Thief],
-            Skill::Parry        => &[Class::Warrior],
-            Skill::Rescue       => &[Class::Warrior, Class::Cleric],
-            Skill::LightningBolt => &[Class::MagicUser],
-            Skill::Fireball      => &[Class::MagicUser],
-            Skill::ShockingGrasp => &[Class::MagicUser],
-            Skill::Invisibility  => &[Class::MagicUser],
-            Skill::Stoneskin     => &[Class::MagicUser],
-            Skill::Disarm        => &[Class::Warrior, Class::Thief],
+            Skill::Summon       => &[Class::Wizard],
+            Skill::SenseLife    => &[Class::Cleric, Class::Wizard],
+            Skill::Dodge        => &[Class::Fighter, Class::Rogue],
+            Skill::Parry        => &[Class::Fighter],
+            Skill::Rescue       => &[Class::Fighter, Class::Cleric],
+            Skill::LightningBolt => &[Class::Wizard],
+            Skill::Fireball      => &[Class::Wizard],
+            Skill::ShockingGrasp => &[Class::Wizard],
+            Skill::Invisibility  => &[Class::Wizard],
+            Skill::Stoneskin     => &[Class::Wizard],
+            Skill::Disarm        => &[Class::Fighter, Class::Rogue],
             Skill::CureSerious   => &[Class::Cleric],
             Skill::Heal          => &[Class::Cleric],
-            Skill::Infravision   => &[Class::MagicUser, Class::Cleric],
+            Skill::Infravision   => &[Class::Wizard, Class::Cleric],
             Skill::Stun          => &[],
-            Skill::ColorSpray    => &[Class::MagicUser],
-            Skill::AcidBlast     => &[Class::MagicUser],
-            Skill::ChillTouch    => &[Class::MagicUser],
-            Skill::Enchant       => &[Class::MagicUser],
+            Skill::ColorSpray    => &[Class::Wizard],
+            Skill::AcidBlast     => &[Class::Wizard],
+            Skill::ChillTouch    => &[Class::Wizard],
+            Skill::Enchant       => &[Class::Wizard],
             Skill::Restoration   => &[Class::Cleric],
-            Skill::Fly           => &[Class::MagicUser, Class::Cleric],
+            Skill::Fly           => &[Class::Wizard, Class::Cleric],
             Skill::CallLightning => &[Class::Cleric],
-            Skill::CreateWater   => &[Class::Cleric, Class::MagicUser],
-            Skill::Curse         => &[Class::Cleric, Class::MagicUser],
+            Skill::CreateWater   => &[Class::Cleric, Class::Wizard],
+            Skill::Curse         => &[Class::Cleric, Class::Wizard],
             Skill::RemoveCurse   => &[Class::Cleric],
-            Skill::DispelMagic   => &[Class::MagicUser, Class::Cleric],
+            Skill::DispelMagic   => &[Class::Wizard, Class::Cleric],
             Skill::DispelEvil    => &[Class::Cleric],
             Skill::DispelGood    => &[Class::Cleric],
-            Skill::EnergyDrain   => &[Class::MagicUser],
-            Skill::Whirlwind     => &[Class::Warrior],
+            Skill::EnergyDrain   => &[Class::Wizard],
+            Skill::Whirlwind     => &[Class::Fighter],
             Skill::ProtFromEvil  => &[Class::Cleric],
             Skill::Waterwalk     => &[Class::Cleric],
             Skill::CreateFood    => &[Class::Cleric],
-            Skill::Teleport      => &[Class::MagicUser],
-            Skill::Ventriloquate => &[Class::MagicUser],
-            Skill::Darkness      => &[Class::MagicUser],
+            Skill::Teleport      => &[Class::Wizard],
+            Skill::Ventriloquate => &[Class::Wizard],
+            Skill::Darkness      => &[Class::Wizard],
             Skill::ControlWeather => &[Class::Cleric],
             Skill::GroupHeal     => &[Class::Cleric],
             Skill::GroupArmor    => &[Class::Cleric],
             Skill::GroupRecall   => &[Class::Cleric],
-            Skill::AnimateDead   => &[Class::Cleric, Class::MagicUser],
-            Skill::Clone         => &[Class::MagicUser],
-            Skill::Peek          => &[Class::Thief],
-            Skill::Tame          => &[Class::Warrior, Class::Thief],
+            Skill::AnimateDead   => &[Class::Cleric, Class::Wizard],
+            Skill::Clone         => &[Class::Wizard],
+            Skill::Peek          => &[Class::Rogue],
+            Skill::Tame          => &[Class::Fighter, Class::Rogue],
         }
     }
 
     pub fn is_class_allowed(self, class: Class) -> bool {
-        self.allowed_classes().contains(&class)
+        // Derived classes (Barbarian, Bard, …) inherit their base archetype's
+        // skill access; the `allowed_classes` table is keyed on the 4 bases.
+        self.allowed_classes().contains(&class.base())
     }
 
     /// Storage key for serialisation in the player file (spaces collapsed).
@@ -1156,23 +1158,23 @@ impl Character {
     /// Class-specific HP gain per level. Mirrors the CircleMUD ranges in
     /// constants.c::Class_apply_table[].hit_dice.
     pub fn hp_per_level(class: Class) -> i32 {
-        match class {
-            Class::Warrior   => 12,
+        match class.base() {
+            Class::Fighter   => 12,
             Class::Cleric    => 9,
-            Class::Thief     => 8,
-            Class::MagicUser => 6,
-            Class::Undefined => 8,
+            Class::Rogue     => 8,
+            Class::Wizard    => 6,
+            _                => 8, // Undefined
         }
     }
 
     /// Class-specific mana gain per level.  Spellcasters scale faster.
     pub fn mana_per_level(class: Class) -> i32 {
-        match class {
-            Class::MagicUser => 10,
+        match class.base() {
+            Class::Wizard    => 10,
             Class::Cleric    =>  8,
-            Class::Thief     =>  2,
-            Class::Warrior   =>  2,
-            Class::Undefined =>  4,
+            Class::Rogue     =>  2,
+            Class::Fighter   =>  2,
+            _                =>  4, // Undefined
         }
     }
 
@@ -1280,8 +1282,9 @@ impl Character {
     /// representative title per ~5-level band).
     pub fn default_title_for(class: crate::players::Class, level: i32) -> &'static str {
         use crate::players::Class;
-        match class {
-            Class::Warrior => match level {
+        // Derived classes reuse their base archetype's title bands for now.
+        match class.base() {
+            Class::Fighter => match level {
                 ..=4   => "the Warrior",
                 5..=9  => "the Soldier",
                 10..=14 => "the Veteran",
@@ -1301,7 +1304,7 @@ impl Character {
                 30..=33 => "the Patriarch",
                 _       => "the Immortal Cleric",
             },
-            Class::Thief => match level {
+            Class::Rogue => match level {
                 ..=4   => "the Pickpocket",
                 5..=9  => "the Rogue",
                 10..=14 => "the Burglar",
@@ -1311,7 +1314,7 @@ impl Character {
                 30..=33 => "the Master Thief",
                 _       => "the Immortal Thief",
             },
-            Class::MagicUser => match level {
+            Class::Wizard => match level {
                 ..=4   => "the Apprentice of Magic",
                 5..=9  => "the Spell Student",
                 10..=14 => "the Scholar of Magic",
@@ -1321,7 +1324,7 @@ impl Character {
                 30..=33 => "the Arch-Mage",
                 _       => "the Immortal Mage",
             },
-            Class::Undefined => "the Adventurer",
+            _ => "the Adventurer", // Undefined
         }
     }
 
@@ -1343,10 +1346,9 @@ impl Character {
             self.max_hp   += Self::hp_per_level(self.class)   + con_bonus;
             self.hp = self.max_hp;
             // Mana gain: scales with INT for arcane, WIS for divine.
-            let casting_stat = match self.class {
-                Class::MagicUser => self.int_,
-                Class::Cleric    => self.wis,
-                _                => self.int_,
+            let casting_stat = match self.class.base() {
+                Class::Cleric => self.wis,
+                _             => self.int_, // Wizard line + martial
             };
             let stat_bonus = (casting_stat - 10).max(0) / 2;
             self.max_mana += Self::mana_per_level(self.class) + stat_bonus;

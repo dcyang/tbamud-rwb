@@ -217,7 +217,7 @@ pub async fn handle_connection(
                 let max_hp    = p_ref.map(|p| p.max_hp).filter(|h| *h > 0).unwrap_or(default_hp);
                 let hp        = p_ref.map(|p| p.hp).filter(|h| *h > 0).unwrap_or(max_hp);
                 // Mana: arcane scales with INT, divine with WIS, others use INT.
-                let casting_stat = if cls == crate::players::Class::Cleric {
+                let casting_stat = if cls.base() == crate::players::Class::Cleric {
                     p_ref.map(|p| p.wis).filter(|v| *v > 0).unwrap_or(12)
                 } else {
                     p_ref.map(|p| p.int_).filter(|v| *v > 0).unwrap_or(12)
@@ -451,18 +451,18 @@ pub async fn handle_connection(
                         && me.equipment.iter().all(|s| s.is_none());
                     if fresh && nothing {
                         let mut w = world.lock().await;
-                        let kit: &[crate::world::ObjVnum] = match me.class {
-                            crate::players::Class::Warrior =>
+                        let kit: &[crate::world::ObjVnum] = match me.class.base() {
+                            crate::players::Class::Fighter =>
                                 &[crate::db::NEWBIE_WEAPON_VNUM,
                                   crate::db::NEWBIE_ARMOR_VNUM,
                                   crate::db::NEWBIE_LIGHT_VNUM,
                                   crate::db::NEWBIE_BREAD_VNUM],
                             crate::players::Class::Cleric |
-                            crate::players::Class::MagicUser =>
+                            crate::players::Class::Wizard =>
                                 &[crate::db::NEWBIE_ARMOR_VNUM,
                                   crate::db::NEWBIE_LIGHT_VNUM,
                                   crate::db::NEWBIE_BREAD_VNUM],
-                            crate::players::Class::Thief =>
+                            crate::players::Class::Rogue =>
                                 &[crate::db::NEWBIE_WEAPON_VNUM,
                                   crate::db::NEWBIE_LIGHT_VNUM,
                                   crate::db::NEWBIE_BREAD_VNUM],

@@ -416,14 +416,14 @@ async fn bump_defensive_skill(
 /// 16 / 24; thieves at lvl 16.  Other classes are stuck at 1.  Haste
 /// (any class) grants +1 attack per round on top.
 fn num_attacks(level: i32, class: Class, has_haste: bool) -> i32 {
-    let base = match class {
-        Class::Warrior => {
+    let base = match class.base() {
+        Class::Fighter => {
             if      level >= 24 { 4 }
             else if level >= 16 { 3 }
             else if level >= 8  { 2 }
             else                { 1 }
         }
-        Class::Thief => if level >= 16 { 2 } else { 1 },
+        Class::Rogue => if level >= 16 { 2 } else { 1 },
         _ => 1,
     };
     base + if has_haste { 1 } else { 0 }

@@ -5066,11 +5066,12 @@ async fn do_who(arg: &str, me: &Character, chars: &SharedChars) -> CmdOutput {
             "-c" => {
                 if let Some(v) = toks.get(i + 1) {
                     class_filter = match v.to_ascii_lowercase().as_str() {
-                        "warrior"   => Some(crate::players::Class::Warrior),
-                        "thief"     => Some(crate::players::Class::Thief),
-                        "cleric"    => Some(crate::players::Class::Cleric),
-                        "magicuser" | "magic-user" | "mu" => Some(crate::players::Class::MagicUser),
-                        _           => None,
+                        // Legacy aliases for the renamed base classes.
+                        "warrior"   => Some(crate::players::Class::Fighter),
+                        "thief"     => Some(crate::players::Class::Rogue),
+                        "magicuser" | "magic-user" | "mu" => Some(crate::players::Class::Wizard),
+                        // Any of the 12 D&D class names (full or unambiguous prefix).
+                        other       => crate::players::Class::parse_name(other),
                     };
                     i += 2; continue;
                 }
@@ -5743,16 +5744,17 @@ fn do_practice(arg: &str, me: &mut Character) -> CmdOutput {
 /// class accommodate the entry hall + practice room layout used in zone 30.
 fn is_guild_room_for(room: crate::world::RoomVnum, class: crate::players::Class) -> bool {
     use crate::players::Class;
-    match class {
+    // Derived classes share their base archetype's guild rooms.
+    match class.base() {
         // Cleric guild & practice rooms (Temple area)
         Class::Cleric    => matches!(room, 3001 | 3004 | 3017),
         // Mage guild
-        Class::MagicUser => matches!(room, 3018 | 3027),
+        Class::Wizard => matches!(room, 3018 | 3027),
         // Warrior guild
-        Class::Warrior   => matches!(room, 3022 | 3023),
+        Class::Fighter   => matches!(room, 3022 | 3023),
         // Thief guild — Midgaard's dark alley
-        Class::Thief     => matches!(room, 3038 | 3041),
-        Class::Undefined => true,  // tutorial / pre-class state
+        Class::Rogue     => matches!(room, 3038 | 3041),
+        _ => true,  // Undefined: tutorial / pre-class state
     }
 }
 
@@ -13077,11 +13079,13 @@ fn anti_class_block(
     use crate::players::Class;
     use crate::character::AlignmentBand;
     use crate::world::*;
-    match class {
-        Class::Warrior   if extra_flags & ITEM_ANTI_WARRIOR    != 0 => return Some("warriors"),
+    // Anti-class flags key on the base archetype, so a Barbarian is barred by
+    // ITEM_ANTI_WARRIOR, a Bard by ITEM_ANTI_MAGIC_USER, etc.
+    match class.base() {
+        Class::Fighter   if extra_flags & ITEM_ANTI_WARRIOR    != 0 => return Some("warriors"),
         Class::Cleric    if extra_flags & ITEM_ANTI_CLERIC     != 0 => return Some("clerics"),
-        Class::Thief     if extra_flags & ITEM_ANTI_THIEF      != 0 => return Some("thieves"),
-        Class::MagicUser if extra_flags & ITEM_ANTI_MAGIC_USER != 0 => return Some("magic users"),
+        Class::Rogue     if extra_flags & ITEM_ANTI_THIEF      != 0 => return Some("thieves"),
+        Class::Wizard if extra_flags & ITEM_ANTI_MAGIC_USER != 0 => return Some("magic users"),
         _ => {}
     }
     match AlignmentBand::of(alignment) {

@@ -74,13 +74,15 @@ fn load_text(data_dir: &str, name: &str) -> String {
 // Class selection menu
 // ---------------------------------------------------------------------------
 
+// The 12 D&D 5e classes, in the order of `Class::selectable()`. Single-letter
+// keys collide (Barbarian/Bard, Warlock/Wizard), so the player picks by number
+// or types the class name.
 const CLASS_MENU: &str = concat!(
     "\r\n",
     "Select a class:\r\n",
-    "  [C]leric\r\n",
-    "  [T]hief\r\n",
-    "  [W]arrior\r\n",
-    "  [M]agic-user\r\n",
+    "   1) Barbarian      2) Bard          3) Cleric        4) Druid\r\n",
+    "   5) Fighter        6) Monk          7) Paladin       8) Ranger\r\n",
+    "   9) Rogue         10) Sorcerer     11) Warlock      12) Wizard\r\n",
 );
 
 // ---------------------------------------------------------------------------
@@ -444,12 +446,19 @@ impl LoginSession {
             // CON_QCLASS — new character class selection
             // ---------------------------------------------------------------
             ConnState::SelectClass => {
-                let class = match input.chars().next().map(|c| c.to_ascii_lowercase()) {
-                    Some('m') => Class::MagicUser,
-                    Some('c') => Class::Cleric,
-                    Some('t') => Class::Thief,
-                    Some('w') => Class::Warrior,
-                    _ => {
+                // Accept a menu number (1..=12) or a class name / unambiguous
+                // prefix. Single letters that collide (b, w) fall through to the
+                // re-prompt.
+                let trimmed = input.trim();
+                let class = trimmed
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=Class::selectable().len()).contains(n))
+                    .map(|n| Class::selectable()[n - 1])
+                    .or_else(|| Class::parse_name(trimmed));
+                let class = match class {
+                    Some(c) => c,
+                    None => {
                         return LoginOutput::send("\r\nThat's not a class.\r\nClass: ");
                     }
                 };

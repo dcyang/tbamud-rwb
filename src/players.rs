@@ -30,35 +30,130 @@ pub const MAX_BAD_PWS: u8 = 3;
 pub const PLR_DELETED_BIT: u32 = 10;
 pub const PLR_DELETED: u32 = 1 << PLR_DELETED_BIT;
 
-/// Class constants (CLASS_* in structs.h)
+/// Player classes — the D&D 5e (2024 PHB) class roster.
+///
+/// The four base archetypes keep their original CircleMUD/TbaMUD discriminants
+/// (0=Wizard/ex-MagicUser, 1=Cleric, 2=Rogue/ex-Thief, 3=Fighter/ex-Warrior) so
+/// existing player files load unchanged. The eight additional classes are
+/// appended (4–11). Each non-base class delegates its mechanics to a base
+/// archetype via [`Class::base`] (see the "A Balanced Party" mapping).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i8)]
 pub enum Class {
     #[default]
     Undefined = -1,
-    MagicUser = 0,
+    // Base archetypes (legacy discriminants preserved).
+    Wizard = 0,
     Cleric = 1,
-    Thief = 2,
-    Warrior = 3,
+    Rogue = 2,
+    Fighter = 3,
+    // Additional D&D 5e classes.
+    Barbarian = 4,
+    Bard = 5,
+    Druid = 6,
+    Monk = 7,
+    Paladin = 8,
+    Ranger = 9,
+    Sorcerer = 10,
+    Warlock = 11,
 }
 
 impl Class {
     pub fn from_i8(v: i8) -> Self {
         match v {
-            0 => Self::MagicUser,
+            0 => Self::Wizard,
             1 => Self::Cleric,
-            2 => Self::Thief,
-            3 => Self::Warrior,
+            2 => Self::Rogue,
+            3 => Self::Fighter,
+            4 => Self::Barbarian,
+            5 => Self::Bard,
+            6 => Self::Druid,
+            7 => Self::Monk,
+            8 => Self::Paladin,
+            9 => Self::Ranger,
+            10 => Self::Sorcerer,
+            11 => Self::Warlock,
             _ => Self::Undefined,
         }
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::MagicUser => "Magic-user",
+            Self::Wizard    => "Wizard",
             Self::Cleric    => "Cleric",
-            Self::Thief     => "Thief",
-            Self::Warrior   => "Warrior",
+            Self::Rogue     => "Rogue",
+            Self::Fighter   => "Fighter",
+            Self::Barbarian => "Barbarian",
+            Self::Bard      => "Bard",
+            Self::Druid     => "Druid",
+            Self::Monk      => "Monk",
+            Self::Paladin   => "Paladin",
+            Self::Ranger    => "Ranger",
+            Self::Sorcerer  => "Sorcerer",
+            Self::Warlock   => "Warlock",
             Self::Undefined => "Undefined",
+        }
+    }
+
+    /// The base archetype a class delegates its mechanics to (starting skills,
+    /// anti-item flags, HP/mana, attacks, guild rooms, titles). The four base
+    /// classes and `Undefined` return themselves. Mapping follows the PHB's
+    /// "A Balanced Party" box (logical p.36).
+    pub fn base(self) -> Class {
+        match self {
+            // Fighter line
+            Self::Barbarian | Self::Monk | Self::Paladin | Self::Ranger => Self::Fighter,
+            // Cleric line
+            Self::Druid => Self::Cleric,
+            // Wizard line
+            Self::Bard | Self::Sorcerer | Self::Warlock => Self::Wizard,
+            // Bases (and Undefined) map to themselves.
+            other => other,
+        }
+    }
+
+    /// The 12 player-selectable classes, in login-menu order.
+    pub fn selectable() -> &'static [Class] {
+        &[
+            Self::Barbarian,
+            Self::Bard,
+            Self::Cleric,
+            Self::Druid,
+            Self::Fighter,
+            Self::Monk,
+            Self::Paladin,
+            Self::Ranger,
+            Self::Rogue,
+            Self::Sorcerer,
+            Self::Warlock,
+            Self::Wizard,
+        ]
+    }
+
+    /// Case-insensitive full-name or unambiguous-prefix match over the 12
+    /// selectable classes. Single letters that collide (e.g. "b" → Barbarian
+    /// vs Bard, "w" → Warlock vs Wizard) return `None`.
+    pub fn parse_name(s: &str) -> Option<Class> {
+        let s = s.trim().to_ascii_lowercase();
+        if s.is_empty() {
+            return None;
+        }
+        // Exact match first.
+        if let Some(&c) = Self::selectable()
+            .iter()
+            .find(|c| c.as_str().eq_ignore_ascii_case(&s))
+        {
+            return Some(c);
+        }
+        // Unambiguous prefix match.
+        let matches: Vec<Class> = Self::selectable()
+            .iter()
+            .copied()
+            .filter(|c| c.as_str().to_ascii_lowercase().starts_with(&s))
+            .collect();
+        if matches.len() == 1 {
+            Some(matches[0])
+        } else {
+            None
         }
     }
 }
