@@ -53,6 +53,13 @@ pub static FORCE_CMD_TX: OnceLock<tokio::sync::mpsc::UnboundedSender<ForceCmdMsg
 pub static WIZLOCK_LEVEL: std::sync::atomic::AtomicI32 =
     std::sync::atomic::AtomicI32::new(0);
 
+/// When true, new-character creation is disabled (the `-r` "restrict"
+/// boot flag, mirroring `circle_restrict` in comm.c).  Set once at boot
+/// in `server::run`; read by `login::NameConfirm` before creating a
+/// brand-new mortal.
+pub static RESTRICT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Shared mutable site-ban list, populated from `lib/etc/badsites` at
 /// boot and mutated at runtime by the `ban`/`unban` commands.
 pub static BAD_SITES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();

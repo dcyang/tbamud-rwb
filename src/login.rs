@@ -238,6 +238,18 @@ impl LoginSession {
             ConnState::NameConfirm => {
                 match input.chars().next().map(|c| c.to_ascii_uppercase()) {
                     Some('Y') => {
+                        // The -r "restrict" boot flag disables new-character
+                        // creation entirely.
+                        if crate::interpreter::RESTRICT
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            return LoginOutput {
+                                text:       "\r\nSorry, new characters are not allowed right now.\r\n".to_string(),
+                                echo_on:    false,
+                                disconnect: true,
+                                ..Default::default()
+                            };
+                        }
                         // Wizlock blocks new-character creation entirely
                         // (a brand-new mortal is level 1).
                         let wl = crate::interpreter::WIZLOCK_LEVEL

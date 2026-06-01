@@ -31,6 +31,12 @@ pub async fn run(config: Config) -> Result<()> {
         .map(|d| d.as_secs() as i64).unwrap_or(0);
     BOOT_UNIX_TS.store(boot_ts, std::sync::atomic::Ordering::Relaxed);
 
+    // Honor the -r "restrict" flag: disable new-character creation.
+    if config.restrict {
+        crate::interpreter::RESTRICT.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!("Restricted mode: new-character creation disabled (-r)");
+    }
+
     // --- Load greeting -------------------------------------------------------
     let greetings_path = format!("{}/text/greetings", config.dir);
     let greeting = Arc::new(
@@ -65,7 +71,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     // --- Load world (zones + rooms + obj/mob protos + run resets) -----------
     let world: Arc<Mutex<World>> = Arc::new(Mutex::new(
-        db::load_world(&config.dir).context("Failed to load world")?,
+        db::load_world(&config.dir, config.mini_mud).context("Failed to load world")?,
     ));
 
     // --- Shared online-player registry --------------------------------------

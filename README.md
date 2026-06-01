@@ -64,12 +64,14 @@ and then drop into the game.
 ### Command-line options
 
 The flags mirror the upstream `comm.c` arguments. Run `circle -h` for the full
-list. Two are fully wired today:
+list. These are fully wired today:
 
-| Flag        | Meaning                                  | Default |
-|-------------|------------------------------------------|---------|
-| `-p <port>` | TCP port to listen on                    | `4000`  |
-| `-d <dir>`  | Data directory to read `lib/` data from  | `lib`   |
+| Flag        | Meaning                                                      | Default |
+|-------------|--------------------------------------------------------------|---------|
+| `-p <port>` | TCP port to listen on                                        | `4000`  |
+| `-d <dir>`  | Data directory to read `lib/` data from                      | `lib`   |
+| `-r`        | Restrict — disallow new-character creation                   | off     |
+| `-m`        | Mini-MUD mode — load the minimal world (`index.mini`)        | off     |
 
 The remaining upstream flags are **accepted on the command line but not yet
 functional** — they are parsed for CLI compatibility and reserved for parity,
@@ -78,9 +80,7 @@ but currently have no effect on the running server:
 | Flag        | Intended meaning                          | Status                          |
 |-------------|-------------------------------------------|---------------------------------|
 | `-o <file>` | Write the log to a file instead of stderr | not wired (logs go to stderr)   |
-| `-r`        | Restrict — disallow new player creation   | not wired                       |
 | `-s`        | Suppress special procedures (spec_procs)  | not wired                       |
-| `-m`        | Mini-MUD mode (load the minimal world)    | not wired (always full world)   |
 | `-q`        | Quick boot (skip rent checks)             | not wired                       |
 | `-c`        | Syntax-check the world data and exit      | exits immediately; no check yet |
 

@@ -298,8 +298,11 @@ pub fn dice(count: i32, size: i32) -> i32 {
 
 /// Read the world: walk lib/world/zon/index → load zones, then
 /// lib/world/wld/index → load rooms.
-pub fn load_world(data_dir: &str) -> Result<World> {
+pub fn load_world(data_dir: &str, mini: bool) -> Result<World> {
     let mut world = World::default();
+    if mini {
+        tracing::info!("Mini-MUD mode: loading minimal world (index.mini)");
+    }
 
     let zon_dir = format!("{data_dir}/world/zon");
     let wld_dir = format!("{data_dir}/world/wld");
@@ -307,7 +310,7 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     let mob_dir = format!("{data_dir}/world/mob");
 
     // --- Zones -------------------------------------------------------------
-    for fname in read_index(&zon_dir)? {
+    for fname in read_index(&zon_dir, mini)? {
         let path = PathBuf::from(&zon_dir).join(&fname);
         parse_zone_file(&path, &mut world)
             .with_context(|| format!("Parsing zone file {}", path.display()))?;
@@ -315,7 +318,7 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     tracing::info!(count = world.zones.len(), "Loaded zones");
 
     // --- Rooms -------------------------------------------------------------
-    for fname in read_index(&wld_dir)? {
+    for fname in read_index(&wld_dir, mini)? {
         let path = PathBuf::from(&wld_dir).join(&fname);
         parse_room_file(&path, &mut world)
             .with_context(|| format!("Parsing room file {}", path.display()))?;
@@ -323,7 +326,7 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     tracing::info!(count = world.rooms.len(), "Loaded rooms");
 
     // --- Object prototypes ------------------------------------------------
-    for fname in read_index(&obj_dir)? {
+    for fname in read_index(&obj_dir, mini)? {
         let path = PathBuf::from(&obj_dir).join(&fname);
         parse_object_file(&path, &mut world)
             .with_context(|| format!("Parsing object file {}", path.display()))?;
@@ -331,7 +334,7 @@ pub fn load_world(data_dir: &str) -> Result<World> {
     tracing::info!(count = world.obj_protos.len(), "Loaded object prototypes");
 
     // --- Mob prototypes ----------------------------------------------------
-    for fname in read_index(&mob_dir)? {
+    for fname in read_index(&mob_dir, mini)? {
         let path = PathBuf::from(&mob_dir).join(&fname);
         parse_mob_file(&path, &mut world)
             .with_context(|| format!("Parsing mob file {}", path.display()))?;
@@ -340,8 +343,8 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 
     // --- Triggers ----------------------------------------------------------
     let trg_dir = format!("{data_dir}/world/trg");
-    if std::path::Path::new(&format!("{trg_dir}/index")).exists() {
-        for fname in read_index(&trg_dir)? {
+    if std::path::Path::new(&index_path(&trg_dir, mini)).exists() {
+        for fname in read_index(&trg_dir, mini)? {
             let path = PathBuf::from(&trg_dir).join(&fname);
             if let Err(e) = parse_trigger_file(&path, &mut world) {
                 tracing::warn!(path = %path.display(), error = %e, "Trigger parse error, skipping");
@@ -352,8 +355,8 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 
     // --- Quests ------------------------------------------------------------
     let qst_dir = format!("{data_dir}/world/qst");
-    if std::path::Path::new(&format!("{qst_dir}/index")).exists() {
-        for fname in read_index(&qst_dir)? {
+    if std::path::Path::new(&index_path(&qst_dir, mini)).exists() {
+        for fname in read_index(&qst_dir, mini)? {
             let path = PathBuf::from(&qst_dir).join(&fname);
             if let Err(e) = parse_quest_file(&path, &mut world) {
                 tracing::warn!(path = %path.display(), error = %e, "Quest parse error, skipping");
@@ -364,8 +367,8 @@ pub fn load_world(data_dir: &str) -> Result<World> {
 
     // --- Shops -------------------------------------------------------------
     let shp_dir = format!("{data_dir}/world/shp");
-    if std::path::Path::new(&format!("{shp_dir}/index")).exists() {
-        for fname in read_index(&shp_dir)? {
+    if std::path::Path::new(&index_path(&shp_dir, mini)).exists() {
+        for fname in read_index(&shp_dir, mini)? {
             let path = PathBuf::from(&shp_dir).join(&fname);
             if let Err(e) = parse_shop_file(&path, &mut world) {
                 tracing::warn!(path = %path.display(), error = %e, "Shop parse error, skipping");
@@ -1984,8 +1987,21 @@ pub fn spawn_mob_spec_tick(
 // Index file reader: returns Vec<String> of filenames listed in `<dir>/index`
 // (terminated by a line containing only "$"). Mirrors index_boot() in db.c.
 // ---------------------------------------------------------------------------
-fn read_index(dir: &str) -> Result<Vec<String>> {
-    let path = format!("{dir}/index");
+/// Path to a directory's index file.  In mini-MUD mode (`-m`) we prefer
+/// `index.mini` (the minimal/test list) when it exists, falling back to
+/// the full `index` otherwise.  Mirrors MINDEX_FILE handling in db.c.
+fn index_path(dir: &str, mini: bool) -> String {
+    if mini {
+        let mini_path = format!("{dir}/index.mini");
+        if std::path::Path::new(&mini_path).exists() {
+            return mini_path;
+        }
+    }
+    format!("{dir}/index")
+}
+
+fn read_index(dir: &str, mini: bool) -> Result<Vec<String>> {
+    let path = index_path(dir, mini);
     let f = File::open(&path).with_context(|| format!("opening {path}"))?;
     let mut names = Vec::new();
     for line in BufReader::new(f).lines() {
