@@ -766,4 +766,304 @@ E
 kit herbalism herbalist~
    Pouches, vials, and clippers for preparing herbal remedies.
 ~
+#458
+greataxe axe~
+a greataxe~
+A greataxe lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 12 3
+7 30 0 0 0
+E
+greataxe axe~
+   A massive two-handed axe with a broad, brutal blade.
+~
+#459
+handaxe axe hand~
+a handaxe~
+A handaxe lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 3
+2 5 0 0 0
+E
+handaxe axe hand~
+   A light axe, balanced for throwing or close work.
+~
+#460
+mace~
+a mace~
+A mace lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 7
+4 5 0 0 0
+E
+mace~
+   A heavy flanged head on a stout haft, favoured by clerics.
+~
+#461
+greatsword sword great~
+a greatsword~
+A greatsword lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 2 6 3
+6 50 0 0 0
+E
+greatsword sword great~
+   An enormous two-handed sword nearly as tall as its wielder.
+~
+#462
+flail~
+a flail~
+A flail lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 8 7
+2 10 0 0 0
+E
+flail~
+   A spiked metal ball joined to a handle by a heavy chain.
+~
+#463
+javelin~
+a javelin~
+A javelin lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 11
+2 1 0 0 0
+E
+javelin~
+   A light throwing spear with a slender iron head.
+~
+#464
+shortsword sword short~
+a shortsword~
+A shortsword lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 11
+2 10 0 0 0
+E
+shortsword sword short~
+   A short, double-edged blade, quick in the hand.
+~
+#465
+scimitar sword~
+a scimitar~
+A scimitar lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 6 3
+3 25 0 0 0
+E
+scimitar sword~
+   A curved single-edged sword with a wicked, slashing edge.
+~
+#466
+longbow bow long~
+a longbow~
+A longbow lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 8 11
+2 50 0 0 0
+E
+longbow bow long~
+   A tall bow of yew, capable of great range in trained hands.
+~
+#467
+longsword sword long~
+a longsword~
+A longsword lies here.~
+~
+5 0 0 0 0 an 0 0 0 0 0 0 0
+0 1 8 3
+3 15 0 0 0
+E
+longsword sword long~
+   A classic straight-bladed sword, versatile and well-balanced.
+~
+#468
+armor leather~
+a suit of leather armor~
+A suit of leather armor lies here.~
+~
+9 0 0 0 0 ad 0 0 0 0 0 0 0
+2 0 0 0
+10 10 0 0 0
+E
+armor leather~
+   Supple boiled-leather armor offering light protection.
+~
+#469
+armor studded leather~
+a suit of studded leather armor~
+A suit of studded leather armor lies here.~
+~
+9 0 0 0 0 ad 0 0 0 0 0 0 0
+3 0 0 0
+13 45 0 0 0
+E
+armor studded leather~
+   Leather armor reinforced with close-set metal rivets.
+~
+#470
+shirt chain mail~
+a chain shirt~
+A chain shirt lies here.~
+~
+9 0 0 0 0 ad 0 0 0 0 0 0 0
+4 0 0 0
+20 50 0 0 0
+E
+shirt chain mail~
+   A shirt of interlocking metal rings worn under clothing.
+~
+#471
+chain mail armor~
+a suit of chain mail~
+A suit of chain mail lies here.~
+~
+9 0 0 0 0 ad 0 0 0 0 0 0 0
+7 0 0 0
+55 75 0 0 0
+E
+chain mail armor~
+   A full suit of heavy interlocking mail over padded backing.
+~
+#472
+shield~
+a shield~
+A shield lies here.~
+~
+9 0 0 0 0 aj 0 0 0 0 0 0 0
+2 0 0 0
+6 10 0 0 0
+E
+shield~
+   A sturdy wood-and-metal shield to ward off blows.
+~
+#473
+sprig mistletoe focus druidic~
+a sprig of mistletoe~
+A sprig of mistletoe lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+0 1 0 0 0
+E
+sprig mistletoe focus druidic~
+   A sprig of mistletoe that a druid or ranger can use as a spellcasting focus.
+~
+#474
+crystal focus arcane~
+an arcane crystal~
+An arcane crystal lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+1 10 0 0 0
+E
+crystal focus arcane~
+   A faceted crystal that channels arcane magic as a spellcasting focus.
+~
+#475
+orb focus arcane~
+an arcane orb~
+An arcane orb lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+3 20 0 0 0
+E
+orb focus arcane~
+   A smooth glass orb that channels arcane magic as a spellcasting focus.
+~
+#476
+spellbook book~
+a spellbook~
+A spellbook lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+3 50 0 0 0
+E
+spellbook book~
+   A leather-bound tome of arcane formulae -- a wizard's most prized possession.
+~
+#477
+pack explorers explorer~
+an explorer's pack~
+An explorer's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+30 10 0 0 0
+E
+pack explorers explorer~
+   A backpack stocked with a bedroll, rations, rope, torches, and other travel gear.
+~
+#478
+pack entertainers entertainer~
+an entertainer's pack~
+An entertainer's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+40 40 0 0 0
+E
+pack entertainers entertainer~
+   A pack of costumes, props, and supplies for life on the stage and road.
+~
+#479
+pack priests priest~
+a priest's pack~
+A priest's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+25 33 0 0 0
+E
+pack priests priest~
+   A pack with a blanket, candles, an alms box, incense, vestments, and rations.
+~
+#480
+pack dungeoneers dungeoneer~
+a dungeoneer's pack~
+A dungeoneer's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+12 12 0 0 0
+E
+pack dungeoneers dungeoneer~
+   A pack of crowbar, hammer, pitons, torches, tinderbox, rations and rope for delving.
+~
+#481
+pack burglars burglar~
+a burglar's pack~
+A burglar's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+16 16 0 0 0
+E
+pack burglars burglar~
+   A discreet pack of ball bearings, candles, crowbar, hooded lantern, oil, rope and tools.
+~
+#482
+pack scholars scholar~
+a scholar's pack~
+A scholar's pack lies here.~
+~
+12 0 0 0 0 a 0 0 0 0 0 0 0
+0 0 0 0
+22 40 0 0 0
+E
+pack scholars scholar~
+   A pack with a book of lore, ink, parchment, a bag of sand, and a small knife.
+~
 $~

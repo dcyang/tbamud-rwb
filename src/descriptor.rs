@@ -45,6 +45,8 @@ pub enum ConnState {
     SelectSex,
     /// Choosing character class (CON_QCLASS)
     SelectClass,
+    /// Choosing the class's starting-equipment option (PHB Chapter 3; A/B/C).
+    SelectClassEquipment,
     /// Choosing a D&D background, filtered by the class's primary ability
     /// (Step 2 of character creation; no stock CON_* equivalent).
     SelectBackground,
@@ -497,9 +499,28 @@ pub async fn handle_connection(
                         && me.equipment.iter().all(|s| s.is_none());
                     if fresh && nothing {
                         let mut w = world.lock().await;
-                        let start_kit = p_ref.map(|p| p.start_kit).unwrap_or(0);
+                        let class_kit = p_ref.map(|p| p.start_kit_class).unwrap_or(0);
+                        let start_kit = p_ref.map(|p| p.start_kit_background).unwrap_or(0);
+                        let mut granted = false;
+
+                        // D&D class starting equipment (PHB Chapter 3, Step 1b).
+                        if class_kit != 0 {
+                            let opts = crate::db::class_kit(me.class);
+                            let idx = (class_kit as usize - 1).min(opts.len() - 1);
+                            let (_desc, items, gold) = opts[idx];
+                            for &(vnum, qty) in items {
+                                for _ in 0..qty {
+                                    if let Some(iid) = w.spawn_obj(vnum) {
+                                        me.inventory.push(iid);
+                                    }
+                                }
+                            }
+                            me.gold += gold;
+                            granted = true;
+                        }
+
+                        // D&D background starting equipment (PHB Chapter 4, Step 2c).
                         if !me.background.is_empty() && start_kit != 0 {
-                            // D&D background starting equipment (Step 2b choice).
                             if let Some((_d, items, a_gold, b_gold)) =
                                 crate::db::background_kit(&me.background)
                             {
@@ -515,8 +536,11 @@ pub async fn handle_connection(
                                 } else {
                                     me.gold += b_gold;
                                 }
+                                granted = true;
                             }
-                        } else {
+                        }
+
+                        if !granted {
                             // Legacy newbie kit (no background chosen).
                             let kit: &[crate::world::ObjVnum] = match me.class.base() {
                                 crate::players::Class::Fighter =>

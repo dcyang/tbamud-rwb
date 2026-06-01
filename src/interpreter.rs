@@ -7577,9 +7577,10 @@ async fn do_skill(
             h
         };
         if let Some(ph) = pvp_target {
-            let (target_pvp_ok, target_name) = {
+            use crate::character::Skill5e;
+            let (target_pvp_ok, target_name, def_athletics) = {
                 let c = ph.character.lock().await;
-                (c.pvp_ok, c.name.clone())
+                (c.pvp_ok, c.name.clone(), c.skill_check_bonus(Skill5e::Athletics))
             };
             if !me.pvp_ok || !target_pvp_ok {
                 return CmdOutput::text(
@@ -7588,17 +7589,21 @@ async fn do_skill(
             }
             use rand::Rng;
             let learned = *me.skills.get(&skill).unwrap_or(&0) as i32;
-            let chance = (30 + learned / 2).min(85);
-            let landed = rand::thread_rng().gen_range(1..=100) <= chance;
-            if !landed {
+            // Bashing someone to the ground is a contested Strength (Athletics)
+            // check (D&D shove): attacker vs defender; a tie favours the
+            // defender (forced movement fails).  A practiced Bash skill helps.
+            let atk_roll = rand::thread_rng().gen_range(1..=20)
+                + me.skill_check_bonus(Skill5e::Athletics) + learned / 5;
+            let def_roll = rand::thread_rng().gen_range(1..=20) + def_athletics;
+            if atk_roll <= def_roll {
                 let cl = chars.lock().await;
                 cl.broadcast_room(me.current_room, Some(me.id),
-                    &format!("{} tries to bash {target_name} but stumbles.\r\n", me.name));
+                    &format!("{} tries to bash {target_name}, who keeps their footing.\r\n", me.name));
                 let _ = ph.send.send(format!(
-                    "\r\n{} tries to bash you but stumbles.\r\n", me.name,
+                    "\r\n{} tries to bash you, but you keep your footing.\r\n", me.name,
                 ));
                 return CmdOutput::text(format!(
-                    "\r\nYou fail to bash {target_name}.\r\n"
+                    "\r\n{target_name} resists your bash.\r\n"
                 ));
             }
             // Knock to Sitting + apply 1-round Stun affect.
@@ -7676,7 +7681,12 @@ async fn do_skill(
             Skill::Backstab => 40,
             _ => return CmdOutput::text("\r\nThat isn't a physical skill.\r\n"),
         };
-        let hit_chance = (base_hit + learned as i32 / 2).min(95);
+        // Bash is a Strength (Athletics) shove — fold the attacker's Athletics
+        // check bonus into its chance to connect-and-knock-down.
+        let athletics = if matches!(skill, Skill::Bash) {
+            me.skill_check_bonus(crate::character::Skill5e::Athletics)
+        } else { 0 };
+        let hit_chance = (base_hit + learned as i32 / 2 + athletics).min(95);
         let hit = rng.gen_range(0..100) < hit_chance;
         let dmg = match skill {
             Skill::Kick     => dice(1, 6) + me.level / 2 + str_b,

@@ -133,6 +133,20 @@ fn ability_dist_menu(class: Class, bg: &str) -> String {
          1) {a}\r\n  2) {b}\r\nAbility scores (1/2): ")
 }
 
+/// Step-1b class starting-equipment menu (PHB Chapter 3): the class's "Choose
+/// A or B" options (Fighter: A/B/C). Text comes from `db::class_kit`.
+fn class_equipment_menu(class: Class) -> String {
+    let opts = crate::db::class_kit(class);
+    let mut s = String::from("\r\nChoose your class's starting equipment:\r\n");
+    for (i, (desc, _items, _gold)) in opts.iter().enumerate() {
+        let letter = (b'A' + i as u8) as char;
+        s.push_str(&format!("  {letter}) {desc}\r\n"));
+    }
+    let last = (b'A' + opts.len() as u8 - 1) as char;
+    s.push_str(&format!("Equipment (A-{last}): "));
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Login session state
 // ---------------------------------------------------------------------------
@@ -515,9 +529,38 @@ impl LoginSession {
                     p.class = class;
                 }
 
+                // Step 1b: choose the class's starting-equipment option
+                // (PHB Chapter 3). Background follows.
+                self.state = ConnState::SelectClassEquipment;
+                LoginOutput::send(class_equipment_menu(class))
+            }
+
+            // ---------------------------------------------------------------
+            // Step 1b — class starting-equipment option (A/B, or A/B/C)
+            // ---------------------------------------------------------------
+            ConnState::SelectClassEquipment => {
+                let class = self.player.as_ref().map(|p| p.class).unwrap_or_default();
+                let opts = crate::db::class_kit(class);
+                let pick = input.trim().chars().next()
+                    .map(|c| c.to_ascii_uppercase())
+                    .filter(|c| c.is_ascii_uppercase())
+                    .map(|c| (c as u8 - b'A') as usize)
+                    .filter(|&i| i < opts.len());
+                let idx = match pick {
+                    Some(i) => i,
+                    None => {
+                        return LoginOutput::send(format!(
+                            "\r\nPlease choose one of the listed options.\r\n{}",
+                            class_equipment_menu(class)));
+                    }
+                };
+                if let Some(p) = &mut self.player {
+                    p.start_kit_class = (idx + 1) as i32;
+                }
+
                 // Step 2: choose a background (filtered by the class's
                 // primary ability). Player creation is deferred until the
-                // background is picked (see ConnState::SelectBackground).
+                // equipment set is picked (see ConnState::SelectEquipment).
                 self.state = ConnState::SelectBackground;
                 LoginOutput::send(background_menu(class))
             }
@@ -594,7 +637,7 @@ impl LoginSession {
                     }
                 };
                 if let Some(p) = &mut self.player {
-                    p.start_kit = set;
+                    p.start_kit_background = set;
                 }
 
                 // Create the player in the DB and save (now that class,

@@ -441,9 +441,12 @@ pub struct PlayerRecord {
     pub god:           String,
     /// D&D 5e background chosen at creation (cosmetic for now; empty = none).
     pub background:    String,
-    /// Chosen starting-equipment set (0 = none/legacy, 1 = set A, 2 = set B).
+    /// Chosen class starting-equipment option (0 = none/legacy, 1 = A, 2 = B,
+    /// 3 = C for Fighter).  Consumed once at first login (PHB Chapter 3).
+    pub start_kit_class: i32,
+    /// Chosen background starting-equipment set (0 = none/legacy, 1 = A, 2 = B).
     /// Consumed once at first login to grant the background's gear.
-    pub start_kit:     i32,
+    pub start_kit_background: i32,
     /// Chosen background ability-score adjustment (PHB p.177): 0/1 = "+2 to
     /// one, +1 to another"; 2 = "+1 to all three".  Applied once at first login.
     pub ability_dist:  i32,
@@ -690,7 +693,8 @@ impl PlayerDb {
                 "LLog" => rec.last_login = val.parse().unwrap_or(0),
                 "God"  => rec.god  = val.to_string(),
                 "Bkgd" => rec.background = val.to_string(),
-                "SKit" => rec.start_kit = val.parse().unwrap_or(0),
+                "SKit" => rec.start_kit_background = val.parse().unwrap_or(0),
+                "CKit" => rec.start_kit_class = val.parse().unwrap_or(0),
                 "ADst" => rec.ability_dist = val.parse().unwrap_or(0),
                 "Mute" => rec.muted  = val.parse::<i32>().unwrap_or(0) != 0,
                 "Frzn" => rec.frozen = val.parse::<i32>().unwrap_or(0) != 0,
@@ -811,7 +815,8 @@ impl PlayerDb {
         if rec.last_login > 0   { writeln!(f, "LLog: {}", rec.last_login)?; }
         if !rec.god.is_empty()  { writeln!(f, "God : {}", rec.god)?; }
         if !rec.background.is_empty() { writeln!(f, "Bkgd: {}", rec.background)?; }
-        if rec.start_kit != 0   { writeln!(f, "SKit: {}", rec.start_kit)?; }
+        if rec.start_kit_background != 0 { writeln!(f, "SKit: {}", rec.start_kit_background)?; }
+        if rec.start_kit_class != 0 { writeln!(f, "CKit: {}", rec.start_kit_class)?; }
         if rec.ability_dist != 0 { writeln!(f, "ADst: {}", rec.ability_dist)?; }
         if rec.muted            { writeln!(f, "Mute: 1")?; }
         if rec.frozen           { writeln!(f, "Frzn: 1")?; }

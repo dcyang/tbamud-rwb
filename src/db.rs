@@ -572,6 +572,83 @@ pub fn load_house(data_dir: &str, room_vnum: i32, world: &mut crate::world::Worl
 
 /// Vnums reserved for synthetic newbie-kit objects.  See
 /// `inject_newbie_kit_protos`.
+/// D&D 5e class starting-equipment kits (PHB Chapter 3 Core Traits tables).
+/// Returns the class's "Choose A or B" (Fighter: A/B/C) options, each an
+/// `(option_description, &[(obj_vnum, quantity)], bonus_gold)`.  The final
+/// option of each class is gold-only (empty item list).  Objects live in
+/// `lib/world/obj/{0,4}.obj`.
+#[allow(clippy::type_complexity)]
+pub fn class_kit(
+    class: crate::players::Class,
+) -> &'static [(&'static str, &'static [(crate::world::ObjVnum, i32)], i64)] {
+    use crate::players::Class;
+    match class {
+        Class::Barbarian => &[
+            ("a greataxe, 4 handaxes, an explorer's pack, and 15 gold",
+             &[(458,1),(459,4),(477,1)], 15),
+            ("75 gold pieces", &[], 75),
+        ],
+        Class::Bard => &[
+            ("leather armor, 2 daggers, a musical instrument, an entertainer's pack, and 19 gold",
+             &[(468,1),(120,2),(455,1),(478,1)], 19),
+            ("90 gold pieces", &[], 90),
+        ],
+        Class::Cleric => &[
+            ("a chain shirt, a shield, a mace, a holy symbol, a priest's pack, and 7 gold",
+             &[(470,1),(472,1),(460,1),(432,1),(479,1)], 7),
+            ("110 gold pieces", &[], 110),
+        ],
+        Class::Druid => &[
+            ("leather armor, a shield, a sickle, a quarterstaff (druidic focus), an explorer's pack, a herbalism kit, and 9 gold",
+             &[(468,1),(472,1),(408,1),(405,1),(477,1),(457,1)], 9),
+            ("50 gold pieces", &[], 50),
+        ],
+        Class::Fighter => &[
+            ("chain mail, a greatsword, a flail, 8 javelins, a dungeoneer's pack, and 4 gold",
+             &[(471,1),(461,1),(462,1),(463,8),(480,1)], 4),
+            ("studded leather, a scimitar, a shortsword, a longbow, 20 arrows, a quiver, a dungeoneer's pack, and 11 gold",
+             &[(469,1),(465,1),(464,1),(466,1),(421,1),(425,1),(480,1)], 11),
+            ("155 gold pieces", &[], 155),
+        ],
+        Class::Monk => &[
+            ("a spear, 5 daggers, artisan's tools, an explorer's pack, and 11 gold",
+             &[(404,1),(120,5),(446,1),(477,1)], 11),
+            ("50 gold pieces", &[], 50),
+        ],
+        Class::Paladin => &[
+            ("chain mail, a shield, a longsword, 6 javelins, a holy symbol, a priest's pack, and 9 gold",
+             &[(471,1),(472,1),(467,1),(463,6),(432,1),(479,1)], 9),
+            ("150 gold pieces", &[], 150),
+        ],
+        Class::Ranger => &[
+            ("studded leather, a scimitar, a shortsword, a longbow, 20 arrows, a quiver, a sprig of mistletoe (druidic focus), an explorer's pack, and 7 gold",
+             &[(469,1),(465,1),(464,1),(466,1),(421,1),(425,1),(473,1),(477,1)], 7),
+            ("150 gold pieces", &[], 150),
+        ],
+        Class::Rogue => &[
+            ("leather armor, 2 daggers, a shortsword, a shortbow, 20 arrows, a quiver, thieves' tools, a burglar's pack, and 8 gold",
+             &[(468,1),(120,2),(464,1),(413,1),(421,1),(425,1),(452,1),(481,1)], 8),
+            ("100 gold pieces", &[], 100),
+        ],
+        Class::Sorcerer => &[
+            ("a spear, 2 daggers, an arcane focus (crystal), a dungeoneer's pack, and 28 gold",
+             &[(404,1),(120,2),(474,1),(480,1)], 28),
+            ("50 gold pieces", &[], 50),
+        ],
+        Class::Warlock => &[
+            ("leather armor, a sickle, 2 daggers, an arcane focus (orb), a book of occult lore, a scholar's pack, and 15 gold",
+             &[(468,1),(408,1),(120,2),(475,1),(442,1),(482,1)], 15),
+            ("100 gold pieces", &[], 100),
+        ],
+        Class::Wizard => &[
+            ("2 daggers, an arcane focus (quarterstaff), a robe, a spellbook, a scholar's pack, and 5 gold",
+             &[(120,2),(405,1),(426,1),(476,1),(482,1)], 5),
+            ("55 gold pieces", &[], 55),
+        ],
+        Class::Undefined => &[("nothing of note", &[], 0)],
+    }
+}
+
 /// D&D 5e background starting-equipment kits (PHB Chapter 4, logical
 /// pp.178–185).  Maps a background name to its option-A description, the
 /// option-A item list `(obj_vnum, quantity)`, the option-A bonus gold, and the
