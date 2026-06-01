@@ -1,6 +1,6 @@
 # TbaMUD-rwb (Rust Rewrite) License
 
-> Copyright (C) 2026 David ChangMo Yang
+> Copyright (C) 2026 David ChangMo Yang  
 > Some Rights Reserved
 
 tbamud-rwb is a from-scratch reimplementation, in the Rust programming
@@ -71,15 +71,15 @@ telnet://tbamud.com:9091 or email: rumble@tbamud.com -- Rumble
 
 # CircleMUD License
 
-> Copyright (C) 1995 by Jeremy Elson
-> All Rights Reserved
+> Copyright (C) 1995 by Jeremy Elson  
+> All Rights Reserved  
 
 CircleMUD was created by:
 
-**Jeremy Elson**
-Department of Computer Science
-Johns Hopkins University
-Baltimore, MD  21218  USA
+**Jeremy Elson**  
+Department of Computer Science  
+Johns Hopkins University  
+Baltimore, MD  21218  USA  
 jelson@circlemud.org
 
 CircleMUD is licensed software.  This file contains the text of the CircleMUD
@@ -195,40 +195,40 @@ license below.
 
 # DikuMud License
 
-> Copyright (C) 1990, 1991
+> Copyright (C) 1990, 1991  
 > All Rights Reserved
 
 ## Program & Concept created by
 
-**Sebastian Hammer**
-Prss. Maries Alle 15, 1
-1908 Frb. C.
-DENMARK
+**Sebastian Hammer**  
+Prss. Maries Alle 15, 1  
+1908 Frb. C.  
+DENMARK  
 (email quinn@freja.diku.dk)
 
-**Michael Seifert**
-Nr. Soeg. 37C, 1, doer 3
-1370 Copenhagen K.
-DENMARK
+**Michael Seifert**  
+Nr. Soeg. 37C, 1, doer 3  
+1370 Copenhagen K.  
+DENMARK  
 (email seifert@freja.diku.dk)
 
-**Hans Henrik St{rfeldt**
-Langs} 19
-3500 V{rl|se
-DENMARK
+**Hans Henrik St{rfeldt**  
+Langs} 19  
+3500 V{rl|se  
+DENMARK  
 (email bombman@freja.diku.dk)
 
-**Tom Madsen**
-R|de Mellemvej 94B, 64
-2300 Copenhagen S.
-DENMARK
+**Tom Madsen**  
+R|de Mellemvej 94B, 64  
+2300 Copenhagen S.  
+DENMARK  
 (email noop@freja.diku.dk)
 
-**Katja Nyboe**
-Kildeg}rdsvej 2
-2900 Hellerup
-31 62 82 84
-DENMARK
+**Katja Nyboe**  
+Kildeg}rdsvej 2  
+2900 Hellerup  
+31 62 82 84  
+DENMARK  
 (email katz@freja.diku.dk)
 
 This document contains the rules by which you can use, alter or publish
