@@ -515,6 +515,39 @@ async fn resolve_pvp_attack(
             &format!("{} hits {target_name}.\r\n", p.attacker_name));
     }
     if dead {
+        // Sanctioned duel (cp240): non-lethal.  The loser yields, is fully
+        // restored, and both sides exit the duel — no death/respawn, no
+        // pkill/pdeath counters.
+        let dueling_with = ph.character.lock().await.dueling;
+        if dueling_with == Some(p.attacker_id) {
+            {
+                let mut c = ph.character.lock().await;
+                c.hp = c.max_hp;
+                c.dueling = None;
+                c.fighting = None;
+            }
+            let attacker_h = {
+                let cl = chars.lock().await;
+                let h = cl.iter().find(|h| h.id == p.attacker_id).cloned();
+                h
+            };
+            if let Some(ah) = &attacker_h {
+                let mut c = ah.character.lock().await;
+                c.dueling = None;
+                c.fighting = None;
+                let _ = ah.send.send(format!(
+                    "\r\n{target_name} yields — you win the duel!\r\n"
+                ));
+            }
+            let _ = ph.send.send(format!(
+                "\r\nYou yield — {} wins the duel. You are helped to your feet.\r\n",
+                p.attacker_name,
+            ));
+            let cl = chars.lock().await;
+            cl.broadcast_room(p.room, Some(p.attacker_id),
+                &format!("{target_name} yields — {} wins the duel!\r\n", p.attacker_name));
+            return;
+        }
         // PvP counters: bump killer.pkills and victim.pdeaths.
         let killer_h = {
             let cl = chars.lock().await;

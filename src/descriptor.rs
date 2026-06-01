@@ -328,6 +328,8 @@ pub async fn handle_connection(
                     notes:            p_ref.map(|p| p.notes.clone()).unwrap_or_default(),
                     pose:             p_ref.map(|p| p.pose.clone()).unwrap_or_default(),
                     pvp_ok:           false,
+                    duel_challenge_from: None,   // cp240
+                    dueling:          None,      // cp240
                     invis_level:      0,
                     nohassle:         session.level >= 34,   // immortals ignored by aggro mobs (cp202)
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),

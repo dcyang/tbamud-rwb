@@ -741,6 +741,13 @@ pub struct Character {
     /// PvP opt-in.  When false, the player can neither be attacked by
     /// nor attack another player.  Transient.
     pub pvp_ok:       bool,
+    /// Sanctioned duel state (cp240).  `duel_challenge_from` holds a
+    /// pending challenger's id; `dueling` holds the current opponent's id
+    /// once a duel is accepted.  Both transient.  A duel sanctions PvP
+    /// between the two regardless of `pvp_ok`, and resolves non-lethally
+    /// (the loser yields, fully restored).
+    pub duel_challenge_from: Option<u32>,
+    pub dueling:      Option<u32>,
     /// Immortal invisibility level.  0 = visible to everyone; N > 0
     /// hides this character from anyone whose own level is &lt; N.
     /// Transient (cleared on reboot).

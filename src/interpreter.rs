@@ -108,10 +108,11 @@ const COMMANDS: &[&str] = &[
     "auction", "auc", "whisper",
     "brief", "compact", "time", "weather", "bank", "reply", "prompt", "alias",
     "commands", "scan", "track", "hunt", "mail", "spells", "recall",
-    "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
+    "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp", "duel",
     "finger", "assist", "worship", "afk", "bind", "unbind",
+    "bug", "idea", "typo",
     "achievements", "achs",
-    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "oset", "mset", "rset", "wizlock",
+    "goto", "transfer", "purge", "shutdown", "stat", "force", "set", "oset", "mset", "rset", "dig", "wizlock",
     "at", "househere", "house",
     "zreset", "olist", "mlist", "rlist", "zlist",
     "invis", "vis", "nohassle", "mute", "freeze",
@@ -424,9 +425,13 @@ pub async fn dispatch_command(
         Some("notes")     => do_notes(me),
         Some("pose")      => do_pose(rest, me),
         Some("uptime")    => do_uptime(),
+        Some("bug")       => do_submit("bug", rest, me).await,
+        Some("idea")      => do_submit("idea", rest, me).await,
+        Some("typo")      => do_submit("typo", rest, me).await,
         Some("peace")     => do_peace(me, world, chars).await,
         Some("order")     => do_order(rest, me, world, chars).await,
         Some("pvp")       => do_pvp(me),
+        Some("duel")      => do_duel(rest, me, chars).await,
         Some("finger") | Some("whois") => do_finger(rest, chars, players).await,
         Some("assist")    => do_assist(rest, me, world, chars).await,
         Some("worship")   => do_worship(rest, me),
@@ -447,6 +452,7 @@ pub async fn dispatch_command(
         Some("oset")      => do_oset(rest, me, world).await,
         Some("mset")      => do_mset(rest, me, world).await,
         Some("rset")      => do_rset(rest, me, world).await,
+        Some("dig")       => do_dig(rest, me, world).await,
         Some("wizlock")   => do_wizlock(rest, me),
         Some("zreset")    => do_zreset(rest, me, world).await,
         Some("olist")     => do_olist(rest, me, world).await,
@@ -3389,6 +3395,55 @@ fn do_time() -> CmdOutput {
     ))
 }
 
+/// `bug` / `idea` / `typo` (cp239): append a player report to the
+/// matching `lib/misc/<kind>` file (bugs / ideas / typos), stamped with
+/// the player's name, room, and a unix timestamp.  Mirrors the classic
+/// CircleMUD feedback commands.
+async fn do_submit(kind: &str, text: &str, me: &Character) -> CmdOutput {
+    let text = text.trim();
+    if text.is_empty() {
+        return CmdOutput::text(format!("\r\nUsage: {kind} <text>\r\n"));
+    }
+    let Some(players_arc) = PLAYERS_HANDLE.get() else {
+        return CmdOutput::text("\r\nReports are unavailable right now.\r\n".to_string());
+    };
+    // File name: bug→bugs, idea→ideas, typo→typos.
+    let file = match kind { "bug" => "bugs", "idea" => "ideas", _ => "typos" };
+    let data_dir = players_arc.lock().await.data_dir().to_string();
+    let dir = format!("{data_dir}/misc");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = format!("{dir}/{file}");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64).unwrap_or(0);
+    let line = format!("[{ts}] {} (room {}): {text}\n", me.name, me.current_room);
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => { let _ = f.write_all(line.as_bytes()); }
+        Err(e)    => {
+            tracing::warn!(error = %e, "Failed to append {file}");
+            return CmdOutput::text("\r\nYour report could not be saved.\r\n".to_string());
+        }
+    }
+    CmdOutput::text(format!("\r\nThank you — your {kind} has been logged.\r\n"))
+}
+
+/// A short ambient sky line for outdoor room descriptions (cp237),
+/// derived from the live weather sim (cp212) + day/night band (cp111).
+/// Returns None on a clear daytime sky (nothing worth noting).
+fn weather_line() -> Option<&'static str> {
+    use std::sync::atomic::Ordering;
+    let sky = crate::db::WEATHER_SKY.load(Ordering::Relaxed);
+    let night = matches!(crate::db::sun_state(),
+        crate::db::SunState::Dark | crate::db::SunState::Set);
+    Some(match sky {
+        crate::db::SKY_RAINING   => "  Rain falls steadily from the grey sky.",
+        crate::db::SKY_LIGHTNING => "  A storm rages overhead, lightning splitting the sky.",
+        crate::db::SKY_CLOUDY    => "  Clouds hang low overhead.",
+        _ => return if night { Some("  Stars glitter in the clear night sky.") } else { None },
+    })
+}
+
 fn do_weather() -> CmdOutput {
     use std::sync::atomic::Ordering;
     let h = crate::db::GAME_HOUR.load(Ordering::Relaxed);
@@ -3964,6 +4019,56 @@ async fn do_househere(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
 /// of common fields: level / hp / maxhp / mana / maxmana / gold / exp /
 /// room. Room change updates the registry and broadcasts a "vanishes"
 /// / "appears" pair so other players see the move.
+/// `dig <direction> <vnum>` (cp236): carve a two-way exit from the room
+/// the immortal is in to the room `vnum`, creating that room (blank, same
+/// zone) if it doesn't exist yet.  The reverse exit (opposite direction)
+/// is linked back automatically.  A live building tool atop `rset`/`oset`.
+async fn do_dig(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    if me.level < LVL_IMMORT { return immort_huh(); }
+    let parts: Vec<&str> = arg.split_whitespace().collect();
+    if parts.len() < 2 {
+        return CmdOutput::text("\r\nUsage: dig <direction> <room-vnum>\r\n".to_string());
+    }
+    let Some(dir) = Direction::parse(parts[0]) else {
+        return CmdOutput::text(format!("\r\n'{}' isn't a direction.\r\n", parts[0]));
+    };
+    let Ok(dest) = parts[1].parse::<crate::world::RoomVnum>() else {
+        return CmdOutput::text("\r\nThat's not a valid room vnum.\r\n".to_string());
+    };
+    let here = me.current_room;
+    if dest == here {
+        return CmdOutput::text("\r\nYou can't dig a room to itself.\r\n".to_string());
+    }
+    let mut w = world.lock().await;
+    let zone = w.rooms.get(&here).map(|r| r.zone).unwrap_or(0);
+    let created = if !w.rooms.contains_key(&dest) {
+        let mut room = crate::world::Room::default();
+        room.vnum = dest;
+        room.zone = zone;
+        room.name = "An Unfinished Room".to_string();
+        room.description = "This room has not been described yet.\r\n".to_string();
+        w.rooms.insert(dest, room);
+        true
+    } else { false };
+    // Link here -> dest in `dir`.
+    if let Some(r) = w.rooms.get_mut(&here) {
+        let mut e = crate::world::Exit::default();
+        e.to_room = dest;
+        r.exits[dir as usize] = Some(e);
+    }
+    // Link dest -> here in the opposite direction.
+    if let Some(r) = w.rooms.get_mut(&dest) {
+        let mut e = crate::world::Exit::default();
+        e.to_room = here;
+        r.exits[dir.opposite() as usize] = Some(e);
+    }
+    CmdOutput::text(format!(
+        "\r\nYou dig {} to room {dest}{}.\r\n",
+        dir.name(),
+        if created { " (new room created)" } else { "" },
+    ))
+}
+
 /// `rset <field> <value>` (cp235): edit the room the immortal is standing
 /// in (builder tool, room parallel to `oset`/`mset`).  Fields: `sector
 /// <n>` sets the sector type, `name <text>` renames the room, `flags <n>`
@@ -6172,6 +6277,76 @@ pub async fn total_ac(me: &Character, world: &Arc<Mutex<World>>) -> i32 {
     total + me.bonus_ac + me.affect_ac_bonus()
 }
 
+/// `duel <player>` / `duel accept` / `duel decline` (cp240): sanctioned,
+/// non-lethal PvP between two consenting players.  A challenge bypasses
+/// the global `pvp_ok` gate, and the loser yields (fully restored) rather
+/// than dying — see the duel branch in `combat::resolve_pvp_attack`.
+async fn do_duel(arg: &str, me: &mut Character, chars: &SharedChars) -> CmdOutput {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return CmdOutput::text(
+            "\r\nUsage: duel <player> | duel accept | duel decline\r\n".to_string()
+        );
+    }
+    // accept / decline a pending challenge.
+    if arg.eq_ignore_ascii_case("accept") {
+        let Some(challenger_id) = me.duel_challenge_from.take() else {
+            return CmdOutput::text("\r\nYou have no duel challenge to accept.\r\n".to_string());
+        };
+        let ch = {
+            let cl = chars.lock().await;
+            let h = cl.iter().find(|p| p.id == challenger_id).cloned();
+            h
+        };
+        let Some(ch) = ch else {
+            return CmdOutput::text("\r\nYour challenger is no longer here.\r\n".to_string());
+        };
+        if ch.current_room != me.current_room {
+            return CmdOutput::text("\r\nYour challenger has left.\r\n".to_string());
+        }
+        me.dueling   = Some(challenger_id);
+        me.fighting  = Some(Target { id: challenger_id, is_player: true });
+        {
+            let mut c = ch.character.lock().await;
+            c.dueling  = Some(me.id);
+            c.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let _ = ch.send.send(format!("\r\n{} accepts your challenge — the duel begins!\r\n", me.name));
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id),
+            &format!("A duel begins between {} and {}!\r\n", ch.name, me.name));
+        return CmdOutput::text(format!("\r\nYou accept {}'s challenge — the duel begins!\r\n", ch.name));
+    }
+    if arg.eq_ignore_ascii_case("decline") {
+        if me.duel_challenge_from.take().is_none() {
+            return CmdOutput::text("\r\nYou have no duel challenge to decline.\r\n".to_string());
+        }
+        return CmdOutput::text("\r\nYou decline the duel.\r\n".to_string());
+    }
+    // Otherwise: issue a challenge to a same-room player.
+    if me.dueling.is_some() {
+        return CmdOutput::text("\r\nYou're already in a duel!\r\n".to_string());
+    }
+    let target = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id != me.id
+            && p.current_room == me.current_room
+            && p.name.eq_ignore_ascii_case(arg)).cloned();
+        h
+    };
+    let Some(ph) = target else {
+        return CmdOutput::text("\r\nThere's no one here by that name.\r\n".to_string());
+    };
+    {
+        let mut c = ph.character.lock().await;
+        c.duel_challenge_from = Some(me.id);
+    }
+    let _ = ph.send.send(format!(
+        "\r\n{} challenges you to a duel!  Type `duel accept` or `duel decline`.\r\n", me.name,
+    ));
+    CmdOutput::text(format!("\r\nYou challenge {} to a duel.\r\n", ph.name))
+}
+
 async fn do_kill(
     arg: &str,
     me: &mut Character,
@@ -6218,16 +6393,20 @@ async fn do_kill(
         h
     };
     if let Some(ph) = pvp_target {
-        if !me.pvp_ok {
-            return CmdOutput::text(
-                "\r\nYou need to enable PvP first (type `pvp`).\r\n".to_string()
-            );
-        }
-        let target_pvp = ph.character.lock().await.pvp_ok;
-        if !target_pvp {
-            return CmdOutput::text(format!(
-                "\r\n{} hasn't consented to PvP.\r\n", ph.name,
-            ));
+        // A sanctioned duel (cp240) bypasses the pvp_ok consent gate.
+        let in_duel = me.dueling == Some(ph.id);
+        if !in_duel {
+            if !me.pvp_ok {
+                return CmdOutput::text(
+                    "\r\nYou need to enable PvP first (type `pvp`).\r\n".to_string()
+                );
+            }
+            let target_pvp = ph.character.lock().await.pvp_ok;
+            if !target_pvp {
+                return CmdOutput::text(format!(
+                    "\r\n{} hasn't consented to PvP.\r\n", ph.name,
+                ));
+            }
         }
         me.fighting = Some(Target { id: ph.id, is_player: true });
         {
@@ -11852,10 +12031,16 @@ async fn do_pick_container(
 async fn player_has_key(me: &Character, key_vnum: i32, world: &Arc<Mutex<World>>) -> bool {
     if key_vnum < 0 { return false; }
     let w = world.lock().await;
+    // Held directly, OR nested one level inside a carried container — so a
+    // bag of keys acts as a keyring (cp238).
     me.inventory.iter().any(|&iid| {
-        w.obj_instances.iter().find(|o| o.id == iid)
-            .map(|o| o.vnum == key_vnum)
-            .unwrap_or(false)
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { return false; };
+        if o.vnum == key_vnum { return true; }
+        o.contents.iter().any(|&cid| {
+            w.obj_instances.iter().find(|c| c.id == cid)
+                .map(|c| c.vnum == key_vnum)
+                .unwrap_or(false)
+        })
     })
 }
 
@@ -15533,6 +15718,16 @@ pub async fn render_room(
         for line in r.description.split('\n') {
             s.push_str(line);
             s.push_str("\r\n");
+        }
+        // Outdoor rooms get a live weather/sky line (cp237), driven by the
+        // cp212 weather sim + cp111 day/night cycle.
+        if r.sector_type != crate::world::SECT_INSIDE
+            && r.sector_type != crate::world::SECT_CITY
+        {
+            if let Some(line) = weather_line() {
+                s.push_str(line);
+                s.push_str("\r\n");
+            }
         }
     }
 
