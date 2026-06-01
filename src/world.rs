@@ -350,10 +350,12 @@ pub const ITEM_FOOD:      i32 = 19;
 pub const ITEM_FOUNTAIN:  i32 = 23;
 pub const ITEM_BOAT:      i32 = 22;
 pub const ITEM_MONEY:     i32 = 20;
+pub const ITEM_KEY:       i32 = 18;
 
 /// Bits inside `ObjProto.extra_flags[0]`.  Mirrors structs.h
 /// ITEM_x_* macros.  Only the ANTI-class checks are wired right now;
 /// the rest are placeholders for future use.
+pub const ITEM_NORENT:          u32 = 1 << 2;
 pub const ITEM_ANTI_GOOD:       u32 = 1 << 9;
 pub const ITEM_ANTI_EVIL:       u32 = 1 << 10;
 pub const ITEM_ANTI_NEUTRAL:    u32 = 1 << 11;
@@ -565,6 +567,12 @@ pub enum MobSpec {
     /// Cutpurse: periodically lifts a slice of gold from a random
     /// non-immortal player sharing its room, then may slip away.
     Thief,
+    /// Inn receptionist: handles the `offer` / `rent` commands (stores a
+    /// player's belongings and logs them out).  Idles with random socials.
+    Receptionist,
+    /// Cryogenicist: like the receptionist but freezes the player; rent
+    /// cost is charged at CRYO_FACTOR (×4) rather than per day.
+    Cryogenicist,
 }
 
 /// When true, special procedures are not assigned to mobs (the `-s`
@@ -593,6 +601,9 @@ impl MobSpec {
             16 => Some(MobSpec::Postmaster),
             17 => Some(MobSpec::PetShop),
             14 => Some(MobSpec::Thief),
+            // Inn receptionists (stock spec_assign) + the Mosaic cryogenicist.
+            1200 | 3005 | 5404 | 27713 | 27730 => Some(MobSpec::Receptionist),
+            3095 => Some(MobSpec::Cryogenicist),
             _  => None,
         }
     }

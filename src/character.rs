@@ -751,6 +751,9 @@ pub struct Character {
     /// Gold on deposit at the bank (separate from carried `gold`).
     /// Persisted across sessions.
     pub bank_gold:    i64,
+    /// Per-day rent recorded when this character last `rent`ed (0 = not
+    /// renting).  Accrued cost is charged on the next login.  Persisted.
+    pub rent_per_day: i32,
     pub exp:          i64,
     pub hp:           i32,
     pub max_hp:       i32,

@@ -152,6 +152,9 @@ pub struct PlayerRecord {
     pub gold:          i64,
     /// Gold on deposit at the bank.
     pub bank_gold:     i64,
+    /// Per-day rent owed since the player last rented (0 = not renting /
+    /// free rent).  Accrued cost is deducted on the next login.
+    pub rent_per_day:  i32,
     pub exp:           i64,
     pub str_:          i32,
     pub int_:          i32,
@@ -416,6 +419,7 @@ impl PlayerDb {
                 "Thst" => rec.thirst = val.parse().unwrap_or(24),
                 "Titl" => rec.title  = val.to_string(),
                 "Bank" => rec.bank_gold = val.parse().unwrap_or(0),
+                "RntD" => rec.rent_per_day = val.parse().unwrap_or(0),
                 "Prmt" => rec.prompt_format = val.to_string(),
                 "Alis" => {
                     // "Alis: <name> <expansion>"
@@ -533,6 +537,7 @@ impl PlayerDb {
         writeln!(f, "Thst: {}", rec.thirst)?;
         if !rec.title.is_empty() { writeln!(f, "Titl: {}", rec.title)?; }
         if rec.bank_gold > 0     { writeln!(f, "Bank: {}", rec.bank_gold)?; }
+        if rec.rent_per_day > 0  { writeln!(f, "RntD: {}", rec.rent_per_day)?; }
         if !rec.prompt_format.is_empty() { writeln!(f, "Prmt: {}", rec.prompt_format)?; }
         let mut anames: Vec<&String> = rec.aliases.keys().collect();
         anames.sort();
@@ -576,6 +581,48 @@ impl PlayerDb {
             'p'..='t' => "P-T",
             _         => "U-Z",
         }
+    }
+
+    /// Boot-time cleanup of stale stored-object files (mirrors stock
+    /// `update_obj_file` / `Crash_clean_file`, gated by the `-q` flag).
+    /// For each indexed player idle longer than the applicable timeout —
+    /// `RENT_FILE_TIMEOUT` real-days if their record shows they rented
+    /// (rent_per_day > 0), else `CRASH_FILE_TIMEOUT` — delete their
+    /// `.objs` file so abandoned belongings don't persist forever.
+    /// Returns the number of files removed.
+    pub fn clean_stale_object_files(&self) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut removed = 0;
+        for e in &self.entries {
+            // Unknown age (pre-tracking) — leave it alone.
+            if e.last_login <= 0 { continue; }
+            let days_idle = (now - e.last_login) / 86_400;
+            if days_idle <= crate::config::CRASH_FILE_TIMEOUT { continue; }
+            // Past the crash threshold; if they rented, allow the longer
+            // rent grace period before deleting.
+            let threshold = match self.load_player(&e.name) {
+                Ok(rec) if rec.rent_per_day > 0 => crate::config::RENT_FILE_TIMEOUT,
+                _ => crate::config::CRASH_FILE_TIMEOUT,
+            };
+            if days_idle <= threshold { continue; }
+            let path = self.objs_path(&e.name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::info!(player = %e.name, days_idle,
+                        "Deleting stale object file");
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    tracing::warn!(path = %path, error = %err,
+                        "Failed to delete stale object file");
+                }
+            }
+        }
+        removed
     }
 }
 

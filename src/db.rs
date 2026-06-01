@@ -1849,6 +1849,28 @@ pub fn spawn_mob_spec_tick(
                         // MagicUser's combat-cast logic lives in
                         // combat.rs (resolve_mob_attack); no idle tick.
                     }
+                    crate::world::MobSpec::Receptionist
+                    | crate::world::MobSpec::Cryogenicist => {
+                        // The offer/rent commands drive the real behavior.
+                        // Idle flavor only: ~1-in-6 chance of a small social,
+                        // mirroring gen_receptionist's `!cmd` action table.
+                        const RECEP_ACTS: &[&str] = &[
+                            "smiles", "sighs", "blushes", "coughs",
+                            "twiddles $s thumbs", "yawns",
+                        ];
+                        let act = {
+                            use rand::Rng;
+                            let mut rng = rand::thread_rng();
+                            if rng.gen_range(0..6) == 0 {
+                                RECEP_ACTS.choose(&mut rng).copied()
+                            } else { None }
+                        };
+                        if let Some(a) = act {
+                            let a = a.replace("$s", "its");
+                            chars.lock().await.broadcast_room(
+                                room, None, &format!("{short} {a}.\r\n"));
+                        }
+                    }
                     crate::world::MobSpec::Healer => {
                         // Healer service is invoked by the `heal`
                         // player command (cp180); no idle tick.

@@ -233,6 +233,34 @@ pub async fn handle_connection(
                 let practices  = p_ref.map(|p| p.practices).unwrap_or(0);
                 let room      = p_ref.map(|p| p.room).filter(|r| *r != 0).unwrap_or(start);
                 let gold      = p_ref.map(|p| p.gold).unwrap_or(0);
+                // Rent accrual: if the player rented (rent_per_day > 0) and
+                // rent isn't free, charge the days elapsed since last login,
+                // from carried gold then bank.  Then clear the rent marker.
+                let (gold, bank_after, rent_after, rent_charged) = {
+                    let rpd    = p_ref.map(|p| p.rent_per_day).unwrap_or(0);
+                    let last   = p_ref.map(|p| p.last_login).unwrap_or(0);
+                    let mut g  = gold;
+                    let mut b  = p_ref.map(|p| p.bank_gold).unwrap_or(0);
+                    let mut charged = 0i64;
+                    let free = crate::interpreter::FREE_RENT
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if !free && rpd > 0 && last > 0 {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64).unwrap_or(last);
+                        let days = ((now - last) / 86_400).max(0);
+                        charged = days * rpd as i64;
+                        let from_gold = charged.min(g);
+                        g -= from_gold;
+                        b = (b - (charged - from_gold)).max(0);
+                    }
+                    // Clear the rent marker once we've settled up (or if free).
+                    (g, b, 0i32, charged)
+                };
+                if rent_charged > 0 {
+                    tracing::info!(player = %pname, charged = rent_charged,
+                        "Rent charged on login");
+                }
                 let immortal  = session.level >= 34;
                 let ab        = |v: i32| if v > 0 { v } else { Character::roll_ability(immortal) };
                 let mut me = Character {
@@ -245,7 +273,8 @@ pub async fn handle_connection(
                     inventory:    Vec::new(),
                     equipment:    Default::default(),
                     gold,
-                    bank_gold:    p_ref.map(|p| p.bank_gold).unwrap_or(0),
+                    bank_gold:    bank_after,
+                    rent_per_day: rent_after,
                     exp:          p_ref.map(|p| p.exp).unwrap_or(0),
                     hp,
                     max_hp,
@@ -693,6 +722,7 @@ async fn run_game_session(
             rec.thirst          = me.thirst;
             rec.title           = me.title.clone();
             rec.bank_gold       = me.bank_gold;
+            rec.rent_per_day    = me.rent_per_day;
             rec.prompt_format   = me.prompt_format.clone();
             rec.aliases         = me.aliases.clone();
             rec.last_login      = std::time::SystemTime::now()

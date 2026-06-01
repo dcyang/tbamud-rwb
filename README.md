@@ -63,8 +63,8 @@ and then drop into the game.
 
 ### Command-line options
 
-The flags mirror the upstream `comm.c` arguments. Run `circle -h` for the full
-list. These are fully wired today:
+The flags mirror the upstream `comm.c` arguments, and all of them are wired up.
+Run `circle -h` for the full list.
 
 | Flag        | Meaning                                                      | Default |
 |-------------|--------------------------------------------------------------|---------|
@@ -75,13 +75,9 @@ list. These are fully wired today:
 | `-s`        | Suppress special procedures (mob spec_procs)                 | off     |
 | `-o <file>` | Write the log to `<file>` instead of stderr                  | stderr  |
 | `-c`        | Syntax-check: load the world data, report, and exit          | off     |
+| `-q`        | Quick boot — skip the timed-out stored-object cleanup        | off     |
 
-The one remaining upstream flag is **accepted on the command line but has no
-effect** — it is parsed for CLI compatibility only:
-
-| Flag        | Intended meaning                          | Status                                  |
-|-------------|-------------------------------------------|-----------------------------------------|
-| `-q`        | Quick boot (skip rent checks)             | no-op — this port has no rent system    |
+(`-m` implies `-q`, matching stock.)
 
 For example, to boot a second instance on another port with its own data
 directory:

@@ -60,6 +60,14 @@ pub static WIZLOCK_LEVEL: std::sync::atomic::AtomicI32 =
 pub static RESTRICT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Whether renting is free (stock `free_rent`, default YES).  When true,
+/// the receptionist just stores belongings and tells the player to quit;
+/// when false the per-day cost machinery (offer breakdown, affordability,
+/// login-time accrual) activates.  Runtime atomic so the paid path stays
+/// live code; defaults to the stock-shipped value.
+pub static FREE_RENT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
 /// Shared mutable site-ban list, populated from `lib/etc/badsites` at
 /// boot and mutated at runtime by the `ban`/`unban` commands.
 pub static BAD_SITES: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
@@ -117,7 +125,7 @@ const COMMANDS: &[&str] = &[
     "notell", "nosummon", "nograts", "nogossip", "noauction",
     "auction", "auc", "whisper",
     "brief", "compact", "toggle", "time", "weather", "bank", "reply", "prompt", "alias",
-    "balance", "deposit", "withdraw", "gsay", "take", "hold", "grab", "diagnose", "whoami",
+    "balance", "deposit", "withdraw", "offer", "rent", "gsay", "take", "hold", "grab", "diagnose", "whoami",
     "news", "credits", "motd", "imotd", "policy", "policies", "handbook", "background",
     "wizlist", "immlist",
     "commands", "scan", "track", "mail", "spells", "recall",
@@ -425,6 +433,8 @@ pub async fn dispatch_command(
         Some("time")      => do_time(),
         Some("weather")   => do_weather(),
         Some("bank")      => do_bank(rest, me),
+        Some("offer")     => do_offer(me, world).await,
+        Some("rent")      => do_rent(me, world).await,
         Some("balance")   => do_bank("balance", me),
         Some("deposit")   => do_bank(&format!("deposit {rest}"), me),
         Some("withdraw")  => do_bank(&format!("withdraw {rest}"), me),
@@ -4435,6 +4445,7 @@ async fn do_reload(
         c.god      = rec.god.clone();
         c.practices = rec.practices;
         c.bank_gold = rec.bank_gold;
+        c.rent_per_day = rec.rent_per_day;
         c.hunger   = rec.hunger;
         c.thirst   = rec.thirst;
     }
@@ -5958,6 +5969,168 @@ async fn do_board_remove(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -
 
 /// Sum of weights of every object the player is carrying (inventory +
 /// equipment).  Container contents count toward the carrier's weight.
+// ---------------------------------------------------------------------------
+// Rent / inn receptionist (port of stock objsave.c gen_receptionist)
+// ---------------------------------------------------------------------------
+
+/// Find a receptionist or cryogenicist mob in the caller's room.  Returns
+/// `(mob_short, factor)` — RENT_FACTOR for a receptionist, CRYO_FACTOR for
+/// a cryogenicist.
+async fn find_receptionist(me: &Character, world: &Arc<Mutex<World>>) -> Option<(String, i32, bool)> {
+    let w = world.lock().await;
+    let r = w.rooms.get(&me.current_room)?;
+    for &mid in &r.mobs {
+        let Some(m) = w.mob_instances.iter().find(|m| m.id == mid) else { continue };
+        let factor = match m.spec {
+            Some(crate::world::MobSpec::Receptionist) => Some((crate::config::RENT_FACTOR, false)),
+            Some(crate::world::MobSpec::Cryogenicist) => Some((crate::config::CRYO_FACTOR, true)),
+            _ => None,
+        };
+        if let Some((factor, cryo)) = factor {
+            let short = w.mob_protos.get(&m.vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the receptionist".into());
+            return Some((short, factor, cryo));
+        }
+    }
+    None
+}
+
+struct RentItem { short: String, cost: i32 }
+struct RentBreak {
+    unrentables: Vec<String>,
+    items: Vec<RentItem>,
+    total: i32,
+}
+
+/// Walk the caller's carried + equipped objects (recursing into container
+/// contents) and tally rent.  Mirrors Crash_report_rent/unrentables.
+fn rent_breakdown(me: &Character, w: &World, factor: i32) -> RentBreak {
+    let mut stack: Vec<u32> = me.inventory.clone();
+    stack.extend(me.equipment.iter().flatten().copied());
+    let mut br = RentBreak {
+        unrentables: Vec::new(),
+        items: Vec::new(),
+        total: crate::config::MIN_RENT_COST * factor,
+    };
+    while let Some(iid) = stack.pop() {
+        let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) else { continue };
+        stack.extend(o.contents.iter().copied());
+        let Some(p) = w.obj_protos.get(&o.vnum) else { continue };
+        let unrentable = p.extra_flags[0] & crate::world::ITEM_NORENT != 0
+            || p.rent < 0
+            || p.item_type == crate::world::ITEM_KEY;
+        if unrentable {
+            br.unrentables.push(p.short_description.clone());
+        } else {
+            let c = (p.rent * factor).max(0);
+            br.total += c;
+            br.items.push(RentItem { short: p.short_description.clone(), cost: c });
+        }
+    }
+    br
+}
+
+/// Shared body of `offer` (display=true) and `rent` (display=false).
+/// Returns the per-day/total cost when the player CAN rent, else None
+/// (after emitting the appropriate refusal lines into `out`).
+fn rent_offer(
+    me: &Character, br: &RentBreak, short: &str, factor: i32,
+    display: bool, out: &mut String,
+) -> Option<i32> {
+    if !br.unrentables.is_empty() {
+        for u in &br.unrentables {
+            out.push_str(&format!("{short} tells you, 'You cannot store {u}.'\r\n"));
+        }
+        return None;
+    }
+    if br.items.is_empty() {
+        out.push_str(&format!(
+            "{short} tells you, 'But you are not carrying anything!  Just quit!'\r\n"));
+        return None;
+    }
+    if br.items.len() as i32 > crate::config::MAX_OBJ_SAVE {
+        out.push_str(&format!(
+            "{short} tells you, 'Sorry, but I cannot store more than {} items.'\r\n",
+            crate::config::MAX_OBJ_SAVE));
+        return None;
+    }
+    if display {
+        for it in &br.items {
+            out.push_str(&format!("{short} tells you, '{:5} coins for {}..'\r\n", it.cost, it.short));
+        }
+        out.push_str(&format!("{short} tells you, 'Plus, my {} coin fee..'\r\n",
+            crate::config::MIN_RENT_COST * factor));
+        out.push_str(&format!("{short} tells you, 'For a total of {} coins{}.'\r\n",
+            br.total, if factor == crate::config::RENT_FACTOR { " per day" } else { "" }));
+    }
+    Some(br.total)
+}
+
+/// `offer` — ask a receptionist what renting would cost.
+async fn do_offer(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some((short, factor, _cryo)) = find_receptionist(me, world).await else {
+        return CmdOutput::text("\r\nSorry, but you cannot do that here!\r\n".to_string());
+    };
+    if crate::interpreter::FREE_RENT.load(std::sync::atomic::Ordering::Relaxed) {
+        return CmdOutput::text(format!(
+            "\r\n{short} tells you, 'Rent is free here.  Just quit, and your objects will be saved!'\r\n"));
+    }
+    let br = { let w = world.lock().await; rent_breakdown(me, &w, factor) };
+    let mut out = String::from("\r\n");
+    if let Some(total) = rent_offer(me, &br, &short, factor, true, &mut out) {
+        let purse = me.gold + me.bank_gold;
+        if total as i64 > purse {
+            out.push_str(&format!("{short} tells you, '...which I see you can't afford.'\r\n"));
+        } else if factor == crate::config::RENT_FACTOR {
+            let days = purse / total as i64;
+            out.push_str(&format!(
+                "{short} tells you, 'You can rent for {days} day{} with the gold you have on hand and in the bank.'\r\n",
+                if days != 1 { "s" } else { "" }));
+        }
+    }
+    CmdOutput::text(out)
+}
+
+/// `rent` — store belongings and log off (charging per-day rent unless
+/// rent is free, in which case it just tells the player to quit).
+async fn do_rent(me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some((short, factor, cryo)) = find_receptionist(me, world).await else {
+        return CmdOutput::text("\r\nSorry, but you cannot do that here!\r\n".to_string());
+    };
+    if crate::interpreter::FREE_RENT.load(std::sync::atomic::Ordering::Relaxed) {
+        return CmdOutput::text(format!(
+            "\r\n{short} tells you, 'Rent is free here.  Just quit, and your objects will be saved!'\r\n"));
+    }
+    let br = { let w = world.lock().await; rent_breakdown(me, &w, factor) };
+    let mut out = String::from("\r\n");
+    let Some(total) = rent_offer(me, &br, &short, factor, false, &mut out) else {
+        return CmdOutput::text(out);
+    };
+    if cryo {
+        out.push_str(&format!("{short} tells you, 'It will cost you {total} gold coins to be frozen.'\r\n"));
+    } else {
+        out.push_str(&format!("{short} tells you, 'Rent will cost you {total} gold coins per day.'\r\n"));
+    }
+    if total as i64 > me.gold + me.bank_gold {
+        out.push_str(&format!("{short} tells you, '...which I see you can't afford.'\r\n"));
+        return CmdOutput::text(out);
+    }
+    // Record the per-day cost; accrued rent is charged on next login.
+    me.rent_per_day = total;
+    if cryo {
+        out.push_str(&format!(
+            "{short} stores your belongings and helps you into your private chamber.\r\n\
+             A white mist appears in the room, chilling you to the bone...\r\n\
+             You begin to lose consciousness...\r\n"));
+    } else {
+        out.push_str(&format!(
+            "{short} stores your belongings and helps you into your private chamber.\r\n"));
+    }
+    // Route through the standard quit path (saves objects + disconnects).
+    CmdOutput::quit(out)
+}
+
 pub fn total_carry_weight(me: &Character, w: &World) -> i32 {
     let mut sum = 0;
     let mut stack: Vec<u32> = Vec::new();
@@ -13622,6 +13795,7 @@ pub async fn save_character_to_db(
     r.thirst          = me.thirst;
     r.title           = me.title.clone();
     r.bank_gold       = me.bank_gold;
+    r.rent_per_day    = me.rent_per_day;
     r.prompt_format   = me.prompt_format.clone();
     r.aliases         = me.aliases.clone();
     r.last_login      = std::time::SystemTime::now()
@@ -13685,6 +13859,7 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.thirst          = me.thirst;
             r.title           = me.title.clone();
             r.bank_gold       = me.bank_gold;
+            r.rent_per_day    = me.rent_per_day;
             r.prompt_format   = me.prompt_format.clone();
             r.aliases         = me.aliases.clone();
             r.last_login      = std::time::SystemTime::now()

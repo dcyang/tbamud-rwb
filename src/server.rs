@@ -57,10 +57,17 @@ pub async fn run(config: Config) -> Result<()> {
 
     // --- Load player index ---------------------------------------------------
     // Mirrors build_player_index() called from boot_db().
-    let players = Arc::new(Mutex::new(
-        PlayerDb::load(&config.dir)
-            .context("Failed to load player index")?,
-    ));
+    let player_db = PlayerDb::load(&config.dir)
+        .context("Failed to load player index")?;
+    // Boot-time stale stored-object cleanup (mirrors stock update_obj_file).
+    // Skipped by -q (quick boot) and -m (mini-MUD implies quick boot).
+    if config.quick_boot {
+        info!("Quick boot (-q): skipping stale object-file cleanup");
+    } else {
+        let n = player_db.clean_stale_object_files();
+        info!(removed = n, "Deleted timed-out stored-object files");
+    }
+    let players = Arc::new(Mutex::new(player_db));
     // Stash a global handle so script side-effects (mforce) can dispatch
     // commands without threading `players` through every trigger path.
     let _ = crate::interpreter::PLAYERS_HANDLE.set(Arc::clone(&players));

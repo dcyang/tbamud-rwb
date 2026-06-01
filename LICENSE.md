@@ -201,31 +201,31 @@ license below.
 ## Program & Concept created by
 
 **Sebastian Hammer**  
-Prss. Maries Alle 15, 1  
-1908 Frb. C.  
+Prinsesse Maries Allé 15, 1.  
+1908 Frederiksberg C  
 DENMARK  
 (email quinn@freja.diku.dk)
 
 **Michael Seifert**  
-Nr. Soeg. 37C, 1, doer 3  
+Nørre Søgade 37C, 1., dør 3  
 1370 Copenhagen K.  
 DENMARK  
 (email seifert@freja.diku.dk)
 
-**Hans Henrik St{rfeldt**  
-Langs} 19  
-3500 V{rl|se  
+**Hans Henrik Stærfeldt**  
+Langså 19  
+3500 Værløse  
 DENMARK  
 (email bombman@freja.diku.dk)
 
 **Tom Madsen**  
-R|de Mellemvej 94B, 64  
+Røde Mellemvej 94B, 64  
 2300 Copenhagen S.  
 DENMARK  
 (email noop@freja.diku.dk)
 
 **Katja Nyboe**  
-Kildeg}rdsvej 2  
+Kildegårdsvej 2  
 2900 Hellerup  
 31 62 82 84  
 DENMARK  
