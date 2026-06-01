@@ -103,6 +103,28 @@ pub enum Skill {
     EnergyDrain,
     /// Warrior physical skill — strike every mob in the room.
     Whirlwind,
+    /// Cleric/MagicUser self-buff — ward against evil creatures.
+    ProtFromEvil,
+    /// Cleric self-buff — walk across water unhindered.
+    Waterwalk,
+    /// Cleric utility — conjure a mushroom into the caster's hands.
+    CreateFood,
+    /// MagicUser utility — random teleport to another room.
+    Teleport,
+    /// MagicUser prank — throw the caster's voice to the room.
+    Ventriloquate,
+    /// Cleric utility — blanket the room in magical darkness.
+    Darkness,
+    /// Cleric utility — change the weather toward fair or foul.
+    ControlWeather,
+    /// Group spells — apply to every group member in the caster's room.
+    GroupHeal,
+    GroupArmor,
+    GroupRecall,
+    /// Necromancy — raise a zombie from a corpse as a charmed servant.
+    AnimateDead,
+    /// MagicUser — conjure a charmed duplicate of the caster.
+    Clone,
     /// Thief physical skill — glance at a target's carried inventory.
     Peek,
     /// Warrior/Thief physical skill — befriend a weaker creature, turning
@@ -184,6 +206,18 @@ impl Skill {
             "dispelgood"                      => Some(Skill::DispelGood),
             "energydrain"                     => Some(Skill::EnergyDrain),
             "whirlwind"                       => Some(Skill::Whirlwind),
+            "protfromevil" | "protectionfromevil" => Some(Skill::ProtFromEvil),
+            "waterwalk"                       => Some(Skill::Waterwalk),
+            "createfood"                      => Some(Skill::CreateFood),
+            "teleport"                        => Some(Skill::Teleport),
+            "ventriloquate"                   => Some(Skill::Ventriloquate),
+            "darkness"                        => Some(Skill::Darkness),
+            "controlweather"                  => Some(Skill::ControlWeather),
+            "groupheal"                       => Some(Skill::GroupHeal),
+            "grouparmor"                      => Some(Skill::GroupArmor),
+            "grouprecall"                     => Some(Skill::GroupRecall),
+            "animatedead"                     => Some(Skill::AnimateDead),
+            "clone"                           => Some(Skill::Clone),
             "peek"                            => Some(Skill::Peek),
             "tame"                            => Some(Skill::Tame),
             "colorspray" | "color"            => Some(Skill::ColorSpray),
@@ -261,6 +295,18 @@ impl Skill {
             Skill::DispelGood    => "dispel good",
             Skill::EnergyDrain   => "energy drain",
             Skill::Whirlwind     => "whirlwind",
+            Skill::ProtFromEvil  => "protection from evil",
+            Skill::Waterwalk     => "waterwalk",
+            Skill::CreateFood    => "create food",
+            Skill::Teleport      => "teleport",
+            Skill::Ventriloquate => "ventriloquate",
+            Skill::Darkness      => "darkness",
+            Skill::ControlWeather => "control weather",
+            Skill::GroupHeal     => "group heal",
+            Skill::GroupArmor    => "group armor",
+            Skill::GroupRecall   => "group recall",
+            Skill::AnimateDead   => "animate dead",
+            Skill::Clone         => "clone",
             Skill::Peek          => "peek",
             Skill::Tame          => "tame",
         }
@@ -296,6 +342,11 @@ impl Skill {
                 | Skill::Curse | Skill::RemoveCurse | Skill::DispelMagic
                 | Skill::DispelEvil | Skill::DispelGood
                 | Skill::EnergyDrain
+                | Skill::ProtFromEvil | Skill::Waterwalk | Skill::CreateFood
+                | Skill::Teleport | Skill::Ventriloquate | Skill::Darkness
+                | Skill::ControlWeather
+                | Skill::GroupHeal | Skill::GroupArmor | Skill::GroupRecall
+                | Skill::AnimateDead | Skill::Clone
                                       => SkillKind::Spell,
         }
     }
@@ -358,6 +409,18 @@ impl Skill {
             Skill::DispelEvil    => 15,
             Skill::DispelGood    => 15,
             Skill::EnergyDrain   => 35,
+            Skill::ProtFromEvil  => 10,
+            Skill::Waterwalk     => 10,
+            Skill::CreateFood    => 5,
+            Skill::Teleport      => 25,
+            Skill::Ventriloquate => 5,
+            Skill::Darkness      => 8,
+            Skill::ControlWeather => 25,
+            Skill::GroupHeal     => 40,
+            Skill::GroupArmor    => 20,
+            Skill::GroupRecall   => 25,
+            Skill::AnimateDead   => 35,
+            Skill::Clone         => 80,
         }
     }
 
@@ -430,6 +493,18 @@ impl Skill {
             Skill::DispelGood    => &[Class::Cleric],
             Skill::EnergyDrain   => &[Class::MagicUser],
             Skill::Whirlwind     => &[Class::Warrior],
+            Skill::ProtFromEvil  => &[Class::Cleric],
+            Skill::Waterwalk     => &[Class::Cleric],
+            Skill::CreateFood    => &[Class::Cleric],
+            Skill::Teleport      => &[Class::MagicUser],
+            Skill::Ventriloquate => &[Class::MagicUser],
+            Skill::Darkness      => &[Class::MagicUser],
+            Skill::ControlWeather => &[Class::Cleric],
+            Skill::GroupHeal     => &[Class::Cleric],
+            Skill::GroupArmor    => &[Class::Cleric],
+            Skill::GroupRecall   => &[Class::Cleric],
+            Skill::AnimateDead   => &[Class::Cleric, Class::MagicUser],
+            Skill::Clone         => &[Class::MagicUser],
             Skill::Peek          => &[Class::Thief],
             Skill::Tame          => &[Class::Warrior, Class::Thief],
         }
@@ -505,6 +580,18 @@ impl Skill {
             Skill::DispelGood    => "dispel-good",
             Skill::EnergyDrain   => "energy-drain",
             Skill::Whirlwind     => "whirlwind",
+            Skill::ProtFromEvil  => "prot-from-evil",
+            Skill::Waterwalk     => "waterwalk",
+            Skill::CreateFood    => "create-food",
+            Skill::Teleport      => "teleport",
+            Skill::Ventriloquate => "ventriloquate",
+            Skill::Darkness      => "darkness",
+            Skill::ControlWeather => "control-weather",
+            Skill::GroupHeal     => "group-heal",
+            Skill::GroupArmor    => "group-armor",
+            Skill::GroupRecall   => "group-recall",
+            Skill::AnimateDead   => "animate-dead",
+            Skill::Clone         => "clone",
             Skill::Peek          => "peek",
             Skill::Tame          => "tame",
         }
@@ -543,6 +630,10 @@ pub const ALL_SKILLS: &[Skill] = &[
     Skill::Curse, Skill::RemoveCurse, Skill::DispelMagic,
     Skill::DispelEvil, Skill::DispelGood,
     Skill::EnergyDrain, Skill::Whirlwind,
+    Skill::ProtFromEvil, Skill::Waterwalk, Skill::CreateFood,
+    Skill::Teleport, Skill::Ventriloquate, Skill::Darkness, Skill::ControlWeather,
+    Skill::GroupHeal, Skill::GroupArmor, Skill::GroupRecall,
+    Skill::AnimateDead, Skill::Clone,
     Skill::Peek,
     Skill::Tame,
 ];
@@ -805,6 +896,16 @@ pub struct Character {
     /// Setting it false freezes the title at whatever the user typed,
     /// even on level transitions.
     pub autotitle:    bool,
+    /// Stock auto-prefs (transient): auto-collect gold from corpses,
+    /// auto-split looted gold with the group, auto-sacrifice the corpse
+    /// after a kill, auto-open closed doors when moving, auto-unlock
+    /// locked doors with a held key, and auto-show the mini-map on move.
+    pub autogold:     bool,
+    pub autosplit:    bool,
+    pub autosac:      bool,
+    pub autodoor:     bool,
+    pub autokey:      bool,
+    pub automap:      bool,
     /// Last N dispatched commands (transient).  Recorded at the top of
     /// `dispatch_command`; viewed via `history`.
     pub history:      std::collections::VecDeque<String>,

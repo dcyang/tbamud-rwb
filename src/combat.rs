@@ -721,13 +721,16 @@ async fn resolve_player_attack(
         }
         // Award XP, split among grouped members in the kill room.
         award_xp_split(p.attacker_id, target_room, xp, chars).await;
-        // Gold drop, same split rule as XP.
-        award_gold_split(p.attacker_id, target_room, gold, chars).await;
+        // Gold drop — honors autogold (collect vs leave in corpse) and
+        // autosplit (divide among the group vs killer-takes-all).
+        award_gold_split(p.attacker_id, target_room, &target_name, gold, world, chars).await;
         // Quest progress.
         notify_quest_kill(p.attacker_id, killed_vnum, world, chars).await;
         // Autoloot: if the attacker has autoloot set, drain the freshly
         // spawned corpse into their inventory.
         autoloot_after_kill(p.attacker_id, &target_name, target_room, world, chars).await;
+        // Autosac: if the attacker has autosac set, sacrifice the corpse.
+        autosac_after_kill(p.attacker_id, &target_name, target_room, world, chars).await;
         return;
     }
 
@@ -870,21 +873,52 @@ async fn award_xp_split(
 async fn award_gold_split(
     killer_id: u32,
     killer_room: crate::world::RoomVnum,
+    mob_short: &str,
     gold: i64,
+    world: &Arc<Mutex<World>>,
     chars: &SharedChars,
 ) {
     if gold <= 0 { return; }
+    // Read the killer's auto-prefs.
+    let killer_handle = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == killer_id).cloned();
+        h
+    };
+    let Some(killer_handle) = killer_handle else { return };
+    let (autogold, autosplit, killer_grouped0, killer_leader0) = {
+        let c = killer_handle.character.lock().await;
+        (c.autogold, c.autosplit, c.grouped, c.following.unwrap_or(killer_id))
+    };
+    // Autogold OFF: leave the gold in the corpse as a pile of coins.
+    if !autogold {
+        let mut w = world.lock().await;
+        let cid = w.obj_instances.iter().rev()
+            .find(|o| o.in_room == killer_room
+                && o.corpse_of.as_deref() == Some(mob_short))
+            .map(|o| o.id);
+        if let Some(cid) = cid {
+            if let Some(pile) = w.spawn_obj(crate::db::GOLD_PILE_VNUM) {
+                if let Some(o) = w.obj_instances.iter_mut().find(|o| o.id == pile) {
+                    o.gold_amount = gold;
+                }
+                if let Some(c) = w.obj_instances.iter_mut().find(|o| o.id == cid) {
+                    c.contents.push(pile);
+                }
+            }
+        }
+        return;
+    }
     let recipients: Vec<u32> = {
         let cl = chars.lock().await;
         let killer = match cl.iter().find(|p| p.id == killer_id) {
             Some(k) => k.clone(),
             None    => return,
         };
-        let (killer_grouped, killer_leader) = {
-            let c = killer.character.lock().await;
-            (c.grouped, c.following.unwrap_or(killer_id))
-        };
-        if !killer_grouped {
+        let (killer_grouped, killer_leader) = (killer_grouped0, killer_leader0);
+        let _ = &killer;
+        // Autosplit OFF (or solo): killer takes the whole pile.
+        if !killer_grouped || !autosplit {
             vec![killer_id]
         } else {
             let mut ids = vec![killer_id];
@@ -1283,6 +1317,54 @@ async fn autoloot_after_kill(
     };
     let _ = killer.send.send(line);
     let _ = corpse_id;
+}
+
+/// If the killer has `autosac` set, sacrifice the freshly-spawned corpse
+/// (and its remaining contents) for a small gold reward.  Mirrors stock
+/// PRF_AUTOSAC.  Runs after autoloot, so looted items are already gone.
+async fn autosac_after_kill(
+    killer_id: u32,
+    mob_short: &str,
+    room: crate::world::RoomVnum,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) {
+    let killer = {
+        let cl = chars.lock().await;
+        let h = cl.iter().find(|p| p.id == killer_id).cloned();
+        h
+    };
+    let Some(killer) = killer else { return };
+    let want = killer.character.lock().await.autosac;
+    if !want { return; }
+    // Find + extract the most recent matching corpse in the room.
+    let removed = {
+        let mut w = world.lock().await;
+        let cid = w.obj_instances.iter().rev()
+            .find(|o| o.in_room == room
+                && o.corpse_of.as_deref() == Some(mob_short))
+            .map(|o| o.id);
+        match cid {
+            Some(cid) => { w.extract_obj(cid); true }
+            None => false,
+        }
+    };
+    if !removed { return; }
+    {
+        let mut c = killer.character.lock().await;
+        c.gold += 1;
+    }
+    let deity = {
+        let c = killer.character.lock().await;
+        if c.god.is_empty() { "the gods".to_string() } else { c.god.clone() }
+    };
+    let _ = killer.send.send(format!(
+        "\r\nYou sacrifice the corpse of {mob_short} to {deity} and receive 1 gold.\r\n"));
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(room, Some(killer_id),
+            &format!("{} sacrifices a corpse to {deity}.\r\n", killer.name));
+    }
 }
 
 /// External entry to the `kill_mob` path — used by the immortal

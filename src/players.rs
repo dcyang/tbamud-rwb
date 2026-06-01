@@ -133,6 +133,14 @@ pub struct PlayerRecord {
     /// "default = true" implicit so the saved value 0 means off
     /// and absence means on (the default).
     pub autotitle_off: bool,
+    /// Stock auto-prefs (persisted as `AuGd`/`AuSp`/`AuSc`/`AuDr`/`AuKy`/
+    /// `AuMp` lines, written only when true; absence means off).
+    pub autogold:      bool,
+    pub autosplit:     bool,
+    pub autosac:       bool,
+    pub autodoor:      bool,
+    pub autokey:       bool,
+    pub automap:       bool,
     /// Moral alignment, range -1000..=1000.  Default 0 (neutral).
     pub alignment:     i32,
     /// Clan affiliation; empty for unaffiliated characters.
@@ -359,6 +367,12 @@ impl PlayerDb {
                 "AuLt" => rec.autoloot  = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuAs" => rec.autoassist = val.parse::<i32>().unwrap_or(0) != 0,
                 "AuTl" => rec.autotitle_off = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuGd" => rec.autogold  = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuSp" => rec.autosplit = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuSc" => rec.autosac   = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuDr" => rec.autodoor  = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuKy" => rec.autokey   = val.parse::<i32>().unwrap_or(0) != 0,
+                "AuMp" => rec.automap   = val.parse::<i32>().unwrap_or(0) != 0,
                 "Algn" => rec.alignment = val.parse().unwrap_or(0),
                 "Clan" => rec.clan      = val.to_string(),
                 "Pkil" => rec.pkills    = val.parse().unwrap_or(0),
@@ -476,6 +490,12 @@ impl PlayerDb {
         if rec.autoloot   { writeln!(f, "AuLt: 1")?; }
         if rec.autoassist { writeln!(f, "AuAs: 1")?; }
         if rec.autotitle_off { writeln!(f, "AuTl: 1")?; }
+        if rec.autogold   { writeln!(f, "AuGd: 1")?; }
+        if rec.autosplit  { writeln!(f, "AuSp: 1")?; }
+        if rec.autosac    { writeln!(f, "AuSc: 1")?; }
+        if rec.autodoor   { writeln!(f, "AuDr: 1")?; }
+        if rec.autokey    { writeln!(f, "AuKy: 1")?; }
+        if rec.automap    { writeln!(f, "AuMp: 1")?; }
         if rec.alignment != 0 { writeln!(f, "Algn: {}", rec.alignment)?; }
         if !rec.clan.is_empty() { writeln!(f, "Clan: {}", rec.clan)?; }
         if rec.pkills  > 0 { writeln!(f, "Pkil: {}", rec.pkills)?; }

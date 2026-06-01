@@ -263,6 +263,12 @@ pub async fn handle_connection(
                     autoloot:     p_ref.map(|p| p.autoloot).unwrap_or(false),
                     autoassist:   p_ref.map(|p| p.autoassist).unwrap_or(false),
                     autotitle:    !p_ref.map(|p| p.autotitle_off).unwrap_or(false),
+                    autogold:     p_ref.map(|p| p.autogold).unwrap_or(false),
+                    autosplit:    p_ref.map(|p| p.autosplit).unwrap_or(false),
+                    autosac:      p_ref.map(|p| p.autosac).unwrap_or(false),
+                    autodoor:     p_ref.map(|p| p.autodoor).unwrap_or(false),
+                    autokey:      p_ref.map(|p| p.autokey).unwrap_or(false),
+                    automap:      p_ref.map(|p| p.automap).unwrap_or(false),
                     history:      std::collections::VecDeque::with_capacity(20),
                     tell_history: std::collections::VecDeque::with_capacity(20),
                     alignment:    p_ref.map(|p| p.alignment).unwrap_or(0),
@@ -652,6 +658,12 @@ async fn run_game_session(
             rec.autoloot     = me.autoloot;
             rec.autoassist   = me.autoassist;
             rec.autotitle_off = !me.autotitle;
+            rec.autogold     = me.autogold;
+            rec.autosplit    = me.autosplit;
+            rec.autosac      = me.autosac;
+            rec.autodoor     = me.autodoor;
+            rec.autokey      = me.autokey;
+            rec.automap      = me.automap;
             rec.alignment    = me.alignment;
             rec.clan         = me.clan.clone();
             rec.pkills       = me.pkills;

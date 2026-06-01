@@ -89,11 +89,13 @@ const COMMANDS: &[&str] = &[
     "put", "give", "wield", "wear", "remove",
     "examine",
     "list", "buy", "sell", "appraise", "value",
-    "kick", "bash", "backstab", "peek", "rescue", "disarm", "consider", "con",
+    "kick", "bash", "backstab", "whirlwind", "peek", "rescue", "disarm", "consider", "con",
     "sleep", "rest", "sit", "stand", "wake", "bandage",
     "wimpy",
     "info", "newbie", "shout", "color",
-    "autoexit", "autoloot", "autoassist", "autotitle", "history",
+    "autoexit", "autoexits", "autoloot", "autoassist", "autotitle",
+    "autogold", "autosplit", "autosac", "autodoor", "autokey", "automap",
+    "levels", "areas", "history",
     "clan", "ctell", "clans", "map", "whois",
     "sneak", "hide", "steal",
     "cast",
@@ -106,7 +108,11 @@ const COMMANDS: &[&str] = &[
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
     "auction", "auc", "whisper",
     "brief", "compact", "toggle", "time", "weather", "bank", "reply", "prompt", "alias",
+    "balance", "deposit", "withdraw", "gsay", "take", "hold", "grab", "diagnose", "whoami",
+    "news", "credits", "motd", "imotd", "policy", "policies", "handbook", "background",
+    "wizlist", "immlist",
     "commands", "scan", "track", "mail", "spells", "recall",
+    "board", "boards", "write", "read",
     "emote", "socials", "note", "notes", "pose", "uptime", "peace", "order", "pvp",
     "finger", "assist", "worship", "afk",
     "bug", "idea", "typo",
@@ -299,10 +305,13 @@ pub async fn dispatch_command(
         Some("who")       => do_who(rest, me, chars).await,
         Some("score")     => do_score(me, world).await,
         Some("exp")       => do_exp(me),
+        Some("levels")    => do_levels(rest, me),
+        Some("areas")     => do_areas(me, world).await,
         Some("kill") | Some("hit") => do_kill(rest, me, world, chars).await,
         Some("kick")      => do_skill(rest, me, world, chars, Skill::Kick).await,
         Some("bash")      => do_skill(rest, me, world, chars, Skill::Bash).await,
         Some("backstab")  => do_skill(rest, me, world, chars, Skill::Backstab).await,
+        Some("whirlwind") => do_whirlwind(me, world, chars).await,
         Some("peek")      => do_peek(rest, me, world, chars).await,
         Some("rescue")    => do_rescue(rest, me, world, chars).await,
         Some("disarm")    => do_disarm(rest, me, world, chars).await,
@@ -317,10 +326,16 @@ pub async fn dispatch_command(
         Some("info") | Some("newbie") => do_info(rest, me, chars).await,
         Some("shout")     => do_shout(rest, me, world, chars).await,
         Some("color")     => do_color(rest, me),
-        Some("autoexit")   => do_toggle_auto(me, AutoFlag::Exit),
+        Some("autoexit") | Some("autoexits") => do_toggle_auto(me, AutoFlag::Exit),
         Some("autoloot")   => do_toggle_auto(me, AutoFlag::Loot),
         Some("autoassist") => do_toggle_auto(me, AutoFlag::Assist),
         Some("autotitle")  => do_toggle_auto(me, AutoFlag::Title),
+        Some("autogold")   => do_toggle_auto(me, AutoFlag::Gold),
+        Some("autosplit")  => do_toggle_auto(me, AutoFlag::Split),
+        Some("autosac")    => do_toggle_auto(me, AutoFlag::Sac),
+        Some("autodoor")   => do_toggle_auto(me, AutoFlag::Door),
+        Some("autokey")    => do_toggle_auto(me, AutoFlag::Key),
+        Some("automap")    => do_toggle_auto(me, AutoFlag::Map),
         Some("history")    => do_history(me),
         Some("clan")       => do_clan(rest, me, chars).await,
         Some("clans")      => do_clans(me, chars).await,
@@ -344,7 +359,19 @@ pub async fn dispatch_command(
         Some("flee")      => do_flee(rest, me, world, chars).await,
         Some("wield")     => do_wield(rest, me, world, chars).await,
         Some("wear")      => do_wear(rest, me, world, chars).await,
-        Some("remove")    => do_remove(rest, me, world, chars).await,
+        Some("remove")    => {
+            // Board context: a numeric arg with a board in the room
+            // removes a board message (mirrors stock); otherwise unequip.
+            if rest.trim().parse::<usize>().is_ok()
+                && find_board_in_room(me, world).await.is_some() {
+                do_board_remove(rest, me, world).await
+            } else {
+                do_remove(rest, me, world, chars).await
+            }
+        }
+        Some("board") | Some("boards") => do_board_show(me, world).await,
+        Some("write")     => do_board_write(rest, me, world).await,
+        Some("read")      => do_board_read(rest, me, world).await,
         Some("equipment") => do_equipment(me, world).await,
         Some("save")      => do_save(me, players).await,
         Some("help")      => do_help(rest, me, world).await,
@@ -380,6 +407,25 @@ pub async fn dispatch_command(
         Some("time")      => do_time(),
         Some("weather")   => do_weather(),
         Some("bank")      => do_bank(rest, me),
+        Some("balance")   => do_bank("balance", me),
+        Some("deposit")   => do_bank(&format!("deposit {rest}"), me),
+        Some("withdraw")  => do_bank(&format!("withdraw {rest}"), me),
+        Some("gsay")      => do_gtell(rest, me, chars).await,
+        Some("take")      => do_get(rest, me, world, chars).await,
+        Some("hold") | Some("grab") => do_wear(rest, me, world, chars).await,
+        Some("diagnose")  => do_diagnose(rest, me, world, chars).await,
+        Some("whoami")    => CmdOutput::text(format!("\r\nYou are {}{}.\r\n",
+                                me.name,
+                                if me.title.is_empty() { String::new() } else { format!(" {}", me.title) })),
+        Some("news")      => do_text_file("news").await,
+        Some("credits")   => do_text_file("credits").await,
+        Some("motd")      => do_text_file("motd").await,
+        Some("imotd")     => do_text_file("imotd").await,
+        Some("policy") | Some("policies") => do_text_file("policies").await,
+        Some("handbook")  => do_text_file("handbook").await,
+        Some("background") => do_text_file("background").await,
+        Some("wizlist")   => do_text_file("wizlist").await,
+        Some("immlist")   => do_text_file("immlist").await,
         Some("reply")     => do_reply(rest, me, chars, players).await,
         Some("prompt")    => do_prompt(rest, me),
         Some("alias")     => do_alias(rest, me),
@@ -5510,6 +5556,282 @@ fn do_exp(me: &Character) -> CmdOutput {
     CmdOutput::text(s)
 }
 
+/// `levels [<min>-<max> | <range>]` — show the XP required for each level
+/// band plus the class title at that level.  Mirrors stock `do_levels`.
+fn do_levels(arg: &str, me: &Character) -> CmdOutput {
+    let max_mortal = Character::MAX_MORTAL_LEVEL;
+    let arg = arg.trim();
+    let (mut lo, mut hi) = (1, max_mortal);
+    if !arg.is_empty() {
+        if let Some((a, b)) = arg.split_once('-') {
+            lo = a.trim().parse().unwrap_or(1).max(1);
+            hi = b.trim().parse().unwrap_or(max_mortal).min(max_mortal);
+        } else if let Ok(range) = arg.parse::<i32>() {
+            lo = (me.level - range).max(1);
+            hi = (me.level + range).min(max_mortal);
+        } else {
+            return CmdOutput::text(
+                "\r\nUsage: levels [<min>-<max> | <range>]\r\n\
+                 Displays exp required for levels.\r\n".to_string());
+        }
+    }
+    if lo > hi { std::mem::swap(&mut lo, &mut hi); }
+    let mut s = format!("\r\nExperience table for {}:\r\n", me.class.as_str());
+    for lvl in lo..hi {
+        let this = Character::exp_for_level(lvl - 1).max(0);
+        let next = Character::exp_for_level(lvl);
+        let next = if next == i64::MAX { 0 } else { next - 1 };
+        let _ = this;
+        let start = if lvl <= 1 { 0 } else { Character::exp_for_level(lvl - 1) };
+        let start = if start == i64::MAX { 0 } else { start };
+        s.push_str(&format!(
+            "[{:>2}] {:>9}-{:<9} : {}\r\n",
+            lvl, start, next,
+            Character::default_title_for(me.class, lvl),
+        ));
+    }
+    CmdOutput::text(s)
+}
+
+/// `areas` — list every zone (area) and its builder-declared level range.
+/// Mirrors stock `do_areas`.
+async fn do_areas(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let w = world.lock().await;
+    let mut zones: Vec<&crate::world::Zone> = w.zones.values().collect();
+    zones.sort_by_key(|z| z.number);
+    let mut s = String::from("\r\nAreas of the world:\r\n");
+    let mut shown = 0;
+    for z in zones {
+        // Skip empty/placeholder zone names.
+        if z.name.trim().is_empty() || z.name == "New Zone" { continue; }
+        let lev = if z.min_level > 0 || z.max_level > 0 {
+            format!(" (lvl {}-{})", z.min_level, z.max_level)
+        } else {
+            String::new()
+        };
+        s.push_str(&format!("  {:<40}{}\r\n", z.name, lev));
+        shown += 1;
+        if shown >= 200 { s.push_str("  ...(truncated)\r\n"); break; }
+    }
+    s.push_str(&format!("\r\n{shown} area(s).\r\n"));
+    let _ = me;
+    CmdOutput::text(s)
+}
+
+/// Display a flat text file under `lib/text/<name>` to the player.
+/// Used by news / credits / motd / imotd / policy / handbook / wizlist /
+/// immlist / background — mirrors stock's text-file commands.
+async fn do_text_file(name: &str) -> CmdOutput {
+    let data_dir = match crate::interpreter::PLAYERS_HANDLE.get() {
+        Some(p) => p.lock().await.data_dir().to_string(),
+        None    => "lib".to_string(),
+    };
+    let path = format!("{data_dir}/text/{name}");
+    match std::fs::read_to_string(&path) {
+        Ok(body) => CmdOutput::text(format!("\r\n{}\r\n", body.trim_end())),
+        Err(_)   => CmdOutput::text(format!("\r\nThere is no {name} to display.\r\n")),
+    }
+}
+
+/// `diagnose [target]` — report the health condition of a mob in the room
+/// (or the caller's own if no arg).  Mirrors stock `do_diagnose`.
+async fn do_diagnose(
+    arg: &str,
+    me: &Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    let key = arg.trim().to_ascii_lowercase();
+    // Health-percentage → description, mirroring stock's diag table.
+    fn diag(hp: i32, max_hp: i32, who: &str) -> String {
+        let pct = if max_hp > 0 { hp * 100 / max_hp } else { 0 };
+        let cond = match pct {
+            p if p >= 100 => "is in excellent condition",
+            p if p >= 90  => "has a few scratches",
+            p if p >= 75  => "has some small wounds and bruises",
+            p if p >= 50  => "has quite a few wounds",
+            p if p >= 30  => "has some big nasty wounds and scratches",
+            p if p >= 15  => "looks pretty hurt",
+            p if p >= 0   => "is in awful condition",
+            _             => "is bleeding awfully from big wounds",
+        };
+        format!("{who} {cond}.\r\n")
+    }
+    if key.is_empty() {
+        return CmdOutput::text(format!("\r\n{}", diag(me.hp, me.max_hp, "You")));
+    }
+    // Try a player in the room first, then a mob.
+    let player_hit = {
+        let cl = chars.lock().await;
+        let mut hit = None;
+        for ph in cl.iter() {
+            if ph.id != me.id && ph.current_room == me.current_room
+                && ph.name.to_ascii_lowercase() == key {
+                let c = ph.character.lock().await;
+                hit = Some(diag(c.hp, c.max_hp, &ph.name));
+                break;
+            }
+        }
+        hit
+    };
+    if let Some(line) = player_hit {
+        return CmdOutput::text(format!("\r\n{line}"));
+    }
+    let mob_hit = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(&key)) {
+                Some(diag(m.hp, m.max_hp, &p.short_descr))
+            } else { None }
+        }))
+    };
+    match mob_hit {
+        Some(line) => CmdOutput::text(format!("\r\n{line}")),
+        None => CmdOutput::text(format!("\r\nYou see no {key} here.\r\n")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bulletin boards (port of stock boards.c)
+// ---------------------------------------------------------------------------
+
+/// Return the board descriptor for any board object present in the
+/// caller's current room (or carried, for immortals).
+async fn find_board_in_room(
+    me: &Character, world: &Arc<Mutex<World>>,
+) -> Option<&'static crate::boards::BoardDef> {
+    let w = world.lock().await;
+    // Floor objects first.
+    if let Some(r) = w.rooms.get(&me.current_room) {
+        for &iid in &r.objects {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if let Some(def) = crate::boards::board_for_vnum(o.vnum) {
+                    return Some(def);
+                }
+            }
+        }
+    }
+    // Immortals can use a board they carry.
+    if me.level >= LVL_IMMORT {
+        for &iid in &me.inventory {
+            if let Some(o) = w.obj_instances.iter().find(|o| o.id == iid) {
+                if let Some(def) = crate::boards::board_for_vnum(o.vnum) {
+                    return Some(def);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn board_data_dir() -> String {
+    match crate::interpreter::PLAYERS_HANDLE.get() {
+        Some(p) => p.lock().await.data_dir().to_string(),
+        None    => "lib".to_string(),
+    }
+}
+
+/// `board` / `boards` — show the message list on a board in the room.
+async fn do_board_show(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(def) = find_board_in_room(me, world).await else {
+        return CmdOutput::text("\r\nThere is no board here.\r\n".to_string());
+    };
+    if me.level < def.read_lvl {
+        return CmdOutput::text("\r\nYou aren't able to read this board.\r\n".to_string());
+    }
+    let data_dir = board_data_dir().await;
+    let msgs = crate::boards::load_board(&data_dir, def);
+    if msgs.is_empty() {
+        return CmdOutput::text("\r\nThis board is empty.\r\n".to_string());
+    }
+    let mut s = format!("\r\nThis is a bulletin board.  There are {} messages on it.\r\n\
+        Use `read <num>` to read a message, `write <header>` to post, \
+        `remove <num>` to delete one.\r\n", msgs.len());
+    for (i, m) in msgs.iter().enumerate() {
+        s.push_str(&format!("{:<2} : {} :: {}\r\n", i + 1, m.author, m.header));
+    }
+    CmdOutput::text(s)
+}
+
+/// `write <header>` — post a message to a board in the room.  Since we
+/// have no full-screen editor, the typed text becomes both the header
+/// (truncated for the listing) and the message body.
+async fn do_board_write(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(def) = find_board_in_room(me, world).await else {
+        return CmdOutput::text("\r\nThere is no board here to write on.\r\n".to_string());
+    };
+    if me.level < def.write_lvl {
+        return CmdOutput::text("\r\nYou aren't able to write on this board.\r\n".to_string());
+    }
+    let text = arg.trim();
+    if text.is_empty() {
+        return CmdOutput::text("\r\nWrite what?  Usage: write <message>\r\n".to_string());
+    }
+    let header: String = text.chars().take(40).collect();
+    let msg = crate::boards::BoardMessage {
+        author: me.name.clone(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64).unwrap_or(0),
+        header,
+        body: text.to_string(),
+    };
+    let data_dir = board_data_dir().await;
+    match crate::boards::append_message(&data_dir, def, &msg) {
+        Ok(()) => CmdOutput::text("\r\nYou post your message to the board.\r\n".to_string()),
+        Err(_) => CmdOutput::text("\r\nThe board refuses your message.\r\n".to_string()),
+    }
+}
+
+/// `read <N>` — display message N from a board in the room.
+async fn do_board_read(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(def) = find_board_in_room(me, world).await else {
+        return CmdOutput::text("\r\nThere is nothing here to read.\r\n".to_string());
+    };
+    if me.level < def.read_lvl {
+        return CmdOutput::text("\r\nYou aren't able to read this board.\r\n".to_string());
+    }
+    let Some(n) = arg.trim().parse::<usize>().ok().filter(|&n| n >= 1) else {
+        return CmdOutput::text("\r\nRead which message?  Usage: read <num>\r\n".to_string());
+    };
+    let data_dir = board_data_dir().await;
+    let msgs = crate::boards::load_board(&data_dir, def);
+    let Some(m) = msgs.get(n - 1) else {
+        return CmdOutput::text(format!("\r\nThere is no message {n} on the board.\r\n"));
+    };
+    CmdOutput::text(format!(
+        "\r\nMessage {n} : posted by {}\r\n{}\r\n\r\n{}\r\n",
+        m.author, m.header, m.body))
+}
+
+/// `remove <N>` (board context) — delete message N.  Mortals may only
+/// remove their own posts; immortals at the board's remove level may
+/// remove any.  Mirrors stock `board_remove_msg`.
+async fn do_board_remove(arg: &str, me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    let Some(def) = find_board_in_room(me, world).await else {
+        return CmdOutput::text("\r\nThere is no board here.\r\n".to_string());
+    };
+    let Some(n) = arg.trim().parse::<usize>().ok().filter(|&n| n >= 1) else {
+        return CmdOutput::text("\r\nRemove which message?  Usage: remove <num>\r\n".to_string());
+    };
+    let data_dir = board_data_dir().await;
+    let mut msgs = crate::boards::load_board(&data_dir, def);
+    let Some(m) = msgs.get(n - 1) else {
+        return CmdOutput::text(format!("\r\nThere is no message {n} on the board.\r\n"));
+    };
+    let is_owner = m.author.eq_ignore_ascii_case(&me.name);
+    if !is_owner && me.level < def.remove_lvl {
+        return CmdOutput::text("\r\nYou are not holy enough to remove other people's messages.\r\n".to_string());
+    }
+    msgs.remove(n - 1);
+    match crate::boards::save_board(&data_dir, def, &msgs) {
+        Ok(()) => CmdOutput::text(format!("\r\nYou remove message {n} from the board.\r\n")),
+        Err(_) => CmdOutput::text("\r\nThe board won't let go of that message.\r\n".to_string()),
+    }
+}
+
 /// Sum of weights of every object the player is carrying (inventory +
 /// equipment).  Container contents count toward the carrier's weight.
 pub fn total_carry_weight(me: &Character, w: &World) -> i32 {
@@ -6140,7 +6462,7 @@ fn do_history(me: &Character) -> CmdOutput {
 
 /// `tells` — list the last 20 received tells (most recent last).
 
-enum AutoFlag { Exit, Loot, Assist, Title }
+enum AutoFlag { Exit, Loot, Assist, Title, Gold, Split, Sac, Door, Key, Map }
 
 /// Flip a single auto-* preference.  Reports the new state.
 fn do_toggle_auto(me: &mut Character, which: AutoFlag) -> CmdOutput {
@@ -6149,6 +6471,12 @@ fn do_toggle_auto(me: &mut Character, which: AutoFlag) -> CmdOutput {
         AutoFlag::Loot   => { me.autoloot   = !me.autoloot;   ("Autoloot",   me.autoloot) }
         AutoFlag::Assist => { me.autoassist = !me.autoassist; ("Autoassist", me.autoassist) }
         AutoFlag::Title  => { me.autotitle  = !me.autotitle;  ("Autotitle",  me.autotitle) }
+        AutoFlag::Gold   => { me.autogold   = !me.autogold;   ("Autogold",   me.autogold) }
+        AutoFlag::Split  => { me.autosplit  = !me.autosplit;  ("Autosplit",  me.autosplit) }
+        AutoFlag::Sac    => { me.autosac    = !me.autosac;    ("Autosac",    me.autosac) }
+        AutoFlag::Door   => { me.autodoor   = !me.autodoor;   ("Autodoor",   me.autodoor) }
+        AutoFlag::Key    => { me.autokey    = !me.autokey;    ("Autokey",    me.autokey) }
+        AutoFlag::Map    => { me.automap    = !me.automap;    ("Automap",    me.automap) }
     };
     CmdOutput::text(format!(
         "\r\n{label} is now {}.\r\n",
@@ -6168,17 +6496,24 @@ fn do_toggle(arg: &str, me: &mut Character) -> CmdOutput {
              \x20 Brief:      {}    Compact:   {}\r\n\
              \x20 Autoexit:   {}    Color:     {}\r\n\
              \x20 Autoloot:   {}    Autoassist:{}\r\n\
-             \x20 Autotitle:  {}\r\n\
+             \x20 Autotitle:  {}    Autogold:  {}\r\n\
+             \x20 Autosplit:  {}    Autosac:   {}\r\n\
+             \x20 Autodoor:   {}    Autokey:   {}\r\n\
+             \x20 Automap:    {}\r\n\
              \x20 NoGossip:   {}    NoAuction: {}\r\n\
              \x20 NoInfo:     {}    NoShout:   {}\r\n\
              \x20 Wimpy:      {}\r\n\
              Type `toggle <name>` to flip one (brief/compact/autoexit/color/\
-             autoloot/autoassist/autotitle/gossip/auction/info/shout).\r\n",
+             autoloot/autoassist/autotitle/autogold/autosplit/autosac/autodoor/\
+             autokey/automap/gossip/auction/info/shout).\r\n",
             me.name,
             on(me.brief), on(me.compact),
             on(me.autoexit), on(!me.color_off),
             on(me.autoloot), on(me.autoassist),
-            on(me.autotitle),
+            on(me.autotitle), on(me.autogold),
+            on(me.autosplit), on(me.autosac),
+            on(me.autodoor), on(me.autokey),
+            on(me.automap),
             on(!me.gossip_off), on(!me.auction_off),
             on(!me.info_off), on(!me.shout_off),
             me.wimpy,
@@ -6192,6 +6527,12 @@ fn do_toggle(arg: &str, me: &mut Character) -> CmdOutput {
         "autoloot"   => { me.autoloot = !me.autoloot; ("Autoloot", me.autoloot) }
         "autoassist" => { me.autoassist = !me.autoassist; ("Autoassist", me.autoassist) }
         "autotitle"  => { me.autotitle = !me.autotitle; ("Autotitle", me.autotitle) }
+        "autogold"   => { me.autogold = !me.autogold; ("Autogold", me.autogold) }
+        "autosplit"  => { me.autosplit = !me.autosplit; ("Autosplit", me.autosplit) }
+        "autosac"    => { me.autosac = !me.autosac; ("Autosac", me.autosac) }
+        "autodoor"   => { me.autodoor = !me.autodoor; ("Autodoor", me.autodoor) }
+        "autokey"    => { me.autokey = !me.autokey; ("Autokey", me.autokey) }
+        "automap"    => { me.automap = !me.automap; ("Automap", me.automap) }
         "color"      => { me.color_off = !me.color_off; ("Color", !me.color_off) }
         "gossip" | "nogossip"   => { me.gossip_off = !me.gossip_off; ("Gossip", !me.gossip_off) }
         "auction" | "noauction" => { me.auction_off = !me.auction_off; ("Auction", !me.auction_off) }
@@ -7071,6 +7412,19 @@ async fn do_cast(
         crate::character::Skill::DispelMagic  => cast_dispel_magic(target, me, world, chars).await,
         crate::character::Skill::DispelEvil   => cast_dispel_align(target, me, world, chars, learned, true).await,
         crate::character::Skill::DispelGood   => cast_dispel_align(target, me, world, chars, learned, false).await,
+        crate::character::Skill::EnergyDrain  => cast_energy_drain(target, me, world, chars, learned).await,
+        crate::character::Skill::ProtFromEvil => cast_buff(target, me, chars, learned, crate::character::Skill::ProtFromEvil).await,
+        crate::character::Skill::Waterwalk    => cast_buff(target, me, chars, learned, crate::character::Skill::Waterwalk).await,
+        crate::character::Skill::CreateFood   => cast_create_food(me, world).await,
+        crate::character::Skill::Teleport     => cast_teleport(me, world, chars).await,
+        crate::character::Skill::Ventriloquate => cast_ventriloquate(target, me, world, chars).await,
+        crate::character::Skill::Darkness     => cast_darkness(me, world, chars).await,
+        crate::character::Skill::ControlWeather => cast_control_weather(target, me),
+        crate::character::Skill::GroupHeal    => cast_group(me, world, chars, crate::character::Skill::GroupHeal).await,
+        crate::character::Skill::GroupArmor   => cast_group(me, world, chars, crate::character::Skill::GroupArmor).await,
+        crate::character::Skill::GroupRecall  => cast_group(me, world, chars, crate::character::Skill::GroupRecall).await,
+        crate::character::Skill::AnimateDead  => cast_summon_servant(target, me, world, chars, crate::character::Skill::AnimateDead).await,
+        crate::character::Skill::Clone        => cast_summon_servant(target, me, world, chars, crate::character::Skill::Clone).await,
         _ => CmdOutput::text("\r\nUnknown spell.\r\n"),
     };
     if let Some(bump) = learn_attempt(me, spell, 4) {
@@ -7199,6 +7553,376 @@ async fn cast_create_water(me: &mut Character, world: &Arc<Mutex<World>>) -> Cmd
         p.value[2] = 0;            // liquid type = water
     }
     CmdOutput::text(format!("\r\nWater wells up, filling {short}.\r\n"))
+}
+
+/// `create food` — conjure a waybread (obj vnum 10) into the caster's hands.
+/// Mirrors stock SPELL_CREATE_FOOD (`mag_creations`, obj vnum 10).
+async fn cast_create_food(me: &mut Character, world: &Arc<Mutex<World>>) -> CmdOutput {
+    me.mana -= crate::character::Skill::CreateFood.mana_cost();
+    let (iid, short) = {
+        let mut w = world.lock().await;
+        match w.spawn_obj(10) {
+            Some(iid) => {
+                let short = w.obj_protos.get(&10)
+                    .map(|p| p.short_description.clone())
+                    .unwrap_or_else(|| "a waybread".into());
+                (iid, short)
+            }
+            None => return CmdOutput::text("\r\nThe spell fizzles — you can't conjure food here.\r\n".to_string()),
+        }
+    };
+    me.inventory.push(iid);
+    CmdOutput::text(format!("\r\nYou wave your hands and create {short}.\r\n"))
+}
+
+/// `teleport` — random teleport to another valid room.  Mirrors stock
+/// SPELL_TELEPORT: pick a random room that is not private/death/godroom.
+async fn cast_teleport(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::seq::SliceRandom;
+    me.mana -= crate::character::Skill::Teleport.mana_cost();
+    let from_room = me.current_room;
+    let target = {
+        let w = world.lock().await;
+        let candidates: Vec<RoomVnum> = w.rooms.iter()
+            .filter(|(_, r)| {
+                let f = r.room_flags[0];
+                f & crate::world::ROOM_PRIVATE == 0
+                    && f & crate::world::ROOM_DEATH == 0
+                    && f & crate::world::ROOM_GODROOM == 0
+            })
+            .map(|(&v, _)| v)
+            .collect();
+        candidates.choose(&mut rand::thread_rng()).copied()
+    };
+    let Some(target) = target else {
+        return CmdOutput::text("\r\nThe magic finds nowhere to send you.\r\n".to_string());
+    };
+    me.fighting = None;
+    me.current_room = target;
+    {
+        let mut w = world.lock().await;
+        for m in w.mob_instances.iter_mut() {
+            if m.fighting.map(|t| t.is_player && t.id == me.id).unwrap_or(false) {
+                m.fighting = None;
+            }
+        }
+    }
+    {
+        let mut cl = chars.lock().await;
+        cl.update_room(me.id, target);
+        cl.broadcast_room(from_room, Some(me.id),
+            &format!("{} slowly fades out of existence and is gone.\r\n", me.name));
+        cl.broadcast_room(target, Some(me.id),
+            &format!("{} slowly fades into existence.\r\n", me.name));
+    }
+    let view = render_room(target, Some(me.id), world, chars).await;
+    CmdOutput::text(format!("\r\nThe world spins, and you find yourself elsewhere.\r\n{view}"))
+}
+
+/// `ventriloquate <target> <message>` — throw the caster's voice so the
+/// room hears a chosen mob/object speak.  Mirrors stock SPELL_VENTRILOQUATE.
+async fn cast_ventriloquate(
+    arg: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    me.mana -= crate::character::Skill::Ventriloquate.mana_cost();
+    let arg = arg.trim();
+    let (who, msg) = match arg.find(char::is_whitespace) {
+        Some(i) => (&arg[..i], arg[i..].trim()),
+        None    => (arg, ""),
+    };
+    if who.is_empty() || msg.is_empty() {
+        return CmdOutput::text("\r\nFormat: cast 'ventriloquate' <target> <message>\r\n".to_string());
+    }
+    // Resolve the speaker's display name from a same-room mob keyword.
+    let speaker = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|n| n.eq_ignore_ascii_case(who)) {
+                Some(p.short_descr.clone())
+            } else { None }
+        }))
+    };
+    let speaker = speaker.unwrap_or_else(|| who.to_string());
+    let line = format!("{speaker} says, '{msg}'\r\n");
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &line);
+    }
+    CmdOutput::text(format!("\r\nYou throw your voice — '{speaker} says, \"{msg}\"'\r\n"))
+}
+
+/// `darkness` — blanket the caster's current room in magical darkness by
+/// toggling ROOM_DARK.  Mirrors stock SPELL_DARKNESS (`mag_rooms`).
+async fn cast_darkness(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    me.mana -= crate::character::Skill::Darkness.mana_cost();
+    let now_dark = {
+        let mut w = world.lock().await;
+        match w.rooms.get_mut(&me.current_room) {
+            Some(r) => {
+                r.room_flags[0] ^= crate::world::ROOM_DARK;
+                r.room_flags[0] & crate::world::ROOM_DARK != 0
+            }
+            None => return CmdOutput::text("\r\nThe magic finds no room to darken.\r\n".to_string()),
+        }
+    };
+    let (to_room, to_me) = if now_dark {
+        ("The light in the room slowly fades into darkness.\r\n",
+         "\r\nYou snuff out the light, plunging the room into darkness.\r\n")
+    } else {
+        ("The magical darkness slowly lifts.\r\n",
+         "\r\nYou banish the magical darkness from the room.\r\n")
+    };
+    chars.lock().await.broadcast_room(me.current_room, Some(me.id), to_room);
+    CmdOutput::text(to_me.to_string())
+}
+
+/// `control weather <better|worse>` — nudge the global sky toward fair or
+/// foul.  Mirrors stock SPELL_CONTROL_WEATHER.
+fn cast_control_weather(arg: &str, me: &mut Character) -> CmdOutput {
+    use std::sync::atomic::Ordering;
+    me.mana -= crate::character::Skill::ControlWeather.mana_cost();
+    let arg = arg.trim().to_ascii_lowercase();
+    let better = match arg.as_str() {
+        "better" | "fair" | "clear" | "good" => true,
+        "worse"  | "foul" | "storm" | "bad"  => false,
+        _ => return CmdOutput::text(
+            "\r\nDo you want the weather to get 'better' or 'worse'?\r\n".to_string()),
+    };
+    let sky = crate::db::WEATHER_SKY.load(Ordering::Relaxed);
+    let new_sky = if better { (sky - 1).max(crate::db::SKY_CLOUDLESS) }
+                  else       { (sky + 1).min(crate::db::SKY_LIGHTNING) };
+    crate::db::WEATHER_SKY.store(new_sky, Ordering::Relaxed);
+    let msg = if better { "You feel a change in the weather — the skies clear." }
+              else       { "You feel a change in the weather — the skies darken." };
+    CmdOutput::text(format!("\r\n{msg}\r\n"))
+}
+
+/// Group spells (`group heal` / `group armor` / `group recall`) — apply the
+/// effect to every group member in the caster's room.  Mirrors stock
+/// SPELL_GROUP_HEAL / GROUP_ARMOR / GROUP_RECALL.
+async fn cast_group(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    skill: crate::character::Skill,
+) -> CmdOutput {
+    me.mana -= skill.mana_cost();
+    let leader_id = me.following.unwrap_or(me.id);
+    let room = me.current_room;
+
+    // Collect candidate room members (other than me); group membership
+    // (following/grouped) lives on Character, so filter under each lock.
+    let candidates: Vec<crate::character::PlayerHandle> = {
+        let cl = chars.lock().await;
+        cl.iter()
+            .filter(|p| p.id != me.id && p.current_room == room)
+            .cloned()
+            .collect()
+    };
+    let mut members: Vec<crate::character::PlayerHandle> = Vec::new();
+    for ph in candidates {
+        let in_group = {
+            let c = ph.character.lock().await;
+            c.grouped && (ph.id == leader_id || c.following == Some(leader_id))
+        };
+        if in_group { members.push(ph); }
+    }
+
+    match skill {
+        crate::character::Skill::GroupArmor => {
+            // +AC affect on self and each member.
+            me.apply_affect(crate::character::Affect {
+                skill: crate::character::Skill::Armor, duration: 24,
+                to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 20,
+            });
+            for ph in &members {
+                let grouped = { ph.character.lock().await.grouped };
+                if !grouped { continue; }
+                let mut c = ph.character.lock().await;
+                c.apply_affect(crate::character::Affect {
+                    skill: crate::character::Skill::Armor, duration: 24,
+                    to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 20,
+                });
+                let _ = ph.send.send("\r\nA shimmering layer of force wraps around you.\r\n".to_string());
+            }
+            chars.lock().await.broadcast_room(room, Some(me.id),
+                &format!("{} invokes a protective ward over the group.\r\n", me.name));
+            CmdOutput::text("\r\nYou ward your group with shimmering armor.\r\n".to_string())
+        }
+        crate::character::Skill::GroupHeal => {
+            use crate::db::dice;
+            let heal = dice(3, 8) + me.level;
+            me.hp = (me.hp + heal).min(me.max_hp);
+            for ph in &members {
+                let mut c = ph.character.lock().await;
+                if !c.grouped { continue; }
+                c.hp = (c.hp + heal).min(c.max_hp);
+                let _ = ph.send.send("\r\nA warm healing light washes over you.\r\n".to_string());
+            }
+            chars.lock().await.broadcast_room(room, Some(me.id),
+                &format!("{} calls down a wave of healing light.\r\n", me.name));
+            CmdOutput::text(format!("\r\nHealing light washes over your group ({heal} HP each).\r\n"))
+        }
+        crate::character::Skill::GroupRecall => {
+            let target = { world.lock().await.start_room(false) };
+            // Recall every grouped member in the room (and the caster).
+            for ph in &members {
+                let (grouped, name) = {
+                    let c = ph.character.lock().await;
+                    (c.grouped, c.name.clone())
+                };
+                if !grouped { continue; }
+                {
+                    let mut c = ph.character.lock().await;
+                    c.fighting = None;
+                    c.current_room = target;
+                }
+                {
+                    let mut w = world.lock().await;
+                    for m in w.mob_instances.iter_mut() {
+                        if m.fighting.map(|t| t.is_player && t.id == ph.id).unwrap_or(false) {
+                            m.fighting = None;
+                        }
+                    }
+                }
+                {
+                    let mut cl = chars.lock().await;
+                    cl.update_room(ph.id, target);
+                }
+                let view = render_room(target, Some(ph.id), world, chars).await;
+                let _ = ph.send.send(format!(
+                    "\r\nA holy beacon snatches you back to the temple.\r\n{view}"));
+                let _ = name;
+            }
+            // Recall the caster.
+            let from_room = me.current_room;
+            me.fighting = None;
+            me.current_room = target;
+            {
+                let mut w = world.lock().await;
+                for m in w.mob_instances.iter_mut() {
+                    if m.fighting.map(|t| t.is_player && t.id == me.id).unwrap_or(false) {
+                        m.fighting = None;
+                    }
+                }
+            }
+            {
+                let mut cl = chars.lock().await;
+                cl.update_room(me.id, target);
+                cl.broadcast_room(from_room, Some(me.id),
+                    &format!("{} and companions disappear in a flash of holy light!\r\n", me.name));
+            }
+            let view = render_room(target, Some(me.id), world, chars).await;
+            CmdOutput::text(format!(
+                "\r\nA holy beacon snatches your group back to the temple.\r\n{view}"))
+        }
+        _ => CmdOutput::text("\r\nUnsupported group spell.\r\n".to_string()),
+    }
+}
+
+/// `animate dead` / `clone` — conjure a charmed servant mob into the
+/// caster's room.  Mirrors stock `mag_summons`: animate dead raises a
+/// zombie (mob vnum 11) from a corpse and pours the corpse's contents
+/// into it; clone makes a duplicate (mob vnum 10) bearing the caster's
+/// name.  Both become charmed followers of the caster.
+async fn cast_summon_servant(
+    _target: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    skill: crate::character::Skill,
+) -> CmdOutput {
+    me.mana -= skill.mana_cost();
+    let animate = matches!(skill, crate::character::Skill::AnimateDead);
+    let mob_vnum = if animate { 11 } else { 10 };
+
+    // Animate dead requires a corpse on the floor.
+    let corpse_id = if animate {
+        let w = world.lock().await;
+        let cid = w.rooms.get(&me.current_room).and_then(|r| {
+            r.objects.iter().copied().find(|&iid| {
+                w.obj_instances.iter().find(|o| o.id == iid)
+                    .map(|o| o.corpse_of.is_some()).unwrap_or(false)
+            })
+        });
+        if cid.is_none() {
+            return CmdOutput::text(
+                "\r\nYou need a corpse here to animate the dead.\r\n".to_string());
+        }
+        cid
+    } else {
+        None
+    };
+
+    // Spawn the servant mob.
+    let mob_id = {
+        let mut w = world.lock().await;
+        match w.spawn_mob(mob_vnum, me.current_room) {
+            Some(id) => id,
+            None => return CmdOutput::text(
+                "\r\nYou don't quite remember how to make that creature.\r\n".to_string()),
+        }
+    };
+
+    // Charm it to the caster and (for clone) rename it.
+    let servant_name = {
+        let mut w = world.lock().await;
+        if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+            m.charmer = Some(me.id);
+            m.apply_affect(crate::character::Affect {
+                skill: crate::character::Skill::CharmPerson,
+                duration: 48,
+                to_hit: 0, to_dam: 0, dmg_reduction: 0, dot_damage: 0, to_ac: 0,
+            });
+        }
+        if animate {
+            // Pour the corpse's contents into the zombie, then extract it.
+            if let Some(cid) = corpse_id {
+                let contents = w.obj_instances.iter_mut()
+                    .find(|o| o.id == cid)
+                    .map(|o| std::mem::take(&mut o.contents))
+                    .unwrap_or_default();
+                if let Some(m) = w.mob_instances.iter_mut().find(|m| m.id == mob_id) {
+                    for iid in contents { m.inventory.push(iid); }
+                }
+                w.extract_obj(cid);
+            }
+            w.mob_protos.get(&mob_vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "a zombie".into())
+        } else {
+            me.name.clone()
+        }
+    };
+
+    {
+        let cl = chars.lock().await;
+        let line = if animate {
+            format!("{} raises {servant_name} from the dead!\r\n", me.name)
+        } else {
+            format!("{} conjures a duplicate of {}!\r\n", me.name, me.name)
+        };
+        cl.broadcast_room(me.current_room, Some(me.id), &line);
+    }
+    let reply = if animate {
+        format!("\r\nYou raise {servant_name} to serve you.\r\n")
+    } else {
+        "\r\nA shimmering duplicate of yourself steps forth to serve.\r\n".to_string()
+    };
+    CmdOutput::text(reply)
 }
 
 /// `curse <target>` — debuff a mob in the room (saps its melee damage).
@@ -7800,6 +8524,151 @@ async fn cast_call_lightning(
         (
             format!("\r\nYour lightning strikes the ground beside {mob_name}, missing.\r\n"),
             format!("{}'s lightning strikes the ground, missing {mob_name}.\r\n", me.name),
+        )
+    };
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+
+    if mob_dead {
+        fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+        let xp = {
+            let w = world.lock().await;
+            w.mob_instances.iter().find(|m| m.id == mob_id)
+                .and_then(|m| w.mob_protos.get(&m.vnum))
+                .map(|p| p.exp as i64)
+                .unwrap_or(0)
+        };
+        {
+            let mut w = world.lock().await;
+            let inv: Vec<u32> = w.mob_instances.iter()
+                .find(|m| m.id == mob_id)
+                .map(mob_corpse_contents).unwrap_or_default();
+            for other in w.mob_instances.iter_mut() {
+                if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                    other.fighting = None;
+                }
+            }
+            if let Some(r) = w.rooms.get_mut(&mob_room) {
+                r.mobs.retain(|&id| id != mob_id);
+            }
+            w.mob_instances.retain(|m| m.id != mob_id);
+            w.create_corpse(&mob_name, inv, mob_room);
+        }
+        me.fighting = None;
+        {
+            let cl = chars.lock().await;
+            cl.broadcast_room(
+                mob_room, None,
+                &format!("\r\n{} has slain {mob_name}!\r\n", me.name),
+            );
+        }
+        let mut msg = format!("{to_me}\r\nYou have slain {mob_name}!\r\n");
+        if xp > 0 {
+            me.exp += xp;
+            msg.push_str(&format!("You gain {xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                msg.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+        if let Some(qmsg) = quest_check_kill(me, killed_vnum, world).await {
+            msg.push_str(&qmsg);
+        }
+        if let Some(qmsg) = quest_check_save(me, world).await {
+            msg.push_str(&qmsg);
+        }
+        return CmdOutput::text(msg);
+    }
+
+    CmdOutput::text(to_me)
+}
+
+/// `energy drain` — single-target MagicUser necromantic damage spell.
+/// Stock tbaMUD: low-level victims (<= 2) take a flat 100, else `dice(1, 10)
+/// + level + INT-bonus`.  Save-for-half.  Mirrors the lightning template.
+async fn cast_energy_drain(
+    target_kw: &str,
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+    learned: u8,
+) -> CmdOutput {
+    use rand::Rng;
+
+    let target_mob_id: Option<u32> = if !target_kw.is_empty() {
+        let key = target_kw.to_ascii_lowercase();
+        let w = world.lock().await;
+        let r = w.rooms.get(&me.current_room);
+        r.and_then(|r| r.mobs.iter().find_map(|&mid| {
+            let m = w.mob_instances.iter().find(|m| m.id == mid)?;
+            let p = w.mob_protos.get(&m.vnum)?;
+            if p.name.split_whitespace().any(|k| k.eq_ignore_ascii_case(&key)) {
+                Some(mid)
+            } else { None }
+        }))
+    } else {
+        me.fighting.filter(|t| !t.is_player).map(|t| t.id)
+    };
+
+    let Some(mob_id) = target_mob_id else {
+        return CmdOutput::text("\r\nThere is no such target here.\r\n");
+    };
+
+    let hit_chance = (65 + learned as i32 / 2).min(95);
+    let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+    me.mana -= crate::character::Skill::EnergyDrain.mana_cost();
+
+    let (mob_name, killed_vnum, mob_dead, mob_room, saved, dmg) = {
+        let mut w = world.lock().await;
+        let m = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+            Some(m) => m,
+            None    => return CmdOutput::text("\r\nYour target has vanished.\r\n"),
+        };
+        let vnum = m.vnum;
+        let target_level = w.mob_protos.get(&vnum).map(|p| p.level).unwrap_or(1);
+        let mob_name = w.mob_protos.get(&vnum)
+            .map(|p| p.short_descr.clone())
+            .unwrap_or_else(|| "the creature".into());
+        let mob_room = m.in_room;
+        if mob_room != me.current_room {
+            return CmdOutput::text("\r\nYour target is no longer here.\r\n");
+        }
+        let base_dmg = if target_level <= 2 {
+            100
+        } else {
+            crate::db::dice(1, 10) + me.level
+                + crate::character::str_damage_bonus(me.int_)
+        };
+        let saved = hit && save_vs_spell(me.level, target_level);
+        let dmg = if saved { (base_dmg / 2).max(1) } else { base_dmg };
+        let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+        if me.fighting.is_none() {
+            me.fighting = Some(Target { id: mob_id, is_player: false });
+            m.fighting = Some(Target { id: me.id, is_player: true });
+        }
+        let dead = if hit { m.hp -= dmg; m.hp <= 0 } else { false };
+        (mob_name, vnum, dead, mob_room, saved, dmg)
+    };
+
+    let (to_me, to_room) = if hit && saved {
+        (
+            format!("\r\nLife-draining energy washes over {mob_name} for {dmg} damage (partial resist)!\r\n"),
+            format!("{} drains the life from {mob_name}.\r\n", me.name),
+        )
+    } else if hit {
+        (
+            format!("\r\nYou drain the very life-force from {mob_name} — {dmg} damage!\r\n"),
+            format!("{} drains the very life-force from {mob_name}!\r\n", me.name),
+        )
+    } else {
+        (
+            format!("\r\nYour draining touch fails to find {mob_name}.\r\n"),
+            format!("{}'s draining magic fizzles against {mob_name}.\r\n", me.name),
         )
     };
     {
@@ -9288,6 +10157,18 @@ async fn cast_buff(
             "Your feet lift gently from the ground — you can fly!\r\n",
             "{} rises gently off the ground, hovering in the air.\r\n",
         ),
+        crate::character::Skill::ProtFromEvil => (
+            24,
+            0, 8,
+            "You feel invulnerable to the forces of evil!\r\n",
+            "{} is surrounded by a faint white aura.\r\n",
+        ),
+        crate::character::Skill::Waterwalk => (
+            24,
+            0, 0,
+            "You feel webbing between your toes.\r\n",
+            "{}'s feet take on a webbed appearance.\r\n",
+        ),
         _ => return CmdOutput::text("\r\nUnsupported buff.\r\n"),
     };
 
@@ -10055,6 +10936,146 @@ async fn cast_earthquake(
                     me.level, me.max_hp,
                 ));
             }
+        }
+    }
+    CmdOutput::text(to_me)
+}
+
+/// `whirlwind` — Warrior melee skill that strikes every mob in the room.
+/// Per-mob hit roll keyed off the learned percentage; damage is the
+/// warrior's melee roll (weapon-independent baseline + STR + damroll).
+async fn do_whirlwind(
+    me: &mut Character,
+    world: &Arc<Mutex<World>>,
+    chars: &SharedChars,
+) -> CmdOutput {
+    use rand::Rng;
+    use crate::db::dice;
+
+    let skill = Skill::Whirlwind;
+    if !skill.is_class_allowed(me.class) {
+        return CmdOutput::text("\r\nYou do not know how to whirlwind.\r\n".to_string());
+    }
+    let learned = *me.skills.get(&skill).unwrap_or(&0);
+    if learned == 0 {
+        return CmdOutput::text(
+            "\r\nYou are unfamiliar with the whirlwind attack. Try `practice whirlwind`.\r\n"
+                .to_string(),
+        );
+    }
+    me.reveal();
+
+    let mob_ids: Vec<u32> = {
+        let w = world.lock().await;
+        w.rooms.get(&me.current_room).map(|r| r.mobs.clone()).unwrap_or_default()
+    };
+
+    let to_room = format!("{} spins in a deadly whirlwind of steel!\r\n", me.name);
+    {
+        let cl = chars.lock().await;
+        cl.broadcast_room(me.current_room, Some(me.id), &to_room);
+    }
+    let mut to_me = String::from("\r\nYou spin in a deadly whirlwind, striking all around you!\r\n");
+    if mob_ids.is_empty() {
+        to_me.push_str("There is no one here to strike.\r\n");
+        return CmdOutput::text(to_me);
+    }
+
+    let hit_chance = (40 + learned as i32 / 2).min(85);
+    let str_b = crate::character::str_damage_bonus(me.str_);
+    let damroll = me.bonus_damroll;
+
+    let mut total_xp = 0i64;
+    let mut killed_names: Vec<String> = Vec::new();
+    let mut landed_any = false;
+    for mob_id in mob_ids {
+        let hit = rand::thread_rng().gen_range(0..100) < hit_chance;
+        let base_dmg = (dice(1, 8) + me.level / 2 + str_b + damroll).max(1);
+        let (mob_name, mob_dead, mob_room, dmg) = {
+            let mut w = world.lock().await;
+            let (vnum, in_room) = match w.mob_instances.iter().find(|m| m.id == mob_id) {
+                Some(m) => (m.vnum, m.in_room),
+                None => continue,
+            };
+            if in_room != me.current_room { continue; }
+            let mob_name = w.mob_protos.get(&vnum)
+                .map(|p| p.short_descr.clone())
+                .unwrap_or_else(|| "the creature".into());
+            let m = w.mob_instances.iter_mut().find(|m| m.id == mob_id).unwrap();
+            if me.fighting.is_none() {
+                me.fighting = Some(Target { id: mob_id, is_player: false });
+            }
+            if m.fighting.is_none() {
+                m.fighting = Some(Target { id: me.id, is_player: true });
+            }
+            let dmg = if hit { m.hp -= base_dmg; base_dmg } else { 0 };
+            (mob_name, hit && m.hp <= 0, in_room, dmg)
+        };
+        if hit {
+            landed_any = true;
+            to_me.push_str(&format!("Your whirlwind strikes {mob_name} for {dmg} damage!\r\n"));
+        } else {
+            to_me.push_str(&format!("Your whirlwind misses {mob_name}.\r\n"));
+        }
+
+        if mob_dead {
+            fire_mob_death_triggers(mob_id, &me.name, world, chars).await;
+            let xp = {
+                let w = world.lock().await;
+                w.mob_instances.iter().find(|m| m.id == mob_id)
+                    .and_then(|m| w.mob_protos.get(&m.vnum))
+                    .map(|p| p.exp as i64).unwrap_or(0)
+            };
+            total_xp += xp;
+            {
+                let mut w = world.lock().await;
+                let inv: Vec<u32> = w.mob_instances.iter()
+                    .find(|m| m.id == mob_id)
+                    .map(mob_corpse_contents).unwrap_or_default();
+                for other in w.mob_instances.iter_mut() {
+                    if other.fighting.map(|t| !t.is_player && t.id == mob_id).unwrap_or(false) {
+                        other.fighting = None;
+                    }
+                }
+                if let Some(r) = w.rooms.get_mut(&mob_room) {
+                    r.mobs.retain(|&id| id != mob_id);
+                }
+                w.mob_instances.retain(|m| m.id != mob_id);
+                w.create_corpse(&mob_name, inv, mob_room);
+            }
+            {
+                let cl = chars.lock().await;
+                cl.broadcast_room(mob_room, None,
+                    &format!("{mob_name} is cut down by {}'s whirlwind.\r\n", me.name));
+            }
+            killed_names.push(mob_name);
+        }
+    }
+    let still_have_target = {
+        let w = world.lock().await;
+        me.fighting.map(|t| !t.is_player
+            && w.mob_instances.iter().any(|m| m.id == t.id)).unwrap_or(false)
+    };
+    if !still_have_target { me.fighting = None; }
+    if !killed_names.is_empty() {
+        for name in &killed_names {
+            to_me.push_str(&format!("You have slain {name}!\r\n"));
+        }
+        if total_xp > 0 {
+            me.exp += total_xp;
+            to_me.push_str(&format!("You gain {total_xp} experience.\r\n"));
+            let gained = me.check_level_up();
+            if gained > 0 {
+                to_me.push_str(&format!(
+                    "\r\n*** You feel more powerful!  You are now level {}.  Max HP: {} ***\r\n",
+                    me.level, me.max_hp,
+                ));
+            }
+        }
+    }
+    if landed_any {
+        if let Some(bump) = learn_attempt(me, skill, 5) {
+            to_me.push_str(&bump);
         }
     }
     CmdOutput::text(to_me)
@@ -12440,6 +13461,12 @@ pub async fn save_character_to_db(
     r.autoloot     = me.autoloot;
     r.autoassist   = me.autoassist;
     r.autotitle_off = !me.autotitle;
+    r.autogold     = me.autogold;
+    r.autosplit    = me.autosplit;
+    r.autosac      = me.autosac;
+    r.autodoor     = me.autodoor;
+    r.autokey      = me.autokey;
+    r.automap      = me.automap;
     r.alignment    = me.alignment;
     r.practices = me.practices;
     r.room      = me.current_room;
@@ -12494,6 +13521,12 @@ async fn do_save(me: &Character, players: &Arc<Mutex<PlayerDb>>) -> CmdOutput {
             r.autoloot     = me.autoloot;
             r.autoassist   = me.autoassist;
             r.autotitle_off = !me.autotitle;
+            r.autogold     = me.autogold;
+            r.autosplit    = me.autosplit;
+            r.autosac      = me.autosac;
+            r.autodoor     = me.autodoor;
+            r.autokey      = me.autokey;
+            r.automap      = me.automap;
             r.alignment    = me.alignment;
             r.clan         = me.clan.clone();
             r.pkills       = me.pkills;
@@ -12649,17 +13682,18 @@ async fn do_move(
         None    => return CmdOutput::text("\r\nYou are nowhere.\r\n"),
     };
     let from_sector = r.sector_type;
-    let (target, closed, door_kw, target_flags, target_sector) = match &r.exits[dir as usize] {
+    let (target, closed, locked, door_key, door_kw, target_flags, target_sector) = match &r.exits[dir as usize] {
         Some(e) if e.to_room != crate::world::NOWHERE
             && w.rooms.contains_key(&e.to_room) =>
         {
             let closed = (e.exit_info & crate::world::EX_CLOSED) != 0;
+            let locked = (e.exit_info & crate::world::EX_LOCKED) != 0;
             let kw = if e.keyword.is_empty() { "door".to_string() }
                      else { e.keyword.split_whitespace().next().unwrap_or("door").to_string() };
             let dest = w.rooms.get(&e.to_room);
             let flags = dest.map(|r| r.room_flags[0]).unwrap_or(0);
             let sect  = dest.map(|r| r.sector_type).unwrap_or(0);
-            (e.to_room, closed, kw, flags, sect)
+            (e.to_room, closed, locked, e.key, kw, flags, sect)
         }
         _ => return CmdOutput::text(format!("\r\nAlas, you cannot go that way...\r\n")),
     };
@@ -12676,8 +13710,37 @@ async fn do_move(
             })
     };
     drop(w);
+    let mut auto_msg = String::new();
     if closed {
-        return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
+        // Autodoor: try to open a closed door in the path before refusing.
+        // Autokey: if it's locked, unlock it first when carrying the key.
+        if me.autodoor {
+            if locked {
+                let has_key = door_key > 0 && me.autokey
+                    && player_has_key(me, door_key, world).await;
+                if !has_key {
+                    return CmdOutput::text(format!("\r\nThe {door_kw} is closed and locked.\r\n"));
+                }
+                {
+                    let mut w = world.lock().await;
+                    mutate_door(&mut w, me.current_room, dir, 0, crate::world::EX_LOCKED);
+                }
+                auto_msg.push_str(&format!("You unlock the {door_kw}.\r\n"));
+                let cl = chars.lock().await;
+                cl.broadcast_room(me.current_room, Some(me.id),
+                    &format!("{} unlocks the {door_kw}.\r\n", me.name));
+            }
+            {
+                let mut w = world.lock().await;
+                mutate_door(&mut w, me.current_room, dir, 0, crate::world::EX_CLOSED);
+            }
+            auto_msg.push_str(&format!("You open the {door_kw}.\r\n"));
+            let cl = chars.lock().await;
+            cl.broadcast_room(me.current_room, Some(me.id),
+                &format!("{} opens the {door_kw}.\r\n", me.name));
+        } else {
+            return CmdOutput::text(format!("\r\nThe {door_kw} is closed.\r\n"));
+        }
     }
     // Position gate.  Must be standing to move.
     match me.position {
@@ -12856,7 +13919,16 @@ async fn do_move(
         }
     }
 
-    CmdOutput::text(view)
+    // Automap: append the mini-map to the room view on every move.
+    if me.automap {
+        let map = do_map(me, world).await;
+        view.push_str(&map.text);
+    }
+    if auto_msg.is_empty() {
+        CmdOutput::text(view)
+    } else {
+        CmdOutput::text(format!("\r\n{auto_msg}{view}"))
+    }
 }
 
 /// One output line from an executed trigger script.  Different DG
