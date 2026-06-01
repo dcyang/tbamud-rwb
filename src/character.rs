@@ -1165,6 +1165,32 @@ impl Character {
             + if self.is_save_proficient(a) { self.proficiency_bonus() } else { 0 }
     }
 
+    /// Whether this character is proficient in the given D&D skill.  Skill
+    /// proficiencies currently come from the chosen background (PHB pp.178–185).
+    pub fn is_skill_proficient(&self, sk: Skill5e) -> bool {
+        crate::players::background_proficiencies(&self.background)
+            .map(|(skills, _)| skills.iter().any(|s| s.eq_ignore_ascii_case(sk.name())))
+            .unwrap_or(false)
+    }
+
+    /// Ability-check bonus for a skill: the governing ability's modifier +
+    /// proficiency bonus (when proficient).  This is where background skill
+    /// proficiencies plug into the check system.
+    pub fn skill_check_bonus(&self, sk: Skill5e) -> i32 {
+        ability_modifier(self.ability_score(sk.ability()))
+            + if self.is_skill_proficient(sk) { self.proficiency_bonus() } else { 0 }
+    }
+
+    /// Whether this character is proficient with the named tool (currently from
+    /// the chosen background; e.g. `"Thieves' Tools"`).  Matches the category
+    /// prefix so "Gaming Set (one kind)" matches `"Gaming Set"`.
+    pub fn is_tool_proficient(&self, tool: &str) -> bool {
+        crate::players::background_proficiencies(&self.background)
+            .map(|(_, t)| t.eq_ignore_ascii_case(tool)
+                || t.to_ascii_lowercase().starts_with(&tool.to_ascii_lowercase()))
+            .unwrap_or(false)
+    }
+
     /// Roll a saving throw vs `dc`: d20 + saving-throw bonus >= dc.
     pub fn roll_saving_throw(&self, a: Ability, dc: i32) -> bool {
         use rand::Rng;
@@ -1199,6 +1225,76 @@ impl Ability {
 /// D&D ability modifier: `floor((score - 10) / 2)` (e.g. 10→0, 14→+2, 7→-2).
 pub fn ability_modifier(score: i32) -> i32 {
     (score - 10).div_euclid(2)
+}
+
+/// The 18 D&D 5e skills (PHB Chapter 1), each governed by an ability score.
+/// An ability check with a skill is `d20 + ability modifier + proficiency
+/// bonus (if proficient)`.  Background grants supply the proficiencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skill5e {
+    Athletics,
+    Acrobatics, SleightOfHand, Stealth,
+    Arcana, History, Investigation, Nature, Religion,
+    AnimalHandling, Insight, Medicine, Perception, Survival,
+    Deception, Intimidation, Performance, Persuasion,
+}
+
+impl Skill5e {
+    pub const ALL: [Skill5e; 18] = [
+        Skill5e::Athletics,
+        Skill5e::Acrobatics, Skill5e::SleightOfHand, Skill5e::Stealth,
+        Skill5e::Arcana, Skill5e::History, Skill5e::Investigation,
+        Skill5e::Nature, Skill5e::Religion,
+        Skill5e::AnimalHandling, Skill5e::Insight, Skill5e::Medicine,
+        Skill5e::Perception, Skill5e::Survival,
+        Skill5e::Deception, Skill5e::Intimidation, Skill5e::Performance,
+        Skill5e::Persuasion,
+    ];
+
+    /// Display name (matches the strings in `players::background_proficiencies`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Skill5e::Athletics       => "Athletics",
+            Skill5e::Acrobatics      => "Acrobatics",
+            Skill5e::SleightOfHand   => "Sleight of Hand",
+            Skill5e::Stealth         => "Stealth",
+            Skill5e::Arcana          => "Arcana",
+            Skill5e::History         => "History",
+            Skill5e::Investigation   => "Investigation",
+            Skill5e::Nature          => "Nature",
+            Skill5e::Religion        => "Religion",
+            Skill5e::AnimalHandling  => "Animal Handling",
+            Skill5e::Insight         => "Insight",
+            Skill5e::Medicine        => "Medicine",
+            Skill5e::Perception      => "Perception",
+            Skill5e::Survival        => "Survival",
+            Skill5e::Deception       => "Deception",
+            Skill5e::Intimidation    => "Intimidation",
+            Skill5e::Performance     => "Performance",
+            Skill5e::Persuasion      => "Persuasion",
+        }
+    }
+
+    /// The ability that governs this skill.
+    pub fn ability(self) -> Ability {
+        match self {
+            Skill5e::Athletics => Ability::Str,
+            Skill5e::Acrobatics | Skill5e::SleightOfHand | Skill5e::Stealth => Ability::Dex,
+            Skill5e::Arcana | Skill5e::History | Skill5e::Investigation
+                | Skill5e::Nature | Skill5e::Religion => Ability::Int,
+            Skill5e::AnimalHandling | Skill5e::Insight | Skill5e::Medicine
+                | Skill5e::Perception | Skill5e::Survival => Ability::Wis,
+            Skill5e::Deception | Skill5e::Intimidation | Skill5e::Performance
+                | Skill5e::Persuasion => Ability::Cha,
+        }
+    }
+
+    /// Parse a player-typed skill name (case/space/dash-insensitive).
+    pub fn parse(s: &str) -> Option<Skill5e> {
+        let n = s.trim().to_ascii_lowercase().replace([' ', '-', '_'], "");
+        Skill5e::ALL.iter().copied()
+            .find(|sk| sk.name().to_ascii_lowercase().replace([' ', '-'], "") == n)
+    }
 }
 
 /// STR-based damage modifier — mirrors str_app[].todam in constants.c

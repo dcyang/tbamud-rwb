@@ -119,7 +119,7 @@ const COMMANDS: &[&str] = &[
     "skills", "practice", "affects",
     "quest", "where",
     "say", "tell", "who",
-    "score", "saves", "savingthrows", "exp", "equipment", "save", "help",
+    "score", "saves", "savingthrows", "proficiencies", "prof", "profs", "check", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "sip", "eat", "taste", "fill", "pour", "empty", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
@@ -333,6 +333,8 @@ pub async fn dispatch_command(
         Some("who")       => do_who(rest, me, chars).await,
         Some("score")     => do_score(me, world).await,
         Some("saves") | Some("savingthrows") => do_saves(me),
+        Some("proficiencies") | Some("prof") | Some("profs") => do_proficiencies(me),
+        Some("check") => do_check(rest, me),
         Some("exp")       => do_exp(me),
         Some("levels")    => do_levels(rest, me),
         Some("areas")     => do_areas(me, world).await,
@@ -5237,6 +5239,71 @@ fn do_saves(me: &Character) -> CmdOutput {
     }
     s.push_str("\r\n  (* = your class is proficient in that saving throw.)\r\n");
     CmdOutput::text(s)
+}
+
+/// `proficiencies` — the character's class saving-throw proficiencies and the
+/// skill + tool proficiencies granted by their D&D background (PHB pp.178–185).
+fn do_proficiencies(me: &Character) -> CmdOutput {
+    use crate::character::Ability;
+    use crate::players::ABILITY_NAMES;
+    let mut s = String::from("\r\nProficiencies:\r\n");
+
+    // Saving throws (from class).
+    let saves: Vec<&str> = Ability::ALL.iter()
+        .filter(|&&a| me.is_save_proficient(a))
+        .map(|a| ABILITY_NAMES[a.index()])
+        .collect();
+    s.push_str(&format!("  Saving throws: {}\r\n",
+        if saves.is_empty() { "none".to_string() } else { saves.join(", ") }));
+
+    // Skills + tool (from background).
+    match crate::players::background_proficiencies(&me.background) {
+        Some((skills, tool)) => {
+            s.push_str(&format!("  Skills ({}): {}\r\n", me.background, skills.join(", ")));
+            s.push_str(&format!("  Tool: {tool}\r\n"));
+        }
+        None => {
+            s.push_str("  Skills: none (no background)\r\n");
+        }
+    }
+    CmdOutput::text(s)
+}
+
+/// `check [<skill> [dc]]` — D&D ability check (d20 + ability modifier +
+/// proficiency bonus when proficient).  No arg lists all 18 skills with their
+/// check bonuses; `check stealth` rolls vs the default DC 15; `check stealth 20`
+/// rolls vs a custom DC.
+fn do_check(arg: &str, me: &Character) -> CmdOutput {
+    use rand::Rng;
+    use crate::character::Skill5e;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        let mut s = String::from(
+            "\r\nAbility checks (d20 + the listed modifier):\r\n");
+        for &sk in &Skill5e::ALL {
+            let prof = if me.is_skill_proficient(sk) { " *" } else { "" };
+            s.push_str(&format!("  {:<16} ({}) {:>+3}{}\r\n",
+                sk.name(), sk.ability().abbr(), me.skill_check_bonus(sk), prof));
+        }
+        s.push_str("\r\n  (* = proficient.  `check <skill> [dc]` to roll, default DC 15.)\r\n");
+        return CmdOutput::text(s);
+    }
+    // Split an optional trailing DC number off the (possibly multi-word) skill.
+    let toks: Vec<&str> = arg.split_whitespace().collect();
+    let (skill_str, dc) = match toks.last().and_then(|t| t.parse::<i32>().ok()) {
+        Some(n) => (toks[..toks.len() - 1].join(" "), n),
+        None    => (arg.to_string(), 15),
+    };
+    let Some(sk) = Skill5e::parse(&skill_str) else {
+        return CmdOutput::text(format!("\r\nThere is no skill called '{skill_str}'. Try `check` for the list.\r\n"));
+    };
+    let bonus = me.skill_check_bonus(sk);
+    let roll = rand::thread_rng().gen_range(1..=20);
+    let total = roll + bonus;
+    let outcome = if total >= dc { "SUCCESS" } else { "FAILURE" };
+    CmdOutput::text(format!(
+        "\r\nYou attempt a {} ({}) check (DC {dc}):\r\n  d20({roll}) {:+} = {total} -- {outcome}.\r\n",
+        sk.name(), sk.ability().abbr(), bonus))
 }
 
 // ---------------------------------------------------------------------------
@@ -12157,22 +12224,31 @@ async fn do_whirlwind(
 // ---------------------------------------------------------------------------
 
 fn do_sneak(me: &mut Character) -> CmdOutput {
-    if !crate::character::Skill::Sneak.is_class_allowed(me.class) {
-        return CmdOutput::text("\r\nYou are too clumsy to sneak about.\r\n");
-    }
-    let learned = *me.skills.get(&crate::character::Skill::Sneak).unwrap_or(&0);
-    if learned == 0 {
-        return CmdOutput::text(
-            "\r\nYou haven't practised sneaking. Try `practice sneak`.\r\n",
-        );
-    }
-    me.sneaking = !me.sneaking;
-    let mut out = if me.sneaking {
-        "\r\nYou are now sneaking quietly.\r\n".to_string()
-    } else {
-        "\r\nYou stop sneaking.\r\n".to_string()
-    };
+    use rand::Rng;
+    use crate::character::{Skill, Skill5e};
+    // Stopping is always allowed.
     if me.sneaking {
+        me.sneaking = false;
+        return CmdOutput::text("\r\nYou stop sneaking.\r\n");
+    }
+    // Eligibility: the practiced Sneak skill (Thief path) OR Stealth proficiency
+    // (e.g. a Criminal/Guide/Wayfarer background).
+    let learned = *me.skills.get(&Skill::Sneak).unwrap_or(&0) as i32;
+    let stealth_prof = me.is_skill_proficient(Skill5e::Stealth);
+    if learned == 0 && !stealth_prof {
+        return CmdOutput::text(
+            "\r\nYou don't know how to move stealthily — practice 'sneak' or train in Stealth.\r\n");
+    }
+    // Dexterity (Stealth) check, DC 15.
+    let bonus = me.skill_check_bonus(Skill5e::Stealth) + learned / 5;
+    let success = rand::thread_rng().gen_range(1..=20) + bonus >= 15;
+    if !success {
+        return CmdOutput::text(
+            "\r\nYou try to move quietly, but you're too clumsy to manage it.\r\n");
+    }
+    me.sneaking = true;
+    let mut out = "\r\nYou begin moving quietly, unseen.\r\n".to_string();
+    if learned > 0 {
         if let Some(bump) = learn_attempt(me, Skill::Sneak, 3) { out.push_str(&bump); }
     }
     CmdOutput::text(out)
@@ -12180,28 +12256,24 @@ fn do_sneak(me: &mut Character) -> CmdOutput {
 
 fn do_hide(me: &mut Character) -> CmdOutput {
     use rand::Rng;
-    if !crate::character::Skill::Hide.is_class_allowed(me.class) {
-        return CmdOutput::text("\r\nYou have no idea how to hide.\r\n");
-    }
-    let learned = *me.skills.get(&crate::character::Skill::Hide).unwrap_or(&0);
-    if learned == 0 {
+    use crate::character::{Skill, Skill5e};
+    // Eligibility: the practiced Hide skill (Thief path) OR Stealth proficiency.
+    let learned = *me.skills.get(&Skill::Hide).unwrap_or(&0) as i32;
+    let stealth_prof = me.is_skill_proficient(Skill5e::Stealth);
+    if learned == 0 && !stealth_prof {
         return CmdOutput::text(
-            "\r\nYou haven't practised hiding. Try `practice hide`.\r\n",
-        );
+            "\r\nYou don't know how to hide — practice 'hide' or train in Stealth.\r\n");
     }
-    let chance = (40 + learned as i32).min(95);
-    let success = rand::thread_rng().gen_range(0..100) < chance;
-    if success {
-        me.hidden = true;
-        let mut out = "\r\nYou attempt to hide yourself.\r\n".to_string();
+    // Dexterity (Stealth) check, DC 15.  The outcome is kept ambiguous — you
+    // can't easily tell whether you're truly hidden.
+    let bonus = me.skill_check_bonus(Skill5e::Stealth) + learned / 5;
+    let success = rand::thread_rng().gen_range(1..=20) + bonus >= 15;
+    me.hidden = success;
+    let mut out = "\r\nYou attempt to hide yourself.\r\n".to_string();
+    if success && learned > 0 {
         if let Some(bump) = learn_attempt(me, Skill::Hide, 5) { out.push_str(&bump); }
-        CmdOutput::text(out)
-    } else {
-        // Failure tries to look secretive but ultimately fails — same
-        // message either way: the player can't easily tell.
-        me.hidden = false;
-        CmdOutput::text("\r\nYou attempt to hide yourself.\r\n")
     }
+    CmdOutput::text(out)
 }
 
 async fn do_steal(
@@ -12211,14 +12283,14 @@ async fn do_steal(
     chars: &SharedChars,
 ) -> CmdOutput {
     use rand::Rng;
-    if !crate::character::Skill::Steal.is_class_allowed(me.class) {
-        return CmdOutput::text("\r\nYou couldn't pickpocket if your life depended on it.\r\n");
-    }
-    let learned = *me.skills.get(&crate::character::Skill::Steal).unwrap_or(&0);
-    if learned == 0 {
+    use crate::character::Skill5e;
+    // Eligibility: the practiced Steal skill (Thief path) OR Sleight of Hand
+    // proficiency (e.g. a Charlatan/Criminal background).
+    let learned = *me.skills.get(&crate::character::Skill::Steal).unwrap_or(&0) as i32;
+    let soh_prof = me.is_skill_proficient(Skill5e::SleightOfHand);
+    if learned == 0 && !soh_prof {
         return CmdOutput::text(
-            "\r\nYou haven't practised stealing. Try `practice steal`.\r\n",
-        );
+            "\r\nYou don't have the deft fingers for it — practice 'steal' or train in Sleight of Hand.\r\n");
     }
     // "steal <item|coins> <target>"
     let parts: Vec<&str> = arg.splitn(2, char::is_whitespace).collect();
@@ -12247,7 +12319,10 @@ async fn do_steal(
     // Hide breaks on stealing; sneak survives.
     me.hidden = false;
 
-    let success = rand::thread_rng().gen_range(0..100) < (30 + learned as i32 / 2).min(85);
+    // Dexterity (Sleight of Hand) check, DC 15: d20 + DEX mod + proficiency
+    // bonus (if proficient) + a bonus from any practiced Steal skill.
+    let bonus = me.skill_check_bonus(Skill5e::SleightOfHand) + learned / 5;
+    let success = rand::thread_rng().gen_range(1..=20) + bonus >= 15;
 
     // Mob info needed regardless of success.
     let mob_name = {
@@ -12295,7 +12370,7 @@ async fn do_steal(
         let take = (level / 4).max(1) as i64;
         me.gold += take;
         let mut out = format!("\r\nYou lift {take} gold from {mob_name}.\r\n");
-        if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); }
+        if learned > 0 { if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); } }
         return CmdOutput::text(out);
     }
 
@@ -12331,7 +12406,7 @@ async fn do_steal(
     };
     me.inventory.push(iid);
     let mut out = format!("\r\nYou deftly lift {short} from {mob_name}.\r\n");
-    if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); }
+    if learned > 0 { if let Some(bump) = learn_attempt(me, Skill::Steal, 5) { out.push_str(&bump); } }
     CmdOutput::text(out)
 }
 
@@ -12666,7 +12741,16 @@ async fn do_search(
     if found.is_empty() {
         return CmdOutput::text("\r\nYou find nothing of interest.\r\n".to_string());
     }
-    let mut s = String::from("\r\nYou find:\r\n");
+    // Wisdom (Perception) check to actually spot the hidden exits (DC 15).
+    // Background Perception proficiency plugs in via skill_check_bonus.
+    use rand::Rng;
+    let dc = 15;
+    let bonus = me.skill_check_bonus(crate::character::Skill5e::Perception);
+    let roll = rand::thread_rng().gen_range(1..=20);
+    if roll + bonus < dc {
+        return CmdOutput::text("\r\nYou find nothing of interest.\r\n".to_string());
+    }
+    let mut s = String::from("\r\nYour keen eye picks out something hidden:\r\n");
     for (d, kw) in found {
         s.push_str(&format!("  A hidden {kw} to the {}.\r\n", d.name()));
     }
@@ -12697,13 +12781,14 @@ async fn do_pick(
     use rand::Rng;
 
     me.reveal();
-    let skill = Skill::PickLock;
-    if !skill.is_class_allowed(me.class) {
-        return CmdOutput::text("\r\nYou know nothing about picking locks.\r\n".to_string());
-    }
-    let learned = *me.skills.get(&skill).unwrap_or(&0);
-    if learned == 0 {
-        return CmdOutput::text("\r\nYou'd need to practice 'pick lock' first.\r\n".to_string());
+    // Picking a lock is a Dexterity (Thieves' Tools) check.  You may attempt it
+    // if you've practiced the PickLock skill (the Thief path) OR you're
+    // proficient with Thieves' Tools (e.g. a Criminal/Wayfarer background).
+    let learned = *me.skills.get(&Skill::PickLock).unwrap_or(&0) as i32;
+    let tool_prof = me.is_tool_proficient("Thieves' Tools");
+    if learned == 0 && !tool_prof {
+        return CmdOutput::text(
+            "\r\nYou don't know how to pick locks — practice 'pick lock' or train with thieves' tools.\r\n".to_string());
     }
     let arg = arg.trim();
     if arg.is_empty() {
@@ -12736,9 +12821,13 @@ async fn do_pick(
     let kw_short = if keyword.is_empty() { "door".to_string() }
                    else { keyword.split_whitespace().next().unwrap_or("door").to_string() };
 
-    // Roll: chance scales linearly with learned (0..100).
-    let roll = rand::thread_rng().gen_range(0..100);
-    if roll >= learned as i32 {
+    // DEX (Thieves' Tools) check vs DC 15: d20 + DEX mod + proficiency bonus
+    // (if tool-proficient) + a bonus from any practiced PickLock skill.
+    let bonus = crate::character::ability_modifier(me.dex)
+        + if tool_prof { me.proficiency_bonus() } else { 0 }
+        + learned / 5;
+    let roll = rand::thread_rng().gen_range(1..=20);
+    if roll + bonus < 15 {
         let cl = chars.lock().await;
         cl.broadcast_room(me.current_room, Some(me.id),
             &format!("{} fumbles at the {kw_short} with a set of picks.\r\n", me.name));
@@ -12755,7 +12844,9 @@ async fn do_pick(
             &format!("{} picks the lock on the {kw_short}.\r\n", me.name));
     }
     let mut out = "\r\nThe lock clicks open.\r\n".to_string();
-    if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    if learned > 0 {
+        if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    }
     CmdOutput::text(out)
 }
 
@@ -12790,9 +12881,18 @@ async fn do_pick_container(
     if (flags & CONT_PICKPROOF) != 0 {
         return CmdOutput::text(format!("\r\n{short} resists your attempts to pick it.\r\n"));
     }
-    let learned = *me.skills.get(&Skill::PickLock).unwrap_or(&0);
-    let roll = rand::thread_rng().gen_range(0..100);
-    if roll >= learned as i32 {
+    // DEX (Thieves' Tools) check vs DC 15 — same rule as door picking.
+    let learned = *me.skills.get(&Skill::PickLock).unwrap_or(&0) as i32;
+    let tool_prof = me.is_tool_proficient("Thieves' Tools");
+    if learned == 0 && !tool_prof {
+        return CmdOutput::text(
+            "\r\nYou don't know how to pick locks — practice 'pick lock' or train with thieves' tools.\r\n".to_string());
+    }
+    let bonus = crate::character::ability_modifier(me.dex)
+        + if tool_prof { me.proficiency_bonus() } else { 0 }
+        + learned / 5;
+    let roll = rand::thread_rng().gen_range(1..=20);
+    if roll + bonus < 15 {
         let cl = chars.lock().await;
         cl.broadcast_room(me.current_room, Some(me.id),
             &format!("{} fumbles at {short} with a set of picks.\r\n", me.name));
@@ -12810,7 +12910,9 @@ async fn do_pick_container(
             &format!("{} picks the lock on {short}.\r\n", me.name));
     }
     let mut out = format!("\r\nThe lock on {short} clicks open.\r\n");
-    if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    if learned > 0 {
+        if let Some(bump) = learn_attempt(me, Skill::PickLock, 8) { out.push_str(&bump); }
+    }
     CmdOutput::text(out)
 }
 

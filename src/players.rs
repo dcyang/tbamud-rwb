@@ -108,6 +108,33 @@ pub fn background_ability_deltas(class: Class, bg: &str, dist: i32) -> [i32; 6] 
 pub const ABILITY_NAMES: [&str; 6] =
     ["Strength", "Dexterity", "Constitution", "Intelligence", "Wisdom", "Charisma"];
 
+/// A background's skill proficiencies (two) and tool proficiency (PHB
+/// logical pp.178–185).  These are recorded/displayed (via the `proficiencies`
+/// command) rather than wired into ability checks — the engine has no D&D
+/// skill-check system for them to modify.  Tool entries that the PHB leaves to
+/// the player ("choose one ...") are recorded as the category.
+pub fn background_proficiencies(name: &str) -> Option<(&'static [&'static str], &'static str)> {
+    Some(match name {
+        "Acolyte"     => (&["Insight", "Religion"],            "Calligrapher's Supplies"),
+        "Artisan"     => (&["Investigation", "Persuasion"],    "Artisan's Tools (one kind)"),
+        "Charlatan"   => (&["Deception", "Sleight of Hand"],   "Forgery Kit"),
+        "Criminal"    => (&["Sleight of Hand", "Stealth"],     "Thieves' Tools"),
+        "Entertainer" => (&["Acrobatics", "Performance"],      "Musical Instrument (one kind)"),
+        "Farmer"      => (&["Animal Handling", "Nature"],      "Carpenter's Tools"),
+        "Guard"       => (&["Athletics", "Perception"],        "Gaming Set (one kind)"),
+        "Guide"       => (&["Stealth", "Survival"],            "Cartographer's Tools"),
+        "Hermit"      => (&["Medicine", "Religion"],           "Herbalism Kit"),
+        "Merchant"    => (&["Animal Handling", "Persuasion"],  "Navigator's Tools"),
+        "Noble"       => (&["History", "Persuasion"],          "Gaming Set (one kind)"),
+        "Sage"        => (&["Arcana", "History"],              "Calligrapher's Supplies"),
+        "Sailor"      => (&["Acrobatics", "Perception"],       "Navigator's Tools"),
+        "Scribe"      => (&["Investigation", "Perception"],    "Calligrapher's Supplies"),
+        "Soldier"     => (&["Athletics", "Intimidation"],      "Gaming Set (one kind)"),
+        "Wayfarer"    => (&["Insight", "Stealth"],             "Thieves' Tools"),
+        _ => return None,
+    })
+}
+
 impl Class {
     pub fn from_i8(v: i8) -> Self {
         match v {
