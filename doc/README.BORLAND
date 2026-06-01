@@ -1,0 +1,10 @@
+tbamud-rwb build notes: Borland C++ (obsolete)
+================================================
+
+This file existed in stock TbaMUD to describe compiling the C server with Borland C++.
+The Rust rewrite builds only with Cargo and targets modern Rust toolchains, so
+Borland C++ is not supported.  Build on a current operating system with:
+
+    cargo build --release
+
+See ../README.md and doc/porting.txt.

@@ -1,0 +1,16 @@
+tbamud-rwb build notes: Windows
+=================================
+
+The Rust rewrite does NOT use the stock C build for this platform (no
+./configure, no Makefile, no project/solution files).  It builds with Cargo on
+every supported platform.  Full instructions are in ../README.md; in short:
+
+    cargo build --release
+    cargo run --release -- -p 4000
+    telnet localhost 4000
+
+Install Rust via rustup (the default MSVC toolchain, or the GNU toolchain).
+Run cargo build.  The one wrinkle is crypt(3) for password hashing: if the MSVC
+target fails to link crypt, either build under WSL / the GNU toolchain with
+libxcrypt, or replace the small crypt shim in src/players.rs + the link
+directive in build.rs (see doc/porting.txt).

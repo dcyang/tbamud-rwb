@@ -1,0 +1,15 @@
+tbamud-rwb build notes: Cygwin (Windows)
+==========================================
+
+The Rust rewrite does NOT use the stock C build for this platform (no
+./configure, no Makefile, no project/solution files).  It builds with Cargo on
+every supported platform.  Full instructions are in ../README.md; in short:
+
+    cargo build --release
+    cargo run --release -- -p 4000
+    telnet localhost 4000
+
+You no longer need Cygwin.  Install Rust for Windows via rustup and run
+cargo build natively, or build under WSL.  If you specifically want a Cygwin
+build, install Cygwin's rust and libcrypt packages and cargo build from the
+Cygwin shell.  See README.WIN.

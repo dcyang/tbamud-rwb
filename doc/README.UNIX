@@ -1,0 +1,15 @@
+tbamud-rwb build notes: UNIX / Linux
+======================================
+
+The Rust rewrite does NOT use the stock C build for this platform (no
+./configure, no Makefile, no project/solution files).  It builds with Cargo on
+every supported platform.  Full instructions are in ../README.md; in short:
+
+    cargo build --release
+    cargo run --release -- -p 4000
+    telnet localhost 4000
+
+Install a Rust toolchain (rustup, or your distribution's rustc >= 1.75) and a
+libcrypt development package (e.g. libcrypt-dev / libxcrypt-devel) for DES
+password hashing, then run cargo build.  This covers Linux and the commercial
+UNIXes generally; for the BSDs see README.BSD.

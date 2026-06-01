@@ -1,0 +1,27 @@
+tbamud-rwb License
+==================
+
+The full, formatted license for the Rust rewrite lives in the repository root:
+
+    ../LICENSE.md
+
+It contains, in order:
+
+  1. The tbamud-rwb (Rust Rewrite) license -- as permissive as the predecessor
+     licenses allow: free to use, study, modify, and redistribute, but NOT for
+     commercial gain, and you must preserve the author credits and carry the
+     licenses with any copy you distribute.
+  2. A short TbaMUD (Builder's Academy) continuity note.
+  3. The verbatim CircleMUD license (Copyright (C) 1995 Jeremy Elson).
+  4. The verbatim DikuMUD license (Copyright (C) 1990, 1991).
+
+Because the rewrite reproduces the gameplay of TbaMUD/CircleMUD/DikuMUD and
+ships their world data, it is a derivative work of all three and is bound by
+their licenses.  In particular: no commercial use, preserve all copyright and
+authorship notices, keep the DikuMUD and CircleMUD creators credited in the
+login sequence and the `credits` text, and keep the `CIRCLEMUD` help entry
+available.
+
+This file (the stock CircleMUD license text) is superseded by ../LICENSE.md,
+which reproduces it in full alongside the DikuMUD license and the rewrite's own
+terms.  See ../LICENSE.md.

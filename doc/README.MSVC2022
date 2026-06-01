@@ -1,0 +1,15 @@
+tbamud-rwb build notes: Visual Studio 2022 (Windows)
+======================================================
+
+The Rust rewrite does NOT use the stock C build for this platform (no
+./configure, no Makefile, no project/solution files).  It builds with Cargo on
+every supported platform.  Full instructions are in ../README.md; in short:
+
+    cargo build --release
+    cargo run --release -- -p 4000
+    telnet localhost 4000
+
+There is no .sln or .vcxproj.  Use the Rust MSVC toolchain (rustup's default on
+Windows) and build with cargo.  Visual Studio 2022 can open this folder and use
+rust-analyzer for editing, but the build command is 'cargo build'.  See
+README.WIN for the crypt(3) note.

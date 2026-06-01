@@ -1,0 +1,14 @@
+tbamud-rwb build notes: FreeBSD / OpenBSD / NetBSD
+====================================================
+
+The Rust rewrite does NOT use the stock C build for this platform (no
+./configure, no Makefile, no project/solution files).  It builds with Cargo on
+every supported platform.  Full instructions are in ../README.md; in short:
+
+    cargo build --release
+    cargo run --release -- -p 4000
+    telnet localhost 4000
+
+Install the Rust port/package (e.g. lang/rust) and ensure a libcrypt providing
+crypt(3) is available (base systems generally do), then cargo build.  See
+doc/porting.txt if your libc lacks crypt(3).
