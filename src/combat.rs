@@ -996,14 +996,19 @@ async fn award_xp(player_id: u32, xp: i64, chars: &SharedChars) {
     };
     let _ = ph.send.send(msg);
     if levels > 0 {
-        // Snapshot the new level/maxhp for the message.
-        let (level, max_hp) = {
+        // Snapshot the new level/maxhp/feat-picks for the message.
+        let (level, max_hp, picks) = {
             let c = ph.character.lock().await;
-            (c.level, c.max_hp)
+            (c.level, c.max_hp, c.pending_feats)
         };
         let _ = ph.send.send(format!(
             "\r\n*** You feel more powerful!  You are now level {level}.  Max HP: {max_hp} ***\r\n"
         ));
+        if picks > 0 {
+            let _ = ph.send.send(format!(
+                "*** You may choose a feat!  Type `feat list`. ({picks} pick(s)) ***\r\n"
+            ));
+        }
     }
 }
 

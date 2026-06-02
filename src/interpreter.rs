@@ -119,7 +119,7 @@ const COMMANDS: &[&str] = &[
     "skills", "practice", "affects",
     "quest", "where",
     "say", "tell", "who",
-    "score", "saves", "savingthrows", "proficiencies", "prof", "profs", "check", "exp", "equipment", "save", "help",
+    "score", "saves", "savingthrows", "proficiencies", "prof", "profs", "check", "feats", "feat", "exp", "equipment", "save", "help",
     "open", "close", "lock", "unlock", "pick", "search",
     "quaff", "drink", "sip", "eat", "taste", "fill", "pour", "empty", "recite", "use", "zap", "light", "extinguish",
     "follow", "group", "gtell", "split", "report", "title", "gossip", "chat",
@@ -335,6 +335,7 @@ pub async fn dispatch_command(
         Some("saves") | Some("savingthrows") => do_saves(me),
         Some("proficiencies") | Some("prof") | Some("profs") => do_proficiencies(me),
         Some("check") => do_check(rest, me),
+        Some("feats") | Some("feat") => do_feat(rest, me),
         Some("exp")       => do_exp(me),
         Some("levels")    => do_levels(rest, me),
         Some("areas")     => do_areas(me, world).await,
@@ -5187,6 +5188,18 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
                         format!("Race:  {} ({}{})\r\n",
                             me.species.as_str(), me.species.size(), dv_str)
                     };
+    let feat_line = {
+        let mut l = String::new();
+        if !me.feats.is_empty() {
+            let names: Vec<&str> = me.feats.iter().map(|f| f.name()).collect();
+            l.push_str(&format!("Feats: {}\r\n", names.join(", ")));
+        }
+        let picks = me.pending_feats + me.pending_origin_feats;
+        if picks > 0 {
+            l.push_str(&format!("Feats: {picks} pick(s) available — type `feat list`\r\n"));
+        }
+        l
+    };
     let clan_line = if me.clan.is_empty() { String::new() }
                     else { format!("Clan:  {}\r\n", me.clan) };
     let pvp_line = if me.pkills + me.pdeaths > 0 {
@@ -5219,7 +5232,7 @@ async fn do_score(me: &Character, world: &Arc<Mutex<World>>) -> CmdOutput {
         } else { String::new() }
     };
     let s = format!(
-        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{race_line}{bkgd_line}{clan_line}{pvp_line}\
+        "\r\n{name_line}\r\nLevel: {}\r\nExp:   {exp_str}\r\nHP:    {}/{}\r\nMana:  {}/{}\r\nMove:  {}/{}\r\nClass: {:?}\r\nSex:   {:?}\r\nGold:  {}\r\nRoom:  {}\r\nAC:    {}\r\nPrac:  {}\r\nFood:  {food}\r\nDrink: {drink}\r\n{drunk_line}Align: {} ({})\r\n{god_line}{race_line}{bkgd_line}{feat_line}{clan_line}{pvp_line}\
          Str/Int/Wis/Dex/Con/Cha: {}/{}/{}/{}/{}/{}\r\nProf:  {:+}   Saves: {saves_str}\r\n{spell_line}",
         me.level, me.hp, me.max_hp, me.mana, me.max_mana,
         me.movement, me.max_movement,
@@ -5275,6 +5288,134 @@ fn do_proficiencies(me: &Character) -> CmdOutput {
         }
     }
     CmdOutput::text(s)
+}
+
+/// `feats` — the D&D feats the character holds, grouped by category, with each
+/// feat's one-line summary, the count of unspent feat picks, and the level of
+/// the next class feat (PHB Ch. 5).
+fn do_feats(me: &Character) -> CmdOutput {
+    use crate::players::FeatCategory;
+    let mut s = String::from("\r\nYour feats:\r\n");
+    if me.feats.is_empty() {
+        s.push_str("  (none yet)\r\n");
+    }
+    for cat in [FeatCategory::Origin, FeatCategory::General,
+                FeatCategory::FightingStyle, FeatCategory::EpicBoon] {
+        let in_cat: Vec<_> = me.feats.iter().filter(|f| f.category() == cat).collect();
+        if in_cat.is_empty() { continue; }
+        s.push_str(&format!("  [{}]\r\n", cat.label()));
+        for f in in_cat {
+            s.push_str(&format!("    {:<26} {}\r\n", f.name(), f.summary()));
+        }
+    }
+    if me.pending_origin_feats > 0 {
+        s.push_str(&format!(
+            "\r\n  You have {} Versatile pick(s) — Origin feats only.\r\n",
+            me.pending_origin_feats));
+    }
+    if me.pending_feats > 0 {
+        s.push_str(&format!(
+            "  You have {} class feat pick(s) — any feat you qualify for.\r\n",
+            me.pending_feats));
+    }
+    if me.pending_origin_feats > 0 || me.pending_feats > 0 {
+        s.push_str("  `feat list` to see your options, then `feat <name>` to choose.\r\n");
+    } else if me.level < Character::MAX_MORTAL_LEVEL
+        && me.class != crate::players::Class::Undefined
+    {
+        if let Some(next) = me.class.feat_milestone_levels()
+            .into_iter().find(|&l| l > me.level)
+        {
+            s.push_str(&format!("\r\n  Your next class feat comes at level {next}.\r\n"));
+        }
+    }
+    CmdOutput::text(s)
+}
+
+/// `feat` — the interactive feat chooser (PHB Ch. 5).  `feat` shows your held
+/// feats and pending picks; `feat list` lists the feats you currently qualify
+/// for; `feat <name>` spends a pending pick on a qualifying feat.  Versatile
+/// (Human) picks may be spent only on Origin feats; class picks on any feat you
+/// qualify for.
+fn do_feat(arg: &str, me: &mut Character) -> CmdOutput {
+    use crate::players::FeatCategory;
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return do_feats(me);
+    }
+    // `feat list` — what you can pick right now.
+    if arg.eq_ignore_ascii_case("list") || arg.eq_ignore_ascii_case("choices") {
+        if me.pending_feats <= 0 && me.pending_origin_feats <= 0 {
+            return CmdOutput::text(
+                "\r\nYou have no feat picks to spend right now.\r\n".to_string());
+        }
+        let options = me.qualifying_feats();
+        let mut s = String::from("\r\n");
+        // Versatile picks: Origin feats only.
+        if me.pending_origin_feats > 0 {
+            s.push_str(&format!(
+                "Versatile pick(s): {} — choose an Origin feat:\r\n",
+                me.pending_origin_feats));
+            for f in options.iter().filter(|f| f.category() == FeatCategory::Origin) {
+                s.push_str(&format!("    {:<26} {}\r\n", f.name(), f.summary()));
+            }
+        }
+        // Class picks: any qualifying feat, grouped by category.
+        if me.pending_feats > 0 {
+            s.push_str(&format!(
+                "Class feat pick(s): {} — choose any feat you qualify for:\r\n",
+                me.pending_feats));
+            for cat in [FeatCategory::Origin, FeatCategory::General,
+                        FeatCategory::FightingStyle, FeatCategory::EpicBoon] {
+                let in_cat: Vec<_> = options.iter().filter(|f| f.category() == cat).collect();
+                if in_cat.is_empty() { continue; }
+                s.push_str(&format!("  [{}]\r\n", cat.label()));
+                for f in in_cat {
+                    s.push_str(&format!("    {:<26} {}\r\n", f.name(), f.summary()));
+                }
+            }
+        }
+        return CmdOutput::text(s);
+    }
+    // Otherwise treat the argument as a feat name to choose.
+    if me.pending_feats <= 0 && me.pending_origin_feats <= 0 {
+        return CmdOutput::text(
+            "\r\nYou have no feat picks to spend.  (See `feats`.)\r\n".to_string());
+    }
+    let Some(ft) = crate::players::Feat::parse_name(arg) else {
+        return CmdOutput::text(format!(
+            "\r\nThere is no feat called '{arg}'.  Try `feat list`.\r\n"));
+    };
+    if !me.qualifying_feats().contains(&ft) {
+        let reason = if !ft.repeatable() && me.has_feat(ft) {
+            "you already have that feat"
+        } else {
+            "you don't meet its prerequisites"
+        };
+        return CmdOutput::text(format!(
+            "\r\nYou can't take {} — {reason}.\r\n", ft.name()));
+    }
+    // Decide which pick to spend: a Versatile pick covers Origin feats only;
+    // otherwise spend a class pick.
+    let is_origin = ft.category() == FeatCategory::Origin;
+    if is_origin && me.pending_origin_feats > 0 {
+        me.pending_origin_feats -= 1;
+    } else if me.pending_feats > 0 {
+        me.pending_feats -= 1;
+    } else {
+        // Only a Versatile pick remains, but this isn't an Origin feat.
+        return CmdOutput::text(format!(
+            "\r\nYour remaining pick is a Versatile pick — it can only be spent on an \
+             Origin feat, not {}.\r\n", ft.name()));
+    }
+    me.grant_feat(ft);
+    let remaining = me.pending_feats + me.pending_origin_feats;
+    let tail = if remaining > 0 {
+        format!("  ({remaining} feat pick(s) remaining.)\r\n")
+    } else { String::new() };
+    CmdOutput::text(format!(
+        "\r\nYou gain the {} feat!\r\n  {}\r\n{tail}",
+        ft.name(), ft.summary()))
 }
 
 /// `check [<skill> [dc]]` — D&D ability check (d20 + ability modifier +

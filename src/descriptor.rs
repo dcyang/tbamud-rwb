@@ -382,6 +382,9 @@ pub async fn handle_connection(
                     god:              p_ref.map(|p| p.god.clone()).unwrap_or_default(),
                     background:       p_ref.map(|p| p.background.clone()).unwrap_or_default(),
                     species:          p_ref.map(|p| p.species).unwrap_or_default(),
+                    feats:            p_ref.map(|p| p.feats.clone()).unwrap_or_default(),
+                    pending_feats:    p_ref.map(|p| p.pending_feats).unwrap_or(0),
+                    pending_origin_feats: p_ref.map(|p| p.pending_origin_feats).unwrap_or(0),
                     muted:            p_ref.map(|p| p.muted).unwrap_or(false),
                     frozen:           p_ref.map(|p| p.frozen).unwrap_or(false),
                     afk_msg:          None,
@@ -390,6 +393,22 @@ pub async fn handle_connection(
                     hunters_mark: None,
                     ability_cooldowns: std::collections::HashMap::new(),
                 };
+
+                // Associate the background's Origin feat (PHB Chapter 5; fixed
+                // by the background) on a brand-new character, and grant a feat
+                // pick for Human's Versatile trait (chosen interactively via the
+                // `feat` command).  Done once, when no feats are recorded yet.
+                if me.feats.is_empty() && me.pending_feats == 0
+                    && me.pending_origin_feats == 0
+                {
+                    if let Some(ft) = crate::players::background_feat(&me.background) {
+                        me.feats.push(ft);
+                    }
+                    if me.species == crate::players::Species::Human {
+                        // Human's Versatile trait: an Origin feat of your choice.
+                        me.pending_origin_feats += 1;
+                    }
+                }
 
                 // Seed a brand-new mortal's ability scores from the PHB
                 // "Standard Array by Class" (logical p.38), so class choice
@@ -417,8 +436,10 @@ pub async fn handle_connection(
                     // the level-1 pools reflect the standard array's Con/casting
                     // stat rather than the throwaway 3d6 rolled above.
                     me.max_hp = Character::init_hp_for_class(me.class, me.con, me.level.max(1));
-                    // Dwarven Toughness: +1 max HP per level (PHB p.188).
-                    me.max_hp += me.species.hp_bonus_per_level() * me.level.max(1);
+                    // Dwarven Toughness (+1/level) and the Tough feat (+2/level)
+                    // raise the level-1 HP maximum (PHB p.188 / Chapter 5).
+                    me.max_hp += (me.species.hp_bonus_per_level()
+                        + me.feats_extra_hp_per_level()) * me.level.max(1);
                     me.hp = me.max_hp;
                     let cast_stat = if me.class.base() == crate::players::Class::Cleric {
                         me.wis
@@ -836,6 +857,9 @@ async fn run_game_session(
             rec.god             = me.god.clone();
             rec.background      = me.background.clone();
             rec.species         = me.species;
+            rec.feats           = me.feats.clone();
+            rec.pending_feats   = me.pending_feats;
+            rec.pending_origin_feats = me.pending_origin_feats;
             rec.muted           = me.muted;
             rec.frozen          = me.frozen;
             rec.notes           = me.notes.clone();

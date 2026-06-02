@@ -259,7 +259,365 @@ impl Species {
     }
 }
 
+// ===========================================================================
+// D&D 5e (2024 PHB Chapter 5, logical pp.199–211) FEATS
+// ===========================================================================
+
+/// The four feat categories, in the order the handbook presents them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatCategory { Origin, General, FightingStyle, EpicBoon }
+
+impl FeatCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            FeatCategory::Origin        => "Origin",
+            FeatCategory::General       => "General",
+            FeatCategory::FightingStyle => "Fighting Style",
+            FeatCategory::EpicBoon      => "Epic Boon",
+        }
+    }
+}
+
+/// Static metadata for a feat (PHB Chapter 5).  Ability masks are in
+/// STR,DEX,CON,INT,WIS,CHA order.  `ability_req` is an "any-of at 13+" gate;
+/// `asi_mask`/`asi_amount` describe the feat's Ability Score Increase (the set
+/// of abilities it may raise and by how much — 0 = the feat grants no ASI).
+pub struct FeatInfo {
+    pub name:                &'static str,
+    pub category:            FeatCategory,
+    pub min_level:           i32,
+    pub ability_req:         [bool; 6],
+    pub needs_spellcasting:  bool,
+    pub needs_fighting_style: bool,
+    pub repeatable:          bool,
+    pub asi_mask:            [bool; 6],
+    pub asi_amount:          i32,
+    pub summary:             &'static str,
+}
+
+const NO_ABIL: [bool; 6] = [false; 6];
+// Common ASI masks (STR,DEX,CON,INT,WIS,CHA).
+const A_STRDEX: [bool; 6] = [true, true, false, false, false, false];
+const A_STRCON: [bool; 6] = [true, false, true, false, false, false];
+const A_DEXCON: [bool; 6] = [false, true, true, false, false, false];
+const A_DEXINT: [bool; 6] = [false, true, false, true, false, false];
+const A_CONWIS: [bool; 6] = [false, false, true, false, true, false];
+const A_MENTAL: [bool; 6] = [false, false, false, true, true, true];  // INT/WIS/CHA
+const A_INTWIS: [bool; 6] = [false, false, false, true, true, false];
+const A_WISCHA: [bool; 6] = [false, false, false, false, true, true];
+const A_STR:    [bool; 6] = [true, false, false, false, false, false];
+const A_DEX:    [bool; 6] = [false, true, false, false, false, false];
+const A_CON:    [bool; 6] = [false, false, true, false, false, false];
+const A_INT:    [bool; 6] = [false, false, false, true, false, false];
+const A_CHA:    [bool; 6] = [false, false, false, false, false, true];
+const A_ANY:    [bool; 6] = [true, true, true, true, true, true];
+
+/// Every feat in the PHB (2024) Feat List, grouped by category and listed in
+/// handbook order within each category.  Persisted by name on `Feat:` lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feat {
+    // --- Origin (logical pp.200–203) ---
+    Alert, Crafter, Healer, Lucky, MagicInitiate, Musician, SavageAttacker,
+    Skilled, TavernBrawler, Tough,
+    // --- General (logical pp.202–209) ---
+    AbilityScoreImprovement, Actor, Athlete, Chef, Charger, CrossbowExpert,
+    Crusher, DefensiveDuelist, DualWielder, Durable, ElementalAdept, FeyTouched,
+    Grappler, GreatWeaponMaster, HeavilyArmored, HeavyArmorMaster,
+    InspiringLeader, KeenMind, LightlyArmored, MageSlayer, MartialWeaponTraining,
+    MediumArmorMaster, ModeratelyArmored, MountedCombatant, Observant, Piercer,
+    Poisoner, PolearmMaster, Resilient, RitualCaster, Sentinel, ShadowTouched,
+    Sharpshooter, ShieldMaster, SkillExpert, Skulker, Slasher, Speedy, SpellSniper,
+    Telekinetic, Telepathic, WarCaster, WeaponMaster,
+    // --- Fighting Style (logical pp.209–210) ---
+    Archery, BlindFighting, Defense, Dueling, GreatWeaponFighting, Interception,
+    Protection, ThrownWeaponFighting, TwoWeaponFighting, UnarmedFighting,
+    // --- Epic Boon (logical pp.210–211) ---
+    BoonOfCombatProwess, BoonOfDimensionalTravel, BoonOfEnergyResistance,
+    BoonOfFate, BoonOfFortitude, BoonOfIrresistibleOffense, BoonOfRecovery,
+    BoonOfSkill, BoonOfSpeed, BoonOfSpellRecall, BoonOfTheNightSpirit,
+    BoonOfTruesight,
+}
+
+impl Feat {
+    /// All feats, in handbook order (Origin, General, Fighting Style, Epic Boon).
+    pub fn all() -> &'static [Feat] {
+        use Feat::*;
+        &[
+            Alert, Crafter, Healer, Lucky, MagicInitiate, Musician, SavageAttacker,
+            Skilled, TavernBrawler, Tough,
+            AbilityScoreImprovement, Actor, Athlete, Chef, Charger, CrossbowExpert,
+            Crusher, DefensiveDuelist, DualWielder, Durable, ElementalAdept, FeyTouched,
+            Grappler, GreatWeaponMaster, HeavilyArmored, HeavyArmorMaster,
+            InspiringLeader, KeenMind, LightlyArmored, MageSlayer, MartialWeaponTraining,
+            MediumArmorMaster, ModeratelyArmored, MountedCombatant, Observant, Piercer,
+            Poisoner, PolearmMaster, Resilient, RitualCaster, Sentinel, ShadowTouched,
+            Sharpshooter, ShieldMaster, SkillExpert, Skulker, Slasher, Speedy, SpellSniper,
+            Telekinetic, Telepathic, WarCaster, WeaponMaster,
+            Archery, BlindFighting, Defense, Dueling, GreatWeaponFighting, Interception,
+            Protection, ThrownWeaponFighting, TwoWeaponFighting, UnarmedFighting,
+            BoonOfCombatProwess, BoonOfDimensionalTravel, BoonOfEnergyResistance,
+            BoonOfFate, BoonOfFortitude, BoonOfIrresistibleOffense, BoonOfRecovery,
+            BoonOfSkill, BoonOfSpeed, BoonOfSpellRecall, BoonOfTheNightSpirit,
+            BoonOfTruesight,
+        ]
+    }
+
+    pub fn name(self) -> &'static str { self.info().name }
+    pub fn category(self) -> FeatCategory { self.info().category }
+    pub fn repeatable(self) -> bool { self.info().repeatable }
+    pub fn summary(self) -> &'static str { self.info().summary }
+
+    /// Case-insensitive full-name match (spaces/apostrophes/hyphens ignored).
+    pub fn parse_name(s: &str) -> Option<Feat> {
+        let norm = |x: &str| x.to_ascii_lowercase()
+            .chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
+        let target = norm(s);
+        if target.is_empty() { return None; }
+        Self::all().iter().copied().find(|f| norm(f.name()) == target)
+    }
+
+    /// Whether a character of the given level / ability scores (STR,DEX,CON,INT,
+    /// WIS,CHA) / class features meets this feat's prerequisites.
+    pub fn meets_prereqs(self, level: i32, scores: [i32; 6],
+                         has_spellcasting: bool, has_fighting_style: bool) -> bool {
+        let i = self.info();
+        if level < i.min_level { return false; }
+        if i.needs_spellcasting && !has_spellcasting { return false; }
+        if i.needs_fighting_style && !has_fighting_style { return false; }
+        if i.ability_req != NO_ABIL {
+            let ok = (0..6).any(|k| i.ability_req[k] && scores[k] >= 13);
+            if !ok { return false; }
+        }
+        true
+    }
+
+    /// The full metadata record (PHB Chapter 5).
+    pub fn info(self) -> FeatInfo {
+        use Feat::*;
+        use FeatCategory::*;
+        // helper to build a record with the common defaults
+        macro_rules! f {
+            ($name:expr, $cat:expr, $lvl:expr, $req:expr, $sc:expr, $fs:expr,
+             $rep:expr, $asi:expr, $amt:expr, $sum:expr) => {
+                FeatInfo { name: $name, category: $cat, min_level: $lvl,
+                    ability_req: $req, needs_spellcasting: $sc,
+                    needs_fighting_style: $fs, repeatable: $rep,
+                    asi_mask: $asi, asi_amount: $amt, summary: $sum }
+            };
+        }
+        match self {
+            // ---- Origin (no ability req, no ASI) ----
+            Alert          => f!("Alert", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Initiative proficiency; swap initiative with a willing ally."),
+            Crafter        => f!("Crafter", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Proficiency with three Artisan's Tools; 20% discount; fast crafting."),
+            Healer         => f!("Healer", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Battle Medic (heal with a Healer's Kit); reroll 1s on healing."),
+            Lucky          => f!("Lucky", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Luck Points (= proficiency bonus): grant advantage / impose disadvantage."),
+            MagicInitiate  => f!("Magic Initiate", Origin, 1, NO_ABIL, false, false, true, NO_ABIL, 0,
+                "Two cantrips and a level-1 spell from a chosen class spell list."),
+            Musician       => f!("Musician", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Proficiency with three instruments; Encouraging Song grants Heroic Inspiration."),
+            SavageAttacker => f!("Savage Attacker", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Once per turn, roll your weapon's damage dice twice and use either total."),
+            Skilled        => f!("Skilled", Origin, 1, NO_ABIL, false, false, true, NO_ABIL, 0,
+                "Proficiency in any three skills or tools of your choice."),
+            TavernBrawler  => f!("Tavern Brawler", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Improved unarmed strike (1d4); reroll 1s; improvised weapons; push."),
+            Tough          => f!("Tough", Origin, 1, NO_ABIL, false, false, false, NO_ABIL, 0,
+                "Hit Point maximum increases by 2 per character level."),
+            // ---- General (Level 4+) ----
+            AbilityScoreImprovement => f!("Ability Score Improvement", General, 4, NO_ABIL, false, false, true, A_ANY, 2,
+                "Increase one ability score by 2, or two by 1 (max 20)."),
+            Actor          => f!("Actor", General, 4, A_CHA, false, false, false, A_CHA, 1,
+                "+1 CHA; impersonation advantage; mimicry."),
+            Athlete        => f!("Athlete", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; climb speed; stand from prone cheaply; running jumps."),
+            Chef           => f!("Chef", General, 4, NO_ABIL, false, false, false, A_CONWIS, 1,
+                "+1 CON/WIS; cook food that heals on a short rest; bolstering treats."),
+            Charger        => f!("Charger", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; improved Dash; charge attack bonus."),
+            CrossbowExpert => f!("Crossbow Expert", General, 4, A_DEX, false, false, false, A_DEX, 1,
+                "+1 DEX; ignore crossbow loading; fire in melee; dual wield bonus."),
+            Crusher        => f!("Crusher", General, 4, NO_ABIL, false, false, false, A_STRCON, 1,
+                "+1 STR/CON; push on bludgeoning hit; advantage after a crit."),
+            DefensiveDuelist => f!("Defensive Duelist", General, 4, A_DEX, false, false, false, A_DEX, 1,
+                "+1 DEX; Parry reaction adds proficiency to AC with a finesse weapon."),
+            DualWielder    => f!("Dual Wielder", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; extra off-hand attack; quick draw two weapons."),
+            Durable        => f!("Durable", General, 4, NO_ABIL, false, false, false, A_CON, 1,
+                "+1 CON; advantage on death saves; bonus-action self-heal."),
+            ElementalAdept => f!("Elemental Adept", General, 4, NO_ABIL, true, false, true, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; your spell damage of a chosen type ignores resistance."),
+            FeyTouched     => f!("Fey-Touched", General, 4, NO_ABIL, false, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; Misty Step and a Divination/Enchantment level-1 spell."),
+            Grappler       => f!("Grappler", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; grab on unarmed hit; advantage vs grappled foes."),
+            GreatWeaponMaster => f!("Great Weapon Master", General, 4, A_STR, false, false, false, A_STR, 1,
+                "+1 STR; bonus damage with Heavy weapons; bonus attack on a kill/crit."),
+            HeavilyArmored => f!("Heavily Armored", General, 4, NO_ABIL, false, false, false, A_STRCON, 1,
+                "+1 STR/CON; training with Heavy armor (requires Medium Armor Training)."),
+            HeavyArmorMaster => f!("Heavy Armor Master", General, 4, NO_ABIL, false, false, false, A_STRCON, 1,
+                "+1 STR/CON; reduce B/P/S damage in Heavy armor (requires Heavy Armor Training)."),
+            InspiringLeader => f!("Inspiring Leader", General, 4, A_WISCHA, false, false, false, A_WISCHA, 1,
+                "+1 WIS/CHA; rally allies for temporary Hit Points after a rest."),
+            KeenMind       => f!("Keen Mind", General, 4, A_INT, false, false, false, A_INT, 1,
+                "+1 INT; proficiency/expertise in a knowledge skill; Study as a bonus action."),
+            LightlyArmored => f!("Lightly Armored", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; training with Light armor and Shields."),
+            MageSlayer     => f!("Mage Slayer", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; break concentration on a hit; reroll a failed mental save."),
+            MartialWeaponTraining => f!("Martial Weapon Training", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; proficiency with Martial weapons."),
+            MediumArmorMaster => f!("Medium Armor Master", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; better Medium-armor DEX bonus (requires Medium Armor Training)."),
+            ModeratelyArmored => f!("Moderately Armored", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; training with Medium armor (requires Light Armor Training)."),
+            MountedCombatant => f!("Mounted Combatant", General, 4, NO_ABIL, false, false, false, [true,true,false,false,true,false], 1,
+                "+1 STR/DEX/WIS; mounted-combat advantages."),
+            Observant      => f!("Observant", General, 4, A_INTWIS, false, false, false, A_INTWIS, 1,
+                "+1 INT/WIS; proficiency/expertise in a senses skill; Search as a bonus action."),
+            Piercer        => f!("Piercer", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; reroll a piercing damage die; extra die on a piercing crit."),
+            Poisoner       => f!("Poisoner", General, 4, NO_ABIL, false, false, false, A_DEXINT, 1,
+                "+1 DEX/INT; ignore poison resistance; brew and apply poisons."),
+            PolearmMaster  => f!("Polearm Master", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; bonus-action butt-end strike; reactive strike on reach."),
+            Resilient      => f!("Resilient", General, 4, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 to one ability; saving-throw proficiency in that ability."),
+            RitualCaster   => f!("Ritual Caster", General, 4, A_MENTAL, false, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; learn and cast ritual spells."),
+            Sentinel       => f!("Sentinel", General, 4, A_STRDEX, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; opportunity attacks halt foes; punish enemies who ignore you."),
+            ShadowTouched  => f!("Shadow-Touched", General, 4, NO_ABIL, false, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; Invisibility and an Illusion/Necromancy level-1 spell."),
+            Sharpshooter   => f!("Sharpshooter", General, 4, A_DEX, false, false, false, A_DEX, 1,
+                "+1 DEX; ranged attacks ignore cover; no long-range disadvantage."),
+            ShieldMaster   => f!("Shield Master", General, 4, NO_ABIL, false, false, false, A_STR, 1,
+                "+1 STR; shield bash; interpose shield (requires Shield Training)."),
+            SkillExpert    => f!("Skill Expert", General, 4, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 to one ability; a skill proficiency and an expertise."),
+            Skulker        => f!("Skulker", General, 4, A_DEX, false, false, false, A_DEX, 1,
+                "+1 DEX; blindsight 10 ft; stealth advantages in combat."),
+            Slasher        => f!("Slasher", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; slow foes on a slashing hit; disadvantage after a crit."),
+            Speedy         => f!("Speedy", General, 4, A_DEXCON, false, false, false, A_DEXCON, 1,
+                "+1 DEX/CON; Speed +10; ignore difficult terrain on a Dash."),
+            SpellSniper    => f!("Spell Sniper", General, 4, NO_ABIL, true, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; spell attacks ignore cover; increased spell range."),
+            Telekinetic    => f!("Telekinetic", General, 4, NO_ABIL, false, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; Mage Hand at will; telekinetic shove."),
+            Telepathic     => f!("Telepathic", General, 4, NO_ABIL, false, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; telepathic speech; Detect Thoughts prepared."),
+            WarCaster      => f!("War Caster", General, 4, NO_ABIL, true, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA; advantage on concentration; cast as an opportunity attack."),
+            WeaponMaster   => f!("Weapon Master", General, 4, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX; use the mastery property of a chosen weapon."),
+            // ---- Fighting Style (requires a Fighting Style feature) ----
+            Archery        => f!("Archery", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "+2 to attack rolls with ranged weapons."),
+            BlindFighting  => f!("Blind Fighting", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Blindsight 10 ft."),
+            Defense        => f!("Defense", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "+1 AC while wearing armor."),
+            Dueling        => f!("Dueling", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "+2 damage with a one-handed melee weapon and no other weapon."),
+            GreatWeaponFighting => f!("Great Weapon Fighting", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Reroll 1s and 2s on two-handed melee damage dice."),
+            Interception   => f!("Interception", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Reaction to reduce damage to a nearby creature."),
+            Protection     => f!("Protection", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Shield reaction imposes disadvantage on an attacker."),
+            ThrownWeaponFighting => f!("Thrown Weapon Fighting", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "+2 damage with thrown weapons."),
+            TwoWeaponFighting => f!("Two-Weapon Fighting", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Add ability modifier to off-hand attack damage."),
+            UnarmedFighting => f!("Unarmed Fighting", FightingStyle, 1, NO_ABIL, false, true, false, NO_ABIL, 0,
+                "Unarmed strikes deal 1d6 (1d8 empty-handed); grapple damage."),
+            // ---- Epic Boon (Level 19+; ASI cap is 30) ----
+            BoonOfCombatProwess => f!("Boon of Combat Prowess", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); turn a miss into a hit once per turn."),
+            BoonOfDimensionalTravel => f!("Boon of Dimensional Travel", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); teleport 30 ft after the Attack/Magic action."),
+            BoonOfEnergyResistance => f!("Boon of Energy Resistance", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); resistance to two damage types; redirect damage."),
+            BoonOfFate     => f!("Boon of Fate", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); add 2d4 to a nearby creature's d20 test."),
+            BoonOfFortitude => f!("Boon of Fortitude", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); Hit Point maximum +40; regain extra HP on healing."),
+            BoonOfIrresistibleOffense => f!("Boon of Irresistible Offense", EpicBoon, 19, NO_ABIL, false, false, false, A_STRDEX, 1,
+                "+1 STR/DEX (max 30); your weapon damage ignores resistance; crit bonus."),
+            BoonOfRecovery => f!("Boon of Recovery", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); Last Stand; a pool of recovery dice."),
+            BoonOfSkill    => f!("Boon of Skill", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); proficiency in all skills; an expertise."),
+            BoonOfSpeed    => f!("Boon of Speed", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); Speed +30; Escape Artist."),
+            BoonOfSpellRecall => f!("Boon of Spell Recall", EpicBoon, 19, NO_ABIL, true, false, false, A_MENTAL, 1,
+                "+1 INT/WIS/CHA (max 30); spell slots sometimes aren't expended."),
+            BoonOfTheNightSpirit => f!("Boon of the Night Spirit", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); invisibility and damage resistance in shadow."),
+            BoonOfTruesight => f!("Boon of Truesight", EpicBoon, 19, NO_ABIL, false, false, false, A_ANY, 1,
+                "+1 ability (max 30); Truesight 60 ft."),
+        }
+    }
+}
+
+/// The Origin feat each background grants (PHB backgrounds, logical pp.178–185).
+/// (Magic Initiate's spell list follows the background: Acolyte→Cleric,
+/// Guide→Druid, Sage→Wizard.)
+pub fn background_feat(name: &str) -> Option<Feat> {
+    Some(match name {
+        "Acolyte"     => Feat::MagicInitiate,
+        "Artisan"     => Feat::Crafter,
+        "Charlatan"   => Feat::Skilled,
+        "Criminal"    => Feat::Alert,
+        "Entertainer" => Feat::Musician,
+        "Farmer"      => Feat::Tough,
+        "Guard"       => Feat::Alert,
+        "Guide"       => Feat::MagicInitiate,
+        "Hermit"      => Feat::Healer,
+        "Merchant"    => Feat::Lucky,
+        "Noble"       => Feat::Skilled,
+        "Sage"        => Feat::MagicInitiate,
+        "Sailor"      => Feat::TavernBrawler,
+        "Scribe"      => Feat::Skilled,
+        "Soldier"     => Feat::SavageAttacker,
+        "Wayfarer"    => Feat::Lucky,
+        _ => return None,
+    })
+}
+
 impl Class {
+    /// Whether this class has a Spellcasting or Pact Magic feature (gates the
+    /// spellcasting-prereq feats).  All but the four pure-martial classes.
+    pub fn has_spellcasting(self) -> bool {
+        !matches!(self, Class::Barbarian | Class::Fighter | Class::Monk
+                       | Class::Rogue   | Class::Undefined)
+    }
+
+    /// Whether this class has a Fighting Style feature (gates Fighting Style
+    /// feats): Fighter, Paladin, and Ranger in the base PHB rules.
+    pub fn has_fighting_style(self) -> bool {
+        matches!(self, Class::Fighter | Class::Paladin | Class::Ranger)
+    }
+
+    /// Character levels at which this class gains a feat (the 2024 PHB
+    /// ASI/feat levels 4/8/12/16/19, plus Fighter's 6/14 and Rogue's 10),
+    /// extrapolated past level 20 every 4 levels for the 30-level mortal range.
+    pub fn feat_milestone_levels(self) -> Vec<i32> {
+        let mut v = vec![4, 8, 12, 16, 19, 23, 27];
+        match self {
+            Class::Fighter => v.extend_from_slice(&[6, 14, 21, 29]),
+            Class::Rogue   => v.extend_from_slice(&[10, 25]),
+            _ => {}
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     pub fn from_i8(v: i8) -> Self {
         match v {
             0 => Self::Wizard,
@@ -567,6 +925,17 @@ pub struct PlayerRecord {
     pub background:    String,
     /// D&D 5e species chosen at creation (PHB pp.186–197; Undefined = none).
     pub species:       Species,
+    /// D&D 5e feats the character holds (PHB Chapter 5).  Origin feats are
+    /// associated at creation from the background; later feats are chosen
+    /// interactively.  Persisted one per `Feat:` line.
+    pub feats:         Vec<Feat>,
+    /// Unspent class feat picks (PHB Chapter 5): +1 at each class feat-milestone
+    /// level, spendable on any feat the character qualifies for (via the `feat`
+    /// command).  Persisted as `FtPk:`.
+    pub pending_feats: i32,
+    /// Unspent Origin-only feat picks: +1 for Human's Versatile trait at
+    /// creation, spendable only on Origin feats.  Persisted as `FtPo:`.
+    pub pending_origin_feats: i32,
     /// Chosen class starting-equipment option (0 = none/legacy, 1 = A, 2 = B,
     /// 3 = C for Fighter).  Consumed once at first login (PHB Chapter 3).
     pub start_kit_class: i32,
@@ -820,6 +1189,9 @@ impl PlayerDb {
                 "God"  => rec.god  = val.to_string(),
                 "Bkgd" => rec.background = val.to_string(),
                 "Spec" => rec.species = Species::parse_name(val).unwrap_or_default(),
+                "Feat" => { if let Some(ft) = Feat::parse_name(val) { rec.feats.push(ft); } }
+                "FtPk" => rec.pending_feats = val.parse().unwrap_or(0),
+                "FtPo" => rec.pending_origin_feats = val.parse().unwrap_or(0),
                 "SKit" => rec.start_kit_background = val.parse().unwrap_or(0),
                 "CKit" => rec.start_kit_class = val.parse().unwrap_or(0),
                 "ADst" => rec.ability_dist = val.parse().unwrap_or(0),
@@ -943,6 +1315,9 @@ impl PlayerDb {
         if !rec.god.is_empty()  { writeln!(f, "God : {}", rec.god)?; }
         if !rec.background.is_empty() { writeln!(f, "Bkgd: {}", rec.background)?; }
         if rec.species != Species::Undefined { writeln!(f, "Spec: {}", rec.species.as_str())?; }
+        for ft in &rec.feats { writeln!(f, "Feat: {}", ft.name())?; }
+        if rec.pending_feats != 0 { writeln!(f, "FtPk: {}", rec.pending_feats)?; }
+        if rec.pending_origin_feats != 0 { writeln!(f, "FtPo: {}", rec.pending_origin_feats)?; }
         if rec.start_kit_background != 0 { writeln!(f, "SKit: {}", rec.start_kit_background)?; }
         if rec.start_kit_class != 0 { writeln!(f, "CKit: {}", rec.start_kit_class)?; }
         if rec.ability_dist != 0 { writeln!(f, "ADst: {}", rec.ability_dist)?; }

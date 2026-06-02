@@ -989,6 +989,18 @@ pub struct Character {
     /// darkvision, Dwarven Toughness HP, Gnomish Cunning save advantage, and
     /// Halfling Luck; the rest of each species' traits are flavour for now.
     pub species:      crate::players::Species,
+    /// D&D 5e feats (PHB Chapter 5).  Persisted.  The background's Origin feat
+    /// is associated at creation; all other feats are chosen interactively via
+    /// the `feat` command.  Tough and the Ability Score Increase / Boon-of-
+    /// Fortitude bumps are mechanically applied; the rest are recorded/flavour.
+    pub feats:        Vec<crate::players::Feat>,
+    /// Unspent class feat picks (PHB Chapter 5): +1 at each class feat-milestone
+    /// level, spendable on any qualifying feat via the `feat` command.
+    /// Persisted (`FtPk:`).
+    pub pending_feats: i32,
+    /// Unspent Origin-only feat picks: +1 for Human's Versatile trait at
+    /// creation, spendable only on Origin feats.  Persisted (`FtPo:`).
+    pub pending_origin_feats: i32,
     /// Muted: cannot use chat channels (say/tell/gossip/auction/...).
     /// Set by `mute` immortal command.  Persisted.
     pub muted:        bool,
@@ -1225,6 +1237,67 @@ impl Character {
     pub fn has_darkvision(&self) -> bool {
         self.species.darkvision() > 0
             || self.affects.iter().any(|a| a.skill == Skill::Infravision)
+    }
+
+    /// Whether the character holds the given feat.
+    pub fn has_feat(&self, ft: crate::players::Feat) -> bool {
+        self.feats.contains(&ft)
+    }
+
+    /// Extra max-HP per character level from feats (Tough: +2/level).
+    pub fn feats_extra_hp_per_level(&self) -> i32 {
+        if self.has_feat(crate::players::Feat::Tough) { 2 } else { 0 }
+    }
+
+    /// Mutable access to an ability score by STR,DEX,CON,INT,WIS,CHA index.
+    fn ability_mut(&mut self, idx: usize) -> &mut i32 {
+        match idx {
+            0 => &mut self.str_, 1 => &mut self.dex, 2 => &mut self.con,
+            3 => &mut self.int_, 4 => &mut self.wis, _ => &mut self.cha,
+        }
+    }
+
+    /// Add a feat the character has earned, applying its Ability Score Increase
+    /// (if any).  Non-repeatable feats already held are skipped.  The ASI raises
+    /// the class's primary ability when that ability is eligible, else the first
+    /// eligible ability; capped at 20 (30 for Epic Boon feats).
+    pub fn grant_feat(&mut self, ft: crate::players::Feat) {
+        use crate::players::FeatCategory;
+        let info = ft.info();
+        if !info.repeatable && self.has_feat(ft) { return; }
+        // Apply the Ability Score Increase, if the feat grants one.
+        if info.asi_amount > 0 && info.asi_mask != [false; 6] {
+            let cap = if info.category == FeatCategory::EpicBoon { 30 } else { 20 };
+            let primary = self.class.primary_abilities();
+            // Prefer a primary ability the feat can raise; else the first one.
+            let idx = (0..6).find(|&k| info.asi_mask[k] && primary[k])
+                .or_else(|| (0..6).find(|&k| info.asi_mask[k]));
+            if let Some(k) = idx {
+                let cur = *self.ability_mut(k);
+                *self.ability_mut(k) = (cur + info.asi_amount).min(cap);
+            }
+        }
+        // Boon of Fortitude also raises the Hit Point maximum by 40.
+        if ft == crate::players::Feat::BoonOfFortitude {
+            self.max_hp += 40;
+            self.hp = self.hp.min(self.max_hp);
+        }
+        self.feats.push(ft);
+    }
+
+    /// Feats the character currently qualifies for and may pick (meets level /
+    /// ability / class-feature prerequisites and either repeatable or not yet
+    /// held).  Drives the interactive `feat` chooser.
+    pub fn qualifying_feats(&self) -> Vec<crate::players::Feat> {
+        use crate::players::Feat;
+        let scores = [self.str_, self.dex, self.con, self.int_, self.wis, self.cha];
+        let sc = self.class.has_spellcasting();
+        let fs = self.class.has_fighting_style();
+        let lvl = self.level.max(1); // a fresh level-0 mortal can still pick Origin feats
+        Feat::all().iter().copied()
+            .filter(|ft| ft.meets_prereqs(lvl, scores, sc, fs))
+            .filter(|ft| ft.repeatable() || !self.has_feat(*ft))
+            .collect()
     }
 }
 
@@ -1786,10 +1859,12 @@ impl Character {
             && self.exp >= Self::exp_for_level(self.level)
         {
             self.level += 1;
-            // Class-specific HP gain + CON bonus (+ Dwarven Toughness), heal full.
+            // Class-specific HP gain + CON bonus (+ Dwarven Toughness / Tough),
+            // heal full.
             let con_bonus = (self.con - 10).max(0) / 2;
             self.max_hp   += Self::hp_per_level(self.class) + con_bonus
-                + self.species.hp_bonus_per_level();
+                + self.species.hp_bonus_per_level()
+                + self.feats_extra_hp_per_level();
             self.hp = self.max_hp;
             // Mana gain: scales with INT for arcane, WIS for divine.
             let casting_stat = match self.class.base() {
@@ -1806,6 +1881,11 @@ impl Character {
             // haven't started practising.
             for (_, pct) in self.skills.iter_mut() {
                 *pct = (*pct).saturating_add(5).min(100);
+            }
+            // Class feat milestone (PHB Chapter 5): grant a feat pick to spend
+            // interactively via the `feat` command (instead of auto-selecting).
+            if self.class.feat_milestone_levels().contains(&self.level) {
+                self.pending_feats += 1;
             }
             gained += 1;
         }
