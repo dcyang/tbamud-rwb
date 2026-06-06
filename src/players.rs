@@ -14,7 +14,8 @@ use anyhow::{Context, Result};
 
 // Declare crypt(3) explicitly — libc::crypt is not always re-exported.
 // build.rs adds -lcrypt on Linux to pull in the implementation.
-extern "C" {
+// `unsafe extern` is the edition-2024-required form for extern blocks.
+unsafe extern "C" {
     fn crypt(s: *const libc::c_char, salt: *const libc::c_char) -> *mut libc::c_char;
 }
 
